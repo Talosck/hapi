@@ -36,6 +36,7 @@ function createHarness(
     };
 
     let nextHint = hint;
+    const submitAnswer = vi.fn<(text: string) => void>();
     const questionHandler = new McodeQuestionHandler(
         client,
         backend,
@@ -44,12 +45,14 @@ function createHarness(
             const value = nextHint;
             nextHint = null;
             return value;
-        }
+        },
+        { submitAnswer }
     );
 
     return {
         questionHandler,
         getState: () => state,
+        submitAnswer,
         elicit: (params: unknown) => {
             if (!elicitationHandler) throw new Error('elicitation handler not registered');
             return elicitationHandler(params) as Promise<Record<string, unknown>>;
@@ -98,7 +101,7 @@ const choiceHint: McodeAskUserCallHint = {
 
 describe('McodeQuestionHandler', () => {
     it('surfaces an elicitation form as an ask_user_question request', async () => {
-        const { questionHandler, getState, elicit } = createHarness(choiceHint);
+        const { questionHandler, getState, elicit, submitAnswer } = createHarness(choiceHint);
 
         const resultPromise = elicit(choiceRequest);
 
@@ -125,10 +128,11 @@ describe('McodeQuestionHandler', () => {
             answers: { '0': ['Alpha'] }
         })).resolves.toBe(true);
 
-        await expect(resultPromise).resolves.toEqual({
-            action: 'accept',
-            content: { option_choice: 'alpha' }
-        });
+        // mcode ends the ask_user turn as soon as the question is raised, so
+        // the answer continues the conversation as the next user message; the
+        // elicitation is declined instead of being resumed out of band.
+        await expect(resultPromise).resolves.toEqual({ action: 'decline' });
+        expect(submitAnswer).toHaveBeenCalledWith('Q: Which option do you prefer?\nA: Alpha');
         expect(getState().requests?.['call_function_1']).toBeUndefined();
         expect(getState().completedRequests?.['call_function_1']).toMatchObject({
             tool: 'ask_user_question',
@@ -141,7 +145,7 @@ describe('McodeQuestionHandler', () => {
 
     it('drains queued session updates before reading the ask_user hint', async () => {
         let drained = false;
-        const { questionHandler, getState, elicit } = createHarness(choiceHint, {
+        const { questionHandler, getState, elicit, submitAnswer } = createHarness(choiceHint, {
             drain: async () => {
                 drained = true;
             },
@@ -158,14 +162,12 @@ describe('McodeQuestionHandler', () => {
             approved: true,
             answers: { '0': ['Alpha'] }
         });
-        await expect(resultPromise).resolves.toEqual({
-            action: 'accept',
-            content: { option_choice: 'alpha' }
-        });
+        await expect(resultPromise).resolves.toEqual({ action: 'decline' });
+        expect(submitAnswer).toHaveBeenCalledWith('Q: Which option do you prefer?\nA: Alpha');
     });
 
     it('accepts stable step and option ids from native clients', async () => {
-        const { questionHandler, elicit } = createHarness(choiceHint);
+        const { questionHandler, elicit, submitAnswer } = createHarness(choiceHint);
         const resultPromise = elicit(choiceRequest);
 
         await questionHandler.handleResponse({
@@ -174,10 +176,8 @@ describe('McodeQuestionHandler', () => {
             answers: { option_choice: ['beta'] }
         });
 
-        await expect(resultPromise).resolves.toEqual({
-            action: 'accept',
-            content: { option_choice: 'beta' }
-        });
+        await expect(resultPromise).resolves.toEqual({ action: 'decline' });
+        expect(submitAnswer).toHaveBeenCalledWith('Q: Which option do you prefer?\nA: Beta');
     });
 
     it('maps multi-select choices and the dynamic Other field', async () => {
@@ -195,7 +195,7 @@ describe('McodeQuestionHandler', () => {
                 multiSelect: true
             }]
         };
-        const { questionHandler, elicit } = createHarness(hint);
+        const { questionHandler, elicit, submitAnswer } = createHarness(hint);
         const resultPromise = elicit({
             mode: 'form',
             sessionId: 'acp-session-1',
@@ -224,13 +224,8 @@ describe('McodeQuestionHandler', () => {
             answers: { '0': ['One', 'custom answer'] }
         });
 
-        await expect(resultPromise).resolves.toEqual({
-            action: 'accept',
-            content: {
-                pick: ['one'],
-                pick__other: 'custom answer'
-            }
-        });
+        await expect(resultPromise).resolves.toEqual({ action: 'decline' });
+        expect(submitAnswer).toHaveBeenCalledWith('Q: Pick one or more\nA: One, custom answer');
     });
 
     it('maps a free-form step answer to the step id', async () => {
@@ -245,7 +240,7 @@ describe('McodeQuestionHandler', () => {
                 multiSelect: false
             }]
         };
-        const { questionHandler, elicit } = createHarness(hint);
+        const { questionHandler, elicit, submitAnswer } = createHarness(hint);
         const resultPromise = elicit({
             mode: 'form',
             sessionId: 'acp-session-1',
@@ -264,14 +259,12 @@ describe('McodeQuestionHandler', () => {
             answers: { '0': ['because the tests failed'] }
         });
 
-        await expect(resultPromise).resolves.toEqual({
-            action: 'accept',
-            content: { reason: 'because the tests failed' }
-        });
+        await expect(resultPromise).resolves.toEqual({ action: 'decline' });
+        expect(submitAnswer).toHaveBeenCalledWith('Q: Why?\nA: because the tests failed');
     });
 
     it('declines when no answers are provided', async () => {
-        const { questionHandler, elicit, getState } = createHarness(choiceHint);
+        const { questionHandler, elicit, getState, submitAnswer } = createHarness(choiceHint);
         const resultPromise = elicit(choiceRequest);
 
         await questionHandler.handleResponse({
@@ -281,6 +274,7 @@ describe('McodeQuestionHandler', () => {
         });
 
         await expect(resultPromise).resolves.toEqual({ action: 'decline' });
+        expect(submitAnswer).not.toHaveBeenCalled();
         expect(getState().completedRequests?.['call_function_1']).toMatchObject({
             status: 'denied',
             decision: 'denied'
@@ -307,18 +301,18 @@ describe('McodeQuestionHandler', () => {
         await expect(abortedPromise).resolves.toEqual({ action: 'cancel' });
     });
 
-    it('cancels pending questions when the turn ends', async () => {
+    it('cancels pending questions when they are superseded or the session ends', async () => {
         const { questionHandler, elicit, getState } = createHarness(choiceHint);
         const resultPromise = elicit(choiceRequest);
 
-        await questionHandler.cancelAll('Prompt finished');
+        await questionHandler.cancelAll('Superseded by a new message');
 
         await expect(resultPromise).resolves.toEqual({ action: 'cancel' });
         expect(getState().requests?.['call_function_1']).toBeUndefined();
         expect(getState().completedRequests?.['call_function_1']).toMatchObject({
             status: 'canceled',
             decision: 'abort',
-            reason: 'Prompt finished'
+            reason: 'Superseded by a new message'
         });
     });
 

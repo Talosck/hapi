@@ -13,8 +13,16 @@ import { logger } from '@/ui/logger';
  *
  * HAPI has one transport for structured questions: an `ask_user_question`
  * agentState request answered through the existing permission RPC. This module
- * maps the ACP form onto that shape and maps the answer back into the
- * elicitation `{ action: 'accept', content }` result mcode expects.
+ * maps the ACP form onto that shape and turns the user's answer into the next
+ * turn.
+ *
+ * The answer cannot ride back on the elicitation response: mcode terminates
+ * the ACP turn right after the `ask_user` tool completes (its result already
+ * says "stop this turn until the user replies"), and a reply delivered to the
+ * elicitation afterwards is accepted but never resumes the agent. What does
+ * resume it is the next user message, so the handler declines the elicitation
+ * (letting mcode dismiss the questionnaire) and hands the formatted answer to
+ * the launcher, which sends it as a normal user turn.
  */
 
 export type McodeQuestionOption = {
@@ -81,6 +89,15 @@ type QuestionBackend = {
     waitForSessionUpdateQueue?: () => Promise<void>;
 };
 
+export type McodeQuestionHandlerOptions = {
+    /**
+     * Delivers the user's answer as a new turn. mcode ends the `ask_user` turn
+     * as soon as the questionnaire is raised, so answering it means sending the
+     * answer back as the next user message.
+     */
+    submitAnswer: (text: string) => void;
+};
+
 const ASK_USER_QUESTION_TOOL = 'ask_user_question';
 const ELICITATION_CREATE_METHOD = 'elicitation/create';
 
@@ -90,7 +107,8 @@ export class McodeQuestionHandler {
     constructor(
         private readonly session: QuestionSessionClient,
         private readonly backend: QuestionBackend,
-        private readonly takeToolCallHint: () => McodeAskUserCallHint | null
+        private readonly takeToolCallHint: () => McodeAskUserCallHint | null,
+        private readonly options: McodeQuestionHandlerOptions
     ) {
         this.backend.registerExtensionRequestHandler(
             ELICITATION_CREATE_METHOD,
@@ -138,7 +156,10 @@ export class McodeQuestionHandler {
             return true;
         }
 
-        pending.respond({ action: 'accept', content });
+        // mcode stops the turn when the questionnaire is raised, so the answer
+        // is delivered as the next user message; the elicitation is declined so
+        // the agent does not also inject (and silently drop) a reply turn.
+        pending.respond({ action: 'decline' });
         this.complete(
             pending,
             response.id,
@@ -147,6 +168,7 @@ export class McodeQuestionHandler {
             response.reason,
             buildAnswerSummary(pending.specs, response.answers)
         );
+        this.options.submitAnswer(buildAnswerMessage(pending.specs, response.answers));
         return true;
     }
 
@@ -555,4 +577,31 @@ function buildAnswerSummary(
     });
 
     return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
+/**
+ * Renders the answer as the user turn that resumes the agent. mcode's own
+ * questionnaire reply uses a `Q: … / A: …` body, so the model sees the same
+ * shape here even though the answer arrives as a plain user message.
+ */
+function buildAnswerMessage(
+    specs: McodeQuestionSpec[],
+    answers: AcpPermissionResponseMessage['answers']
+): string {
+    const flat = normalizeAnswers(answers) ?? {};
+    const blocks: string[] = [];
+
+    specs.forEach((spec, index) => {
+        const raw = flat[spec.id] ?? flat[String(index)] ?? [];
+        const values = raw
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0)
+            .map((value) => spec.options.find((candidate) => (
+                candidate.id === value || candidate.label === value
+            ))?.label ?? value);
+        if (values.length === 0) return;
+        blocks.push(`Q: ${spec.question}\nA: ${values.join(', ')}`);
+    });
+
+    return blocks.length > 0 ? blocks.join('\n\n') : 'No answer was provided.';
 }

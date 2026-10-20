@@ -98,6 +98,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 const hint = this.pendingAskUserCall;
                 this.pendingAskUserCall = null;
                 return hint;
+            },
+            {
+                // mcode ends the ask_user turn as soon as the questionnaire is
+                // raised, so answering it continues the conversation as the
+                // next user turn (see McodeQuestionHandler).
+                submitAnswer: (text) => this.submitQuestionAnswer(text)
             }
         );
 
@@ -182,6 +188,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 break;
             }
 
+            // A new user message supersedes any questionnaire still waiting from
+            // the previous turn: mcode dismisses the pending questionnaire in
+            // that case, so drop the card instead of leaving a dead request.
+            await this.questionHandler?.cancelAll('Superseded by a new message');
+
             // `null` means "back to the agent default" (the model the session
             // was created with); `undefined` means "no explicit choice".
             const requestedModel = batch.mode.model === null
@@ -265,13 +276,49 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             } finally {
                 session.onThinkingChange(false);
                 this.pendingAskUserCall = null;
-                await this.questionHandler?.cancelAll('Prompt finished');
+                // Questions outlive the turn: mcode's ask_user tool ends the
+                // turn as soon as the questionnaire is raised, and the answer
+                // arrives later as a new user message. Only tool approvals are
+                // turn-scoped.
                 await this.permissionHandler?.cancelAll('Prompt finished');
                 if (session.queue.size() === 0 && !this.shouldExit) {
                     sendReady();
                 }
             }
         }
+    }
+
+    /**
+     * Sends a question answer back as the next turn. mcode's `ask_user` tool
+     * ends the agent turn immediately, so this is the only path that makes the
+     * agent read the answer (an elicitation reply after the turn is ignored).
+     */
+    private submitQuestionAnswer(text: string): void {
+        if (this.shouldExit) {
+            return;
+        }
+        const trimmed = text.trim();
+        if (trimmed.length === 0) {
+            return;
+        }
+
+        try {
+            this.session.queue.pushIsolated(trimmed, {
+                permissionMode: (this.appliedPermissionMode ?? this.session.getPermissionMode() ?? 'default') as PermissionMode,
+                model: this.currentBackendModel,
+                effort: this.currentBackendEffort
+            });
+        } catch (error) {
+            logger.warn('[mcode-remote] Failed to queue the question answer', error);
+            this.session.sendSessionEvent({
+                type: 'message',
+                message: 'Failed to send the question answer to MiniMax Code; reply in the chat instead.'
+            });
+            return;
+        }
+        // Queue the turn first so a failure cannot leave a user message with no
+        // reply; the prompt only starts on the next microtask.
+        this.session.sendUserMessage(trimmed);
     }
 
     protected async cleanup(): Promise<void> {

@@ -4,7 +4,11 @@ import { MessageQueue2 } from '@/utils/MessageQueue2'
 import type { McodeMode } from './types'
 
 const harness = vi.hoisted(() => ({
-    backend: {} as Record<string, unknown>
+    backend: {} as Record<string, unknown>,
+    question: {
+        cancelReasons: [] as string[],
+        submitAnswer: null as ((text: string) => void) | null
+    }
 }))
 
 vi.mock('./utils/mcodeBackend', async (importOriginal) => {
@@ -30,7 +34,17 @@ vi.mock('./utils/permissionHandler', () => ({
 
 vi.mock('./utils/questionHandler', () => ({
     McodeQuestionHandler: class {
-        async cancelAll(): Promise<void> {}
+        constructor(
+            _client: unknown,
+            _backend: unknown,
+            _takeHint: unknown,
+            options: { submitAnswer: (text: string) => void }
+        ) {
+            harness.question.submitAnswer = options.submitAnswer
+        }
+        async cancelAll(reason?: string): Promise<void> {
+            harness.question.cancelReasons.push(reason ?? '')
+        }
         async handleResponse(): Promise<boolean> { return false }
     },
     normalizeMcodeAskUserToolCall: (message: unknown) => ({ message, hint: null })
@@ -118,9 +132,48 @@ function createSession(messages: QueuedMessage[] = []) {
     return session
 }
 
+function createScriptedSession() {
+    const queue = {
+        waitForMessagesAndGetAsString: vi.fn()
+            .mockResolvedValueOnce({ message: 'hi', mode: { permissionMode: 'default', model: null } })
+            .mockResolvedValue(null),
+        size: () => 0,
+        reset: vi.fn(),
+        pushIsolated: vi.fn()
+    }
+    const client = {
+        rpcHandlerManager: { registerHandler: vi.fn() },
+        sendAgentMessage: vi.fn(),
+        sendSessionEvent: vi.fn(),
+        sendClaudeSessionMessage: vi.fn(),
+        updateAgentState: vi.fn()
+    }
+    const session = {
+        path: '/tmp/mcode-test',
+        logPath: '/tmp/mcode-test/test.log',
+        client,
+        queue,
+        sessionId: null as string | null,
+        getPermissionMode: () => 'default' as const,
+        onSessionFound(id: string) {
+            session.sessionId = id
+        },
+        onThinkingChange: vi.fn(),
+        sendUserMessage: vi.fn(),
+        sendAgentMessage: vi.fn(),
+        sendSessionEvent: vi.fn(),
+        setModel: vi.fn(),
+        setPermissionMode: vi.fn(),
+        pushKeepAlive: vi.fn()
+    }
+    return { session, queue }
+}
+
 describe('mcodeRemoteLauncher config sync', () => {
     afterEach(() => {
         harness.backend = {}
+        harness.question.cancelReasons = []
+        harness.question.submitAnswer = null
     })
 
     it('reports the model discovered from session/new when none was requested', async () => {
@@ -243,5 +296,34 @@ describe('mcodeRemoteLauncher config sync', () => {
         expect(backend.setSessionMode.mock.calls.map((call) => call[1]))
             .toEqual(['default', 'plan', 'default'])
         expect(backend.prompt).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps questions answerable after the turn that raised them ends', async () => {
+        createBackend()
+        const session = createSession([{ message: 'hi', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        // mcode ends the ask_user turn as soon as the questionnaire is raised,
+        // so the turn boundary must not cancel the pending question.
+        expect(harness.question.cancelReasons).not.toContain('Prompt finished')
+        expect(harness.question.cancelReasons).toContain('Superseded by a new message')
+    })
+
+    it('delivers a question answer as the next user turn', async () => {
+        createBackend()
+        const { session, queue } = createScriptedSession()
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(harness.question.submitAnswer).toBeTypeOf('function')
+        harness.question.submitAnswer!('Q: Which site?\nA: China')
+
+        expect(session.sendUserMessage).toHaveBeenCalledWith('Q: Which site?\nA: China')
+        expect(queue.pushIsolated).toHaveBeenCalledWith('Q: Which site?\nA: China', {
+            permissionMode: 'default',
+            model: 'm:good',
+            effort: 'max'
+        })
     })
 })

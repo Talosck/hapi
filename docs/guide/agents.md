@@ -337,6 +337,14 @@ free-form ("Other") steps can be answered from the web or phone UI. The
 question card reuses the agent's `ask_user` tool call, so the transcript shows
 one card instead of a duplicate.
 
+MiniMax Code ends the agent turn as soon as the questionnaire is raised (the
+`ask_user` tool result tells the model to wait for the user's reply), so HAPI
+keeps the card answerable across that turn boundary instead of treating it as a
+pending tool approval. Submitting the card sends the answer back as the next
+user turn, which is the only path that resumes the agent; the elicitation itself
+is declined so the agent does not inject a duplicate reply. A new chat message
+supersedes an unanswered card.
+
 ### Model selection
 
 MiniMax Code identifies a model with the ACP wire id: `m:<provider>:<model>:u`
