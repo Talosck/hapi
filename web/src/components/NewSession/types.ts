@@ -43,6 +43,7 @@ export const MODEL_OPTIONS: Record<AgentType, { value: string; label: string }[]
     kimi: [
         { value: 'auto', label: 'Default' },
     ],
+    mcode: [],
     copilot: [
         { value: 'auto', label: 'Auto' },
     ],

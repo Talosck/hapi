@@ -122,19 +122,19 @@ public enum NewSessionLogic {
         codexFamilyPermissionAgents.contains(flavor)
     }
 
-    /// Flavors whose permission control is the native-mode select. claude
-    /// and grok do not share the codex-family mode set, but they render
+    /// Flavors whose permission control is the native-mode select. claude,
+    /// grok and mcode do not share the codex-family mode set, but they render
     /// through the same native select (web `usesNativePermissionSelect`,
     /// `web/src/lib/codexFamilyPermissionAgents.ts`).
     public static func usesNativePermissionSelect(_ flavor: AgentFlavor) -> Bool {
-        flavor == .claude || flavor == .grok || usesCodexFamilyPermissionModes(flavor)
+        flavor == .claude || flavor == .grok || flavor == .mcode || usesCodexFamilyPermissionModes(flavor)
     }
 
     /// `resolveHapiYoloPermissionMode` (`shared/src/agentConfig.ts`) — the
     /// native mode the HAPI YOLO toggle maps to, for the toggle's caption.
     public static func hapiYoloNativeMode(for flavor: AgentFlavor) -> PermissionMode? {
         switch flavor {
-        case .claude, .grok: return .bypassPermissions
+        case .claude, .grok, .mcode: return .bypassPermissions
         case .agy: return .alwaysProceed
         case .codex, .copilot, .cursor, .gemini, .kimi, .opencode: return .yolo
         case .dsh, .pi, .other: return nil

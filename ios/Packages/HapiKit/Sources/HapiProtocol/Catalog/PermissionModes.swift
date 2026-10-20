@@ -98,6 +98,8 @@ extension AgentFlavor {
             return [.default, .readOnly, .safeYolo, .yolo]
         case .grok:
             return [.default, .auto, .plan, .bypassPermissions]
+        case .mcode:
+            return [.default, .auto, .bypassPermissions, .plan]
         case .opencode:
             return [.default, .plan, .yolo]
         case .dsh:

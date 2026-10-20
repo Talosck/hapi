@@ -121,6 +121,7 @@ object SummaryPatching {
                 "agy" -> metadata.agySessionId
                 "cursor" -> metadata.cursorSessionId
                 "kimi" -> metadata.kimiSessionId
+                "mcode" -> metadata.mcodeSessionId
                 "copilot" -> metadata.copilotSessionId
                 "pi" -> metadata.piSessionId
                 else -> null
@@ -135,6 +136,7 @@ object SummaryPatching {
             ?: metadata.agySessionId
             ?: metadata.cursorSessionId
             ?: metadata.kimiSessionId
+            ?: metadata.mcodeSessionId
             ?: metadata.copilotSessionId
     }
 

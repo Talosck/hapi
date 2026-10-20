@@ -92,6 +92,7 @@ private val MONO_FLAVOR_ICONS: Map<String, Int> = mapOf(
     "cursor" to R.drawable.ic_agent_cursor,
     "grok" to R.drawable.ic_agent_grok,
     "kimi" to R.drawable.ic_agent_kimi,
+    "mcode" to R.drawable.ic_agent_mcode,
     "opencode" to R.drawable.ic_agent_opencode,
     "pi" to R.drawable.ic_agent_pi,
 )
@@ -106,7 +107,7 @@ private fun AgentFlavorIconStrip() {
     ) {
         val flavors = listOf(
             "agy", "claude", "codex", "copilot", "cursor",
-            "gemini", "grok", "kimi", "opencode", "pi", "mystery",
+            "gemini", "grok", "kimi", "mcode", "opencode", "pi", "mystery",
         )
         flavors.chunked(6).forEach { chunk ->
             Row(

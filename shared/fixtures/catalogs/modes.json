@@ -192,6 +192,28 @@
                 "tone": "danger"
             }
         ],
+        "mcode": [
+            {
+                "label": "Default",
+                "mode": "default",
+                "tone": "neutral"
+            },
+            {
+                "label": "Auto",
+                "mode": "auto",
+                "tone": "warning"
+            },
+            {
+                "label": "Yolo",
+                "mode": "bypassPermissions",
+                "tone": "danger"
+            },
+            {
+                "label": "Plan Mode",
+                "mode": "plan",
+                "tone": "info"
+            }
+        ],
         "opencode": [
             {
                 "label": "Default",

@@ -4,9 +4,10 @@ import SwiftUI
 /// (brand SVGs via @lobehub/icons, the same source the web ships; assets live
 /// in `Assets.xcassets/AgentIcons`).
 ///
-/// Color variants (agy/claude/codex/gemini) carry `original` rendering intent
-/// so the literal brand fills stay visible on light and dark — the reason the
-/// web picked Color for them. Mono variants (cursor/grok/kimi/opencode/pi)
+/// Color variants (agy/claude/codex/gemini/mcode) carry `original` rendering
+/// intent so the literal brand fills stay visible on light and dark — the
+/// reason the web picked Color for them. Mono variants
+/// (cursor/grok/kimi/opencode/pi)
 /// are template images and inherit the environment foreground style (the
 /// web's currentColor); copilot mirrors the web's fixed GitHub-mark tint
 /// (#24292F light / #E6EDF3 dark). Unknown flavors fall back to the web's
@@ -20,7 +21,7 @@ struct AgentFlavorIconView: View {
     /// Flavors with a bundled `AgentIcons/<flavor>` image set.
     private static let bundledFlavors: Set<String> = [
         "agy", "claude", "codex", "copilot", "cursor",
-        "gemini", "grok", "kimi", "opencode", "pi",
+        "gemini", "grok", "kimi", "mcode", "opencode", "pi",
     ]
 
     /// Asset name for a raw `metadata.flavor` value; nil when no icon ships.
@@ -71,7 +72,7 @@ struct AgentFlavorIconView: View {
 private struct AgentFlavorIconPreviewGrid: View {
     private let flavors: [String?] = [
         "agy", "claude", "codex", "copilot", "cursor",
-        "gemini", "grok", "kimi", "opencode", "pi", "mystery",
+        "gemini", "grok", "kimi", "mcode", "opencode", "pi", "mystery",
     ]
 
     var body: some View {

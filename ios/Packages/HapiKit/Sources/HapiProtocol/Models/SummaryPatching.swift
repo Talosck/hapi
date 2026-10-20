@@ -122,6 +122,7 @@ public enum SummaryPatching {
             case .agy: flavorSessionId = metadata.agySessionId
             case .cursor: flavorSessionId = metadata.cursorSessionId
             case .kimi: flavorSessionId = metadata.kimiSessionId
+            case .mcode: flavorSessionId = metadata.mcodeSessionId
             case .copilot: flavorSessionId = metadata.copilotSessionId
             case .pi: flavorSessionId = metadata.piSessionId
             case .other: flavorSessionId = nil
@@ -140,6 +141,7 @@ public enum SummaryPatching {
             metadata.agySessionId,
             metadata.cursorSessionId,
             metadata.kimiSessionId,
+            metadata.mcodeSessionId,
             metadata.copilotSessionId,
         ]
         return legacyFallbacks.compactMap { $0 }.first

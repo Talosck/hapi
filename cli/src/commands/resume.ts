@@ -10,6 +10,7 @@ import type {
     CursorPermissionMode,
     GrokPermissionMode,
     KimiPermissionMode,
+    McodePermissionMode,
     CopilotPermissionMode,
     OpencodePermissionMode
 } from '@hapi/protocol/types'
@@ -144,6 +145,20 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
             resumeSessionId: base.resumeSessionId,
             startedBy: base.startedBy,
             permissionMode: base.permissionMode as KimiPermissionMode | undefined,
+            startingMode: 'local',
+            model: target.model ?? undefined
+        })
+        return
+    }
+
+    if (target.flavor === 'mcode') {
+        const { runMcode } = await import('@/mcode/runMcode')
+        await runMcode({
+            existingSessionId: base.existingSessionId,
+            workingDirectory: base.workingDirectory,
+            resumeSessionId: base.resumeSessionId,
+            startedBy: base.startedBy,
+            permissionMode: base.permissionMode as McodePermissionMode | undefined,
             startingMode: 'local',
             model: target.model ?? undefined
         })

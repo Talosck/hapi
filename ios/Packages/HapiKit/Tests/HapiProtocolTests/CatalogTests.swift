@@ -155,14 +155,15 @@ struct CatalogTests {
     @Test func knownFlavorsMatchAgentFlavorsOrder() {
         #expect(AgentFlavor.knownFlavors.map(\.rawValue) == [
             "agy", "claude", "codex", "dsh", "copilot", "cursor",
-            "gemini", "grok", "kimi", "opencode", "pi",
+            "gemini", "grok", "kimi", "mcode", "opencode", "pi",
         ])
     }
 
     @Test func creatableFlavorsExcludeOnlyGemini() {
-        #expect(AgentFlavor.creatableFlavors.count == 10)
+        #expect(AgentFlavor.creatableFlavors.count == 11)
         #expect(!AgentFlavor.creatableFlavors.contains(.gemini))
         #expect(AgentFlavor.creatableFlavors.contains(.claude))
+        #expect(AgentFlavor.creatableFlavors.contains(.mcode))
     }
 
     @Test func unknownFlavorsAreCapturedNotCrashed() throws {
@@ -180,6 +181,7 @@ struct CatalogTests {
         #expect(AgentFlavor.agy.displayLabel == "Antigravity")
         #expect(AgentFlavor.grok.displayLabel == "Grok Build")
         #expect(AgentFlavor.opencode.displayLabel == "OpenCode")
+        #expect(AgentFlavor.mcode.displayLabel == "MiniMax Code")
         #expect(AgentFlavor.dsh.displayLabel == "DeepSeek Harness")
         #expect(AgentFlavor.other("x").displayLabel == "Unknown")
         #expect(flavorLabel(forFlavor: "pi") == "Pi")
@@ -218,6 +220,7 @@ struct CatalogTests {
         #expect(!isCodexFamilyFlavor("cursor"))
         #expect(!isCodexFamilyFlavor("pi"))
         #expect(!isCodexFamilyFlavor("agy"))
+        #expect(!isCodexFamilyFlavor("mcode"))
         #expect(!isCodexFamilyFlavor(nil))
     }
 

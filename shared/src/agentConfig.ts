@@ -76,6 +76,7 @@ const BUILTIN_DESCRIPTORS: Record<AgentFlavor, AgentConfigFieldDescriptor[]> = {
         PERMISSION
     ),
     kimi: fields({ ...MODEL, optionSource: 'directory' }, PERMISSION),
+    mcode: fields({ ...MODEL, optionSource: 'directory' }, PERMISSION),
     opencode: fields(
         { ...MODEL, optionSource: 'directory' },
         { id: 'effort', section: 'effort', kind: 'select', optionSource: 'model', availability: 'both' },
@@ -100,6 +101,7 @@ export function resolveHapiYoloPermissionMode(flavor: AgentFlavor): PermissionMo
     switch (flavor) {
         case 'claude':
         case 'grok':
+        case 'mcode':
             return 'bypassPermissions'
         case 'agy':
             return 'always-proceed'

@@ -320,6 +320,24 @@ export class AcpSdkBackend implements AgentBackend {
         await this.setConfigOption(sessionId, modeOption.id, modeId);
     }
 
+    /**
+     * Switches the agent's ACP session mode (`session/set_mode`).
+     *
+     * Distinct from {@link setMode}, which OpenCode/Grok use to switch the
+     * reasoning effort and which mirrors the new value into the session's
+     * `thought_level` config option. MiniMax Code's session modes
+     * (`default` / `plan`) are a different axis, so they must not overwrite
+     * the cached thinking-effort value.
+     */
+    async setSessionMode(sessionId: string, modeId: string): Promise<void> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+
+        await this.waitForResponseComplete();
+        await this.transport.sendRequest('session/set_mode', { sessionId, modeId });
+    }
+
     async newSession(config: AgentSessionConfig): Promise<string> {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
@@ -395,13 +413,17 @@ export class AcpSdkBackend implements AgentBackend {
         // as rejections from the transport; the launcher's catch block handles them.
         let configOptionResponse: unknown;
         let usedConfigOption = false;
-        if (opts?.flavor === 'opencode') {
+        if (opts?.flavor === 'opencode' || opts?.flavor === 'mcode') {
             // OpenCode's `session/set_model` response only carries an opaque
             // `_meta` block with no `configOptions`, so the per-session
             // thought_level options captured at session/new go stale after an
             // inline switch. `session/set_config_option` with configId "model"
             // (OpenCode's fixed id for the model picker) echoes fresh
             // `configOptions` including thought_level for the new model.
+            //
+            // MiniMax Code does not implement `session/set_model` at all — its
+            // model picker is the `model` config option, and the option id is
+            // fixed, so the same call applies there.
             try {
                 configOptionResponse = await this.transport.sendRequest('session/set_config_option', {
                     sessionId,

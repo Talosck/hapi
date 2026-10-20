@@ -57,13 +57,13 @@ object NewSessionLogic {
         flavor in CODEX_FAMILY_PERMISSION_AGENTS
 
     /**
-     * Flavors whose permission control is the native-mode select. claude and
-     * grok do not share the codex-family mode set, but they render through
-     * the same native select (web `usesNativePermissionSelect`,
+     * Flavors whose permission control is the native-mode select. claude,
+     * grok and mcode do not share the codex-family mode set, but they render
+     * through the same native select (web `usesNativePermissionSelect`,
      * `web/src/lib/codexFamilyPermissionAgents.ts`).
      */
     fun usesNativePermissionSelect(flavor: String?): Boolean =
-        flavor == "claude" || flavor == "grok" || usesCodexFamilyPermissionModes(flavor)
+        flavor == "claude" || flavor == "grok" || flavor == "mcode" || usesCodexFamilyPermissionModes(flavor)
 
     /**
      * Exact spawn body (`POST /api/machines/:id/spawn`), field-for-field port

@@ -48,6 +48,11 @@ describe('hasCapability', () => {
         expect(hasCapability('opencode', Capabilities.Effort)).toBe(false)
     })
 
+    test('mcode supports model-change but not effort', () => {
+        expect(hasCapability('mcode', Capabilities.ModelChange)).toBe(true)
+        expect(hasCapability('mcode', Capabilities.Effort)).toBe(false)
+    })
+
     test('pi supports model-change and effort', () => {
         expect(hasCapability('pi', Capabilities.ModelChange)).toBe(true)
         expect(hasCapability('pi', Capabilities.Effort)).toBe(true)
@@ -91,6 +96,7 @@ describe('getFlavorLabel', () => {
         expect(getFlavorLabel('kimi')).toBe('Kimi')
         expect(getFlavorLabel('copilot')).toBe('Copilot')
         expect(getFlavorLabel('grok')).toBe('Grok Build')
+        expect(getFlavorLabel('mcode')).toBe('MiniMax Code')
     })
 
     test('unknown flavor returns Unknown', () => {
@@ -116,6 +122,7 @@ describe('isKnownFlavor', () => {
         expect(isKnownFlavor('kimi')).toBe(true)
         expect(isKnownFlavor('copilot')).toBe(true)
         expect(isKnownFlavor('grok')).toBe(true)
+        expect(isKnownFlavor('mcode')).toBe(true)
     })
 
     test('returns false for unknown/null/undefined', () => {

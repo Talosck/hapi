@@ -18,6 +18,7 @@ agent's integration; their supported syntax varies by agent.
 | Grok Build | `hapi grok` | ACP (`grok agent stdio`) | ✓ | ✓ | `default` `auto` `plan` `bypassPermissions` | ✓ |
 | GitHub Copilot | `hapi copilot` | ACP (`copilot --acp --stdio`) | ✓ | ✓ | `default` `read-only` `safe-yolo` `yolo` | ✓ |
 | Kimi | `hapi kimi` | ACP (`kimi acp`) | ✓ | ✓ | `default` `read-only` `safe-yolo` `yolo` | ✓ |
+| MiniMax Code | `hapi mcode` | Terminal wrapper (local) + ACP (`mcode acp`) | ✓ | ✓ | `default` `auto` `bypassPermissions` `plan` | ✓ |
 | OpenCode | `hapi opencode` | ACP (`opencode acp`) | ✓ | ✓ | `default` `plan` `yolo` | ✓ |
 | DeepSeek Harness | `hapi dsh` | ACP (`dsh-acp-demo` or configured server) | — | ✓ | Managed by DSH ACP composition | — |
 | Antigravity (agy) | `hapi agy` | Headless print mode (per-turn `agy -p` + NDJSON) | — | ✓ | `request-review` `always-proceed` | ✓ |
@@ -30,7 +31,7 @@ Gemini is no longer launchable: `hapi gemini` is kept as a tombstone command tha
 
 ### ACP
 
-Most remote integrations speak the [Agent Client Protocol](https://agentclientprotocol.com) (ACP) over stdio through a shared HAPI backend. ACP gives remote sessions bidirectional permission approval, plan/todo updates, question UI, model catalogs, and session resume via `session/load`. Cursor, Grok, Copilot, Kimi, OpenCode, and DeepSeek Harness remote sessions all run over ACP. DSH's official ACP server is intentionally automation-only and currently supports fresh sessions, committed assistant output, cancellation, and one-shot permissions; it does not provide native resume, model switching, MCP injection, or live tool/reasoning telemetry.
+Most remote integrations speak the [Agent Client Protocol](https://agentclientprotocol.com) (ACP) over stdio through a shared HAPI backend. ACP gives remote sessions bidirectional permission approval, plan/todo updates, question UI, model catalogs, and session resume via `session/load`. Cursor, Grok, Copilot, Kimi, MiniMax Code, OpenCode, and DeepSeek Harness remote sessions all run over ACP. DSH's official ACP server is intentionally automation-only and currently supports fresh sessions, committed assistant output, cancellation, and one-shot permissions; it does not provide native resume, model switching, MCP injection, or live tool/reasoning telemetry.
 
 ### Permission modes
 
@@ -253,6 +254,103 @@ HAPI also exposes Grok's common slash commands, discovers skills from `.grok/ski
 
 If a remote session reports authentication failure, run `grok login --device-auth` on the runner machine and retry.
 
+## MiniMax Code
+
+HAPI runs the official [MiniMax Code CLI](https://agent.minimax.io/docs/cli/quick-start) (`mcode`) locally and
+drives the same conversation remotely over the Agent Client Protocol (`mcode acp`).
+
+### Install
+
+```bash
+# macOS / Linux / WSL
+curl -fsSL https://filecdn.minimax.chat/public/install.sh | bash
+
+# or, with a compatible Node.js 22.19+ / 24+ / 25 / 26
+npm install -g @minimax-ai/code
+```
+
+Verify the installation:
+
+```bash
+mcode --version
+```
+
+### Authenticate
+
+MiniMax Code manages its own sign-in; HAPI reuses it. Run the login once on the
+machine that runs the agent:
+
+```bash
+mcode login            # mainland China account
+mcode login --region global
+```
+
+You can also bring your own key through the CLI's own provider configuration
+(`mcode provider add ...`). HAPI never stores MiniMax credentials.
+
+### Start a session
+
+```bash
+hapi mcode                        # Start a MiniMax Code session
+hapi mcode --model m:minimax:MiniMax-M3:v:thinking
+hapi mcode --permission-mode auto # Ask / Auto / Full access
+hapi mcode --plan                 # Start in Plan mode
+hapi mcode --yolo                 # Full access (bypassPermissions)
+```
+
+Sessions created from a HAPI runner start in remote mode automatically.
+Terminal-created sessions start in the native MiniMax Code TUI and can switch
+to remote control without parsing terminal output.
+
+### Permission modes
+
+| Mode | Description |
+|------|-------------|
+| `default` | Ask - every permission request MiniMax Code raises is answered from the web/phone UI |
+| `auto` | Auto - MiniMax Code classifies routine actions and only asks when the risk is high |
+| `bypassPermissions` | Full access - tool permission checks are skipped (use only in a trusted workspace) |
+| `plan` | Plan mode - the agent researches and prepares an implementation plan before changing anything |
+
+`default`, `auto`, and `bypassPermissions` are applied to the agent's own
+permission policy through the ACP `permissionMode` config option; `plan` is
+applied through the ACP session mode (`session/set_mode`). Plan mode keeps the
+tool permission policy on "Ask" so that reading and searching still needs
+approval.
+
+When MiniMax Code asks for approval, HAPI shows the request in the web and
+phone UIs with the usual Allow / Allow for session / Deny choices.
+
+### Model selection
+
+MiniMax Code identifies a model with the ACP wire id
+(`m:<provider>:<model>:v:<variant>`, e.g. `m:minimax:MiniMax-M3:v:thinking`).
+HAPI discovers the catalog for the selected directory and offers it in the
+create-session form and in the session's model picker. The MiniMax Code CLI
+uses the shorter `provider/model[#variant]` form; HAPI translates between the
+two when it hands the model to the local TUI.
+
+### Resume and handoff
+
+Remote mode uses the MiniMax Code ACP server (`mcode acp`). HAPI stores the
+native session ID (`mcodeSessionId`) and uses it for:
+
+- ACP `session/load` after a restart.
+- `mcode --session <id>` when switching back to the native TUI.
+- `hapi resume <hapi-session-id>` from a terminal.
+
+The native TUI only creates a session once you send your first message, which
+is too late for HAPI to record the session ID. HAPI therefore creates the
+session over ACP before it opens the TUI, so both sides always talk about the
+same conversation.
+
+### Current limitations
+
+- MiniMax Code's ACP server does not implement `session/set_model`; HAPI
+  applies model changes through `session/set_config_option` instead.
+- MiniMax Code's ACP build does not advertise image prompts
+  (`promptCapabilities.image: false`), so attachments are sent as text.
+- Signing in must be completed outside the HAPI web UI.
+
 ## DeepSeek Harness
 
 `hapi dsh` uses the shared ACP transport and keeps DSH's runtime outside HAPI. The
@@ -288,6 +386,7 @@ overall permission policy.
 - **Codex** (`hapi codex`) — OpenAI's Codex CLI, with terminal/Web control and a dedicated `plan` mode. See [Codex usage and limits](./codex-shared-sessions.md) for resume, terminal-exit behavior, and launch options. [openai/codex](https://github.com/openai/codex)
 - **GitHub Copilot** (`hapi copilot`) — Copilot CLI over ACP (`copilot --acp --stdio`). [GitHub Copilot](https://github.com/features/copilot)
 - **Kimi** (`hapi kimi`) — Moonshot AI's Kimi CLI over ACP (`kimi acp`). [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli)
+- **MiniMax Code** (`hapi mcode`) — MiniMax's coding agent: the native `mcode` TUI locally and the same conversation remotely over ACP (`mcode acp`). [MiniMax Code docs](https://agent.minimax.io/docs/cli/quick-start)
 - **OpenCode** (`hapi opencode`) — the open-source OpenCode agent over ACP (`opencode acp`). [opencode.ai](https://opencode.ai)
 - **Antigravity** (`hapi agy`) — Google's Antigravity CLI (`agy`), driven headlessly via print mode: every turn spawns `agy -p <msg> --conversation <uuid> --output-format stream-json`, and NDJSON events (init / step_update / result) are streamed into the chat. There is no PTY/TUI wrapper and no hook-based permission bridge: permission handling uses agy's own `settings.json` allow/deny rules (`request-review`) or `--dangerously-skip-permissions` (`always-proceed`). Tool calls that lack an allow-rule are auto-denied by agy and surfaced as a chat hint. MCP servers are configured the standard agy way — in the user's global `~/.gemini/config/mcp_config.json` or a workspace `.agents/mcp_config.json` — and are loaded natively by agy in headless mode (no HAPI injection). Remote-only — there is no local terminal input path. [Google Antigravity](https://antigravity.google)
 - **Pi** (`hapi pi`) — the Pi coding agent running as `pi --mode rpc` (JSON-line RPC over piped stdio); remote-control only, no local TUI input path. [badlogic/pi-mono](https://github.com/badlogic/pi-mono)

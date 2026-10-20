@@ -867,6 +867,24 @@ export type KimiModelsResponse = {
 
 export type ListKimiModelsResponse = KimiModelsResponse
 
+export type McodeModelSummary = {
+    /**
+     * MiniMax Code ACP wire model id (`m:<provider>:<model>:v:<variant>`),
+     * as published by the agent's `model` config option.
+     */
+    modelId: string
+    name?: string
+}
+
+export type McodeModelsResponse = {
+    success: boolean
+    availableModels?: McodeModelSummary[]
+    currentModelId?: string | null
+    error?: string
+}
+
+export type ListMcodeModelsResponse = McodeModelsResponse
+
 export type GrokReasoningEffortResponse = {
     success: boolean
     options?: GrokReasoningEffortOption[]

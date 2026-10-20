@@ -7,7 +7,7 @@ import { z } from 'zod'
  */
 export const AGENT_MESSAGE_PAYLOAD_TYPE = 'codex' as const
 
-export const AGENT_FLAVORS = ['agy', 'claude', 'codex', 'dsh', 'copilot', 'cursor', 'gemini', 'grok', 'kimi', 'opencode', 'pi'] as const
+export const AGENT_FLAVORS = ['agy', 'claude', 'codex', 'dsh', 'copilot', 'cursor', 'gemini', 'grok', 'kimi', 'mcode', 'opencode', 'pi'] as const
 export type AgentFlavor = typeof AGENT_FLAVORS[number]
 export const AgentFlavorSchema = z.enum(AGENT_FLAVORS)
 
@@ -39,6 +39,16 @@ export type KimiPermissionMode = typeof KIMI_PERMISSION_MODES[number]
 
 export const COPILOT_PERMISSION_MODES = ['default', 'read-only', 'safe-yolo', 'yolo'] as const
 export type CopilotPermissionMode = typeof COPILOT_PERMISSION_MODES[number]
+
+/**
+ * MiniMax Code (`mcode`) exposes its own permission policy over ACP as the
+ * `permissionMode` config option: `default` (Ask), `auto` (Auto) and
+ * `bypassPermissions` (Full access). `plan` is the agent's separate ACP
+ * session mode (`session/set_mode`), which researches and prepares a plan
+ * before making changes.
+ */
+export const MCODE_PERMISSION_MODES = ['default', 'auto', 'bypassPermissions', 'plan'] as const
+export type McodePermissionMode = typeof MCODE_PERMISSION_MODES[number]
 
 export const GROK_PERMISSION_MODES = ['default', 'auto', 'plan', 'bypassPermissions'] as const
 export type GrokPermissionMode = typeof GROK_PERMISSION_MODES[number]
@@ -144,6 +154,9 @@ export function getPermissionModesForFlavor(flavor?: string | null): readonly Pe
     }
     if (flavor === 'copilot') {
         return COPILOT_PERMISSION_MODES
+    }
+    if (flavor === 'mcode') {
+        return MCODE_PERMISSION_MODES
     }
     if (flavor === 'grok') {
         return GROK_PERMISSION_MODES

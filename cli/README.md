@@ -35,6 +35,8 @@ Choose a supported coding agent from your terminal and control its sessions remo
 - `hapi grok` - Start Grok Build mode. See `src/grok/runGrok.ts`.
 - `hapi copilot` - Start GitHub Copilot mode.
 - `hapi kimi` - Start Kimi mode.
+- `hapi mcode` - Start MiniMax Code mode. See `src/mcode/runMcode.ts`.
+  Runs the MiniMax Code CLI (`mcode`) locally and drives it remotely over ACP (`mcode acp`).
 - `hapi agy` - Start Antigravity mode (remote-only).
 - `hapi pi` - Start Pi mode (remote-only).
 - `hapi opencode` - Start OpenCode mode via ACP. See `src/opencode/runOpencode.ts`.

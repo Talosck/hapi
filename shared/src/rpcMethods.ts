@@ -45,6 +45,8 @@ export const RPC_METHODS = {
     ListCopilotModels: 'listCopilotModels',
     ListKimiModelsForCwd: 'listKimiModelsForCwd',
     ListKimiModels: 'listKimiModels',
+    ListMcodeModelsForCwd: 'listMcodeModelsForCwd',
+    ListMcodeModels: 'listMcodeModels',
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
     ListAgyModels: 'listAgyModels',
     /** Deliver one queued message into the active Pi turn (native steer). */

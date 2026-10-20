@@ -9,6 +9,7 @@ import { registerPiModelHandlers } from './handlers/piModels'
 import { registerGrokModelHandlers } from './handlers/grokModels'
 import { registerCopilotModelHandlers } from './handlers/copilotModels'
 import { registerKimiModelHandlers } from './handlers/kimiModels'
+import { registerMcodeModelHandlers } from './handlers/mcodeModels'
 import { registerDirectoryHandlers } from './handlers/directories'
 import { registerDifftasticHandlers } from './handlers/difftastic'
 import { registerFileHandlers } from './handlers/files'
@@ -29,6 +30,7 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
     registerGrokModelHandlers(rpcHandlerManager)
     registerCopilotModelHandlers(rpcHandlerManager)
     registerKimiModelHandlers(rpcHandlerManager)
+    registerMcodeModelHandlers(rpcHandlerManager)
     registerFileHandlers(rpcHandlerManager, workingDirectory)
     registerDirectoryHandlers(rpcHandlerManager, workingDirectory)
     registerRipgrepHandlers(rpcHandlerManager, workingDirectory)

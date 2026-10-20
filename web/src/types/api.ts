@@ -29,6 +29,8 @@ export type {
     GrokModelSummary,
     KimiModelsResponse,
     KimiModelSummary,
+    McodeModelsResponse,
+    McodeModelSummary,
     CopilotModelsResponse,
     CopilotModelSummary,
     GrokReasoningEffortResponse,

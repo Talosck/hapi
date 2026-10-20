@@ -150,6 +150,12 @@ export function getModelOptionsForFlavor(
     if (flavor === 'kimi') {
         return withCurrentModelOption([{ value: null, label: 'Default' }], currentModel)
     }
+    // MiniMax Code publishes its catalog through the ACP `model` config option;
+    // until those options arrive, show just the auto/default option rather
+    // than the Claude fallback.
+    if (flavor === 'mcode') {
+        return withCurrentModelOption([{ value: null, label: 'Default' }], currentModel)
+    }
     if (flavor === 'copilot') {
         if (customOptions && customOptions.length > 0) {
             return withCurrentModelOption(customOptions, currentModel)
@@ -214,6 +220,9 @@ export function getNextModelForFlavor(
         return normalizeCurrentModel(currentModel)
     }
     if (flavor === 'kimi') {
+        return normalizeCurrentModel(currentModel)
+    }
+    if (flavor === 'mcode') {
         return normalizeCurrentModel(currentModel)
     }
     if (flavor === 'copilot') {

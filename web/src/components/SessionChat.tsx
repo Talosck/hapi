@@ -114,6 +114,7 @@ import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
 import { useGrokModels } from '@/hooks/queries/useGrokModels'
 import { useCopilotModels } from '@/hooks/queries/useCopilotModels'
 import { useKimiModelsForSession } from '@/hooks/queries/useKimiModelsForSession'
+import { useMcodeModelsForSession } from '@/hooks/queries/useMcodeModelsForSession'
 import { buildKimiSessionModelOptions } from '@/components/NewSession/grokModels'
 import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
 import { usePiModels } from '@/hooks/queries/usePiModels'
@@ -1111,6 +1112,24 @@ function SessionChatInner(props: SessionChatProps) {
             ? buildKimiSessionModelOptions(kimiModelsState.availableModels)
             : undefined
     ), [agentFlavor, kimiModelsState.availableModels])
+    // A running MiniMax Code session discovers its catalog over its own ACP
+    // connection, so this works without a background runner on the machine.
+    const mcodeModelsState = useMcodeModelsForSession({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: agentFlavor === 'mcode' && props.session.active
+    })
+    const mcodeModelOptions = useMemo(() => (
+        agentFlavor === 'mcode' && mcodeModelsState.availableModels.length > 0
+            ? [
+                { value: null, label: 'Default' },
+                ...mcodeModelsState.availableModels.map((model) => ({
+                    value: model.modelId,
+                    label: model.name ?? model.modelId
+                }))
+            ]
+            : undefined
+    ), [agentFlavor, mcodeModelsState.availableModels])
     const machineCursorModelsState = useCursorModelsForMachine({
         api: props.api,
         machineId: sessionMachineId,
@@ -2089,6 +2108,8 @@ function SessionChatInner(props: SessionChatProps) {
                                             ? copilotModelOptions
                                             : agentFlavor === 'kimi'
                                                 ? kimiModelOptions
+                                            : agentFlavor === 'mcode'
+                                                ? mcodeModelOptions
                                             : agentFlavor === 'agy'
                                                 ? agyModelOptions
                                         // Pi gets its provider-qualified model list from the piModels prop;

@@ -9,6 +9,7 @@ import DeepSeekColor from '@lobehub/icons/es/DeepSeek/components/Color'
 import GeminiColor from '@lobehub/icons/es/Gemini/components/Color'
 import GrokMono from '@lobehub/icons/es/Grok/components/Mono'
 import KimiMono from '@lobehub/icons/es/Kimi/components/Mono'
+import MinimaxColor from '@lobehub/icons/es/Minimax/components/Color'
 import OpenCodeMono from '@lobehub/icons/es/OpenCode/components/Mono'
 import type { IconType } from '@lobehub/icons/es/types'
 import { CopilotIcon } from '@/components/icons/CopilotIcon'
@@ -26,6 +27,7 @@ const FLAVOR_LOGOS: Record<string, IconType> = {
     gemini: GeminiColor,
     grok: GrokMono,
     kimi: KimiMono,
+    mcode: MinimaxColor,
     opencode: OpenCodeMono,
 }
 

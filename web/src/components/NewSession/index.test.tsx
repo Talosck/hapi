@@ -27,6 +27,9 @@ const mocks = vi.hoisted(() => ({
     kimiModels: [] as Array<{ modelId: string; name?: string; provider?: string }>,
     kimiModelsLoading: false,
     kimiModelsError: null as string | null,
+    mcodeModels: [] as Array<{ modelId: string; name?: string }>,
+    mcodeModelsLoading: false,
+    mcodeModelsError: null as string | null,
     opencodeModels: [] as Array<{ modelId: string; name?: string }>,
     opencodeCurrentModelId: null as string | null,
     opencodeModelsLoading: false,
@@ -174,6 +177,14 @@ vi.mock('@/hooks/queries/useKimiModelsForCwd', () => ({
         error: mocks.kimiModelsError
     })
 }))
+vi.mock('@/hooks/queries/useMcodeModelsForCwd', () => ({
+    useMcodeModelsForCwd: () => ({
+        availableModels: mocks.mcodeModels,
+        currentModelId: null,
+        isLoading: mocks.mcodeModelsLoading,
+        error: mocks.mcodeModelsError
+    })
+}))
 vi.mock('@/hooks/queries/usePiModelsForMachine', () => ({
     usePiModelsForMachine: () => ({
         availableModels: mocks.piModels,
@@ -314,6 +325,9 @@ describe('NewSession launch preferences', () => {
         mocks.kimiModels = []
         mocks.kimiModelsLoading = false
         mocks.kimiModelsError = null
+        mocks.mcodeModels = []
+        mocks.mcodeModelsLoading = false
+        mocks.mcodeModelsError = null
         mocks.opencodeModels = [{ modelId: 'provider/current', name: 'Current' }]
         mocks.opencodeCurrentModelId = 'provider/current'
         mocks.opencodeModelsLoading = false

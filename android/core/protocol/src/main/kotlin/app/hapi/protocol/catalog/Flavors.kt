@@ -19,6 +19,7 @@ sealed interface AgentFlavor {
     data object Gemini : AgentFlavor { override val id = "gemini" }
     data object Grok : AgentFlavor { override val id = "grok" }
     data object Kimi : AgentFlavor { override val id = "kimi" }
+    data object Mcode : AgentFlavor { override val id = "mcode" }
     data object Opencode : AgentFlavor { override val id = "opencode" }
     data object Pi : AgentFlavor { override val id = "pi" }
 
@@ -30,7 +31,7 @@ sealed interface AgentFlavor {
     companion object {
         /** `AGENT_FLAVORS` — declaration order preserved. */
         val KNOWN: List<AgentFlavor> = listOf(
-            Agy, Claude, Codex, Dsh, Copilot, Cursor, Gemini, Grok, Kimi, Opencode, Pi,
+            Agy, Claude, Codex, Dsh, Copilot, Cursor, Gemini, Grok, Kimi, Mcode, Opencode, Pi,
         )
 
         /**
@@ -65,6 +66,7 @@ object Flavors {
         "claude" to setOf(FlavorCapability.ModelChange, FlavorCapability.Effort),
         "gemini" to setOf(FlavorCapability.ModelChange),
         "kimi" to setOf(FlavorCapability.ModelChange),
+        "mcode" to setOf(FlavorCapability.ModelChange),
         "copilot" to setOf(FlavorCapability.ModelChange),
         "grok" to setOf(FlavorCapability.ModelChange, FlavorCapability.Effort),
         "codex" to setOf(FlavorCapability.ModelChange),
@@ -79,6 +81,7 @@ object Flavors {
         "claude" to "Claude",
         "gemini" to "Gemini",
         "kimi" to "Kimi",
+        "mcode" to "MiniMax Code",
         "copilot" to "Copilot",
         "grok" to "Grok Build",
         "codex" to "Codex",

@@ -14,6 +14,7 @@ import { useOpencodeModelVariants } from '@/hooks/queries/useOpencodeModelVarian
 import { useGrokModelsForCwd } from '@/hooks/queries/useGrokModelsForCwd'
 import { useCopilotModelsForCwd } from '@/hooks/queries/useCopilotModelsForCwd'
 import { useKimiModelsForCwd } from '@/hooks/queries/useKimiModelsForCwd'
+import { useMcodeModelsForCwd } from '@/hooks/queries/useMcodeModelsForCwd'
 import { usePiModelsForMachine } from '@/hooks/queries/usePiModelsForMachine'
 import { useAgentAvailability } from '@/hooks/queries/useAgentAvailability'
 import { useSessions } from '@/hooks/queries/useSessions'
@@ -59,6 +60,7 @@ import { EffortField } from './EffortField'
 import { shouldEnableOpencodeModelDiscovery } from './opencodeModelsGate'
 import { buildGrokEffortOptions, buildGrokModelOptions, shouldEnableGrokModelDiscovery } from './grokModels'
 import { buildKimiModelOptions, shouldEnableKimiModelDiscovery } from './grokModels'
+import { buildMcodeModelOptions, shouldEnableMcodeModelDiscovery } from './mcodeModels'
 import { groupModelsByProvider } from '@/components/AssistantChat/piModelGroups'
 import { isThinkingLevelSupported } from '@/components/AssistantChat/piThinkingLevelOptions'
 import {
@@ -656,6 +658,21 @@ export function NewSession(props: {
         () => buildKimiModelOptions(kimiModelsState.availableModels),
         [kimiModelsState.availableModels]
     )
+    const mcodeModelsState = useMcodeModelsForCwd({
+        api: props.api,
+        machineId,
+        cwd: deferredDirectory,
+        enabled: shouldEnableMcodeModelDiscovery({
+            agent,
+            machineId,
+            cwd: deferredDirectory,
+            cwdExists: deferredDirectoryExists,
+        })
+    })
+    const mcodeModelOptions = useMemo(
+        () => buildMcodeModelOptions(mcodeModelsState.availableModels),
+        [mcodeModelsState.availableModels]
+    )
     const copilotModelOptions = useMemo(
         () => [
             { value: 'auto', label: 'Auto' },
@@ -962,6 +979,25 @@ export function NewSession(props: {
         kimiModelsState.availableModels,
         kimiModelsState.error,
         kimiModelsState.isLoading,
+        deferredDirectoryExists,
+        model
+    ])
+    useEffect(() => {
+        if (
+            agent === 'mcode'
+            && deferredDirectoryExists === true
+            && !mcodeModelsState.isLoading
+            && !mcodeModelsState.error
+            && model !== 'auto'
+            && !mcodeModelsState.availableModels.some((candidate) => candidate.modelId === model)
+        ) {
+            setModel('auto')
+        }
+    }, [
+        agent,
+        mcodeModelsState.availableModels,
+        mcodeModelsState.error,
+        mcodeModelsState.isLoading,
         deferredDirectoryExists,
         model
     ])
@@ -1933,6 +1969,8 @@ export function NewSession(props: {
                                         ? copilotModelOptions
                                         : agent === 'kimi'
                                             ? kimiModelOptions
+                                            : agent === 'mcode'
+                                                ? mcodeModelOptions
                                             : agent === 'pi'
                                                 ? (showPiLaunchConfig ? piModelOptions : undefined)
                                         : undefined
@@ -1943,12 +1981,14 @@ export function NewSession(props: {
                             || (agent === 'grok' && Boolean(grokModelsState.error))
                             || (agent === 'copilot' && Boolean(copilotModelsState.error))
                             || (agent === 'kimi' && Boolean(kimiModelsState.error))
+                            || (agent === 'mcode' && Boolean(mcodeModelsState.error))
                             || (agent === 'pi' && Boolean(piModelsState.error))
                         }
                         isLoading={(agent === 'codex' && codexModelsState.isLoading)
                             || (agent === 'grok' && grokModelsState.isLoading)
                             || (agent === 'copilot' && copilotModelsState.isLoading)
                             || (agent === 'kimi' && kimiModelsState.isLoading)
+                            || (agent === 'mcode' && mcodeModelsState.isLoading)
                             || (agent === 'pi' && piModelsState.isLoading)}
                         error={agent === 'codex' && codexModelsState.error
                             ? `${t('newSession.model.loadFailed')}: ${codexModelsState.error}`

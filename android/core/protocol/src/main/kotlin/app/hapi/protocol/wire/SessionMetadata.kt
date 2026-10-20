@@ -43,6 +43,7 @@ data class SessionMetadata(
     val agySessionId: String? = null,
     val cursorSessionId: String? = null,
     val kimiSessionId: String? = null,
+    val mcodeSessionId: String? = null,
     val copilotSessionId: String? = null,
     val piSessionId: String? = null,
 )

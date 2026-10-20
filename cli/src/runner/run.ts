@@ -1967,6 +1967,8 @@ export function buildCliArgs(
         ? 'grok'
         : agent === 'kimi'
           ? 'kimi'
+          : agent === 'mcode'
+            ? 'mcode'
           : agent === 'copilot'
             ? 'copilot'
             : agent === 'opencode'

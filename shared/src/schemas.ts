@@ -83,6 +83,7 @@ export const MetadataSchema = z.object({
     // tiann/hapi#873.
     cursorMigrationState: z.enum(['in_progress', 'ambiguous']).optional(),
     kimiSessionId: z.string().optional(),
+    mcodeSessionId: z.string().optional(),
     copilotSessionId: z.string().optional(),
     piSessionId: z.string().optional(),
     piResumeAttempt: z.object({

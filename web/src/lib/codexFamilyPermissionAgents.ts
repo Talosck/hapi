@@ -23,11 +23,11 @@ export function usesCodexFamilyPermissionModes(
  * Ports: `NewSessionLogic.usesNativePermissionSelect`
  * (`ios/Packages/HapiKit/Sources/HapiClient/NewSession/NewSessionForm.swift`,
  * `android/app/src/main/kotlin/app/hapi/companion/feature/newsession/NewSessionForm.kt`).
- * claude and grok do not share the codex-family mode set, but they render
- * through the same native select.
+ * claude, grok and mcode do not share the codex-family mode set, but they
+ * render through the same native select.
  */
 export function usesNativePermissionSelect(flavor: string | null | undefined): boolean {
-    return flavor === 'claude' || flavor === 'grok' || usesCodexFamilyPermissionModes(flavor)
+    return flavor === 'claude' || flavor === 'grok' || flavor === 'mcode' || usesCodexFamilyPermissionModes(flavor)
 }
 
 /**

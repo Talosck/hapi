@@ -48,6 +48,22 @@ describe('getPermissionModesForFlavor', () => {
         expect(getPermissionModesForFlavor('pi')).toEqual([])
     })
 
+    test('returns the MiniMax Code native permission policy plus plan mode', () => {
+        expect(getPermissionModesForFlavor('mcode')).toEqual([
+            'default',
+            'auto',
+            'bypassPermissions',
+            'plan'
+        ])
+    })
+
+    test('allows every MiniMax Code mode for the mcode flavor only', () => {
+        for (const mode of getPermissionModesForFlavor('mcode')) {
+            expect(isPermissionModeAllowedForFlavor(mode, 'mcode')).toBe(true)
+        }
+        expect(isPermissionModeAllowedForFlavor('bypassPermissions', 'kimi')).toBe(false)
+    })
+
     test("returns [] for pi and does not fall back to Claude modes", () => {
         // Ensure Pi is opt-in empty, not silently inheriting Claude defaults.
         expect(getPermissionModesForFlavor('pi')).not.toEqual(getPermissionModesForFlavor('claude'))

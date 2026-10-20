@@ -43,6 +43,7 @@ import type {
     GitCommandResponse,
     GrokModelsResponse,
     KimiModelsResponse,
+    McodeModelsResponse,
     CopilotModelsResponse,
     GrokReasoningEffortResponse,
     ListDirectoryResponse,
@@ -971,6 +972,18 @@ export class ApiClient {
     async getSessionKimiModels(sessionId: string): Promise<KimiModelsResponse> {
         return await this.request<KimiModelsResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/kimi-models`
+        )
+    }
+
+    async getMachineMcodeModelsForCwd(machineId: string, cwd: string): Promise<McodeModelsResponse> {
+        return await this.request<McodeModelsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/mcode-models?cwd=${encodeURIComponent(cwd)}`
+        )
+    }
+
+    async getSessionMcodeModels(sessionId: string): Promise<McodeModelsResponse> {
+        return await this.request<McodeModelsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/mcode-models`
         )
     }
 

@@ -869,7 +869,7 @@ class NewSessionViewModel(
 
         /** `resolveHapiYoloPermissionMode` (`shared/src/agentConfig.ts`). */
         fun hapiYoloNativeMode(flavor: String?): PermissionMode? = when (flavor) {
-            "claude", "grok" -> PermissionMode.BypassPermissions
+            "claude", "grok", "mcode" -> PermissionMode.BypassPermissions
             "agy" -> PermissionMode.AlwaysProceed
             "codex", "copilot", "cursor", "gemini", "kimi", "opencode" -> PermissionMode.Yolo
             else -> null

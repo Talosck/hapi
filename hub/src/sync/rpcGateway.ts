@@ -24,6 +24,7 @@ import type {
     CopilotModelsResponse,
     GrokModelsResponse,
     KimiModelsResponse,
+    McodeModelsResponse,
     GrokReasoningEffortResponse,
     ListDirectoryResponse,
     ListCodexSessionsRpcResponse,
@@ -115,6 +116,7 @@ export type RpcListOpencodeModelVariantsResponse = OpencodeModelVariantsResponse
 export type RpcListGrokModelsResponse = GrokModelsResponse
 export type RpcListCopilotModelsResponse = CopilotModelsResponse
 export type RpcListKimiModelsResponse = KimiModelsResponse
+export type RpcListMcodeModelsResponse = McodeModelsResponse
 export type RpcListGrokReasoningEffortOptionsResponse = GrokReasoningEffortResponse
 export type RpcListOpencodeReasoningEffortOptionsResponse = OpencodeReasoningEffortResponse
 export type RpcListAgyModelsResponse = AgyModelsResponse
@@ -535,6 +537,29 @@ export class RpcGateway {
             {},
             MODEL_LIST_RPC_TIMEOUT_MS
         ) as RpcListKimiModelsResponse
+    }
+
+    async listMcodeModelsForCwd(machineId: string, cwd: string): Promise<RpcListMcodeModelsResponse> {
+        return await this.machineRpc(
+            machineId,
+            RPC_METHODS.ListMcodeModelsForCwd,
+            { cwd },
+            MODEL_LIST_RPC_TIMEOUT_MS
+        ) as RpcListMcodeModelsResponse
+    }
+
+    /**
+     * Active-session MiniMax Code discovery. The probe runs in the CLI that
+     * owns the session, so it works without a background runner on the
+     * machine.
+     */
+    async listMcodeModelsForSession(sessionId: string): Promise<RpcListMcodeModelsResponse> {
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.ListMcodeModels,
+            {},
+            MODEL_LIST_RPC_TIMEOUT_MS
+        ) as RpcListMcodeModelsResponse
     }
 
     /** Generic Pi RPC call — routes all Pi-specific session RPCs through

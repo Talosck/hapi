@@ -69,6 +69,12 @@ object PermissionModes {
     /** `OPENCODE_PERMISSION_MODES`. */
     val OPENCODE = listOf(PermissionMode.Default, PermissionMode.Plan, PermissionMode.Yolo)
 
+    /** `MCODE_PERMISSION_MODES` — MiniMax Code's own policy plus plan mode. */
+    val MCODE = listOf(
+        PermissionMode.Default, PermissionMode.Auto,
+        PermissionMode.BypassPermissions, PermissionMode.Plan,
+    )
+
     /** `CURSOR_PERMISSION_MODES`. */
     val CURSOR = listOf(
         PermissionMode.Default, PermissionMode.Plan, PermissionMode.Ask,
@@ -86,6 +92,7 @@ object PermissionModes {
         "kimi" -> CODEX
         "copilot" -> CODEX
         "grok" -> GROK
+        "mcode" -> MCODE
         "opencode" -> OPENCODE
         "dsh" -> emptyList()
         "agy" -> AGY
