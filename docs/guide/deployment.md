@@ -302,6 +302,15 @@ WantedBy=default.target
 
 > **What `start-sync` guarantees.** It is written to be a supervisor's foreground process: it becomes the runner when none is running, and when a runner it did not start is already running (manual `hapi runner start`, or the child that takes over during a CLI-upgrade self-restart) it **stays attached** to that runner instead of exiting. It exits `0` only when the supervisor asks it to stop, and non-zero once the runner it was following dies, so `Restart=always` cold-starts a runner the unit owns. This is what makes `Restart=always` safe here — older CLI builds exited `0` in the "already running" case, which turns this unit into a 5-second restart loop (`journalctl --user -u hapi-runner` shows `Runner already running with matching version` followed by `Scheduled restart job`). On such a build, either upgrade or switch to `Restart=on-failure`.
 
+> **Point `ExecStart` at the runner binary, not at a shim.** npm installs `hapi` as a small node script that spawns the platform binary as a child. `KillMode=process` only signals `MainPID`, so with a shim as `ExecStart` the actual runner survives `systemctl stop` as an orphan in the unit's cgroup — the unit reports `inactive` while a runner is still serving — and a later start either attaches to it or, on older builds, loops. Use a wrapper that `exec`s the binary (replacing the shell, so `MainPID` becomes the runner):
+>
+> ```sh
+> #!/bin/sh
+> exec /usr/local/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi "$@"
+> ```
+>
+> or point `ExecStart` at that platform binary directly, keeping the `runner start-sync …` arguments.
+
 Enable and start:
 
 ```bash
