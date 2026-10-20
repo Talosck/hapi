@@ -156,6 +156,52 @@ describe('usage service', () => {
         store.close()
     })
 
+    it('attributes mcode transcript usage to the mcode agent', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'mcode-usage-test',
+            { path: '/tmp', host: 'test', flavor: 'mcode' },
+            null,
+            'default',
+            'm:minimax:MiniMax-M3.1-Flash:v:thinking'
+        )
+
+        const usage = (inputTokens: number, outputTokens: number, cachedInputTokens: number, totalTokens: number) => ({
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                model: 'm:minimax:MiniMax-M3.1-Flash:v:thinking',
+                usageSchema: 'hapi.usage.v1',
+                inputTokenSemantics: 'includes-cache',
+                info: {
+                    total: { inputTokens, outputTokens, cachedInputTokens, totalTokens },
+                    contextTokens: 28_119,
+                    modelContextWindow: 512_000
+                }
+            }
+        })
+        addAgentMessage(store, session.id, usage(14_644, 2, 14_018, 14_646))
+        addAgentMessage(store, session.id, usage(18_706, 580, 17_536, 19_286))
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.requests).toBe(2)
+        expect(result.totals.inputTokens).toBe(33_350)
+        expect(result.totals.outputTokens).toBe(582)
+        expect(result.totals.cacheReadTokens).toBe(31_554)
+        expect(result.totals.totalTokens).toBe(33_932)
+        expect(result.totals.uncachedTokens).toBe(2_378)
+        expect(result.byAgent).toEqual([
+            expect.objectContaining({ key: 'mcode', totalTokens: 33_932 })
+        ])
+        expect(result.byModel).toEqual([
+            expect.objectContaining({
+                key: 'm:minimax:MiniMax-M3.1-Flash:v:thinking',
+                totalTokens: 33_932
+            })
+        ])
+        store.close()
+    })
+
     it('recognizes the model-bearing historical generic ACP wire as inclusive', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession(

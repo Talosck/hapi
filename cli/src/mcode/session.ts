@@ -9,10 +9,16 @@ type LocalLaunchFailure = {
     exitReason: LocalLaunchExitReason;
 };
 
+export type McodeContextUsage = {
+    contextTokens?: number;
+    contextWindow?: number;
+};
+
 export class McodeSession extends AgentSessionBase<McodeMode> {
     readonly startedBy: 'runner' | 'terminal';
     readonly startingMode: 'local' | 'remote';
     localLaunchFailure: LocalLaunchFailure | null = null;
+    private lastContextUsage: McodeContextUsage | null = null;
 
     constructor(opts: {
         api: ApiClient;
@@ -70,7 +76,37 @@ export class McodeSession extends AgentSessionBase<McodeMode> {
     };
 
     sendAgentMessage = (message: unknown): void => {
+        this.captureContextUsage(message);
         this.client.sendAgentMessage(message);
+    };
+
+    /**
+     * Latest context window reported by the ACP backend. The usage watcher
+     * attaches it to transcript-derived token counts so they do not replace the
+     * context bar's `used / window` reading with a single call's prompt size.
+     */
+    getLastContextUsage = (): McodeContextUsage | null => this.lastContextUsage;
+
+    private captureContextUsage = (message: unknown): void => {
+        if (!message || typeof message !== 'object') return;
+        const record = message as Record<string, unknown>;
+        if (record.type !== 'token_count') return;
+        const info = record.info;
+        if (!info || typeof info !== 'object') return;
+
+        const infoRecord = info as Record<string, unknown>;
+        const contextTokens = typeof infoRecord.contextTokens === 'number'
+            ? infoRecord.contextTokens
+            : undefined;
+        const contextWindow = typeof infoRecord.modelContextWindow === 'number'
+            ? infoRecord.modelContextWindow
+            : undefined;
+        if (contextTokens === undefined && contextWindow === undefined) return;
+
+        this.lastContextUsage = {
+            ...(contextTokens !== undefined ? { contextTokens } : {}),
+            ...(contextWindow !== undefined ? { contextWindow } : {})
+        };
     };
 
     sendUserMessage = (text: string): void => {

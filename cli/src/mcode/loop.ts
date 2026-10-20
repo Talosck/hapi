@@ -4,6 +4,7 @@ import { runLocalRemoteSession } from '@/agent/loopBase';
 import { McodeSession } from './session';
 import { mcodeLocalLauncher } from './mcodeLocalLauncher';
 import { mcodeRemoteLauncher } from './mcodeRemoteLauncher';
+import { buildMcodeUsageMessage, createMcodeUsageWatcher } from './utils/mcodeUsage';
 import { ApiClient, ApiSessionClient } from '@/lib';
 import type { McodeMode, PermissionMode } from './types';
 
@@ -68,21 +69,52 @@ export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
         return sessionEffort != null ? sessionEffort : opts.effort;
     };
 
-    await runLocalRemoteSession({
-        session,
-        startingMode: opts.startingMode,
-        logTag: 'mcode-loop',
-        runLocal: (instance) => mcodeLocalLauncher(instance, {
-            model: getCurrentModel()
-        }),
-        runRemote: (instance) => mcodeRemoteLauncher(instance, {
-            model: getCurrentModel(),
-            effort: getCurrentEffort(),
-            onConfigDiscovered: opts.onConfigDiscovered,
-            onModelRollback: opts.onModelRollback,
-            onEffortRollback: opts.onEffortRollback,
-            onPermissionModeRollback: opts.onPermissionModeRollback
-        }),
-        onSessionReady: opts.onSessionReady
+    // mcode's ACP server exposes context size but not token counts, so usage is
+    // read from the native transcript it writes for every model call. The
+    // watcher only forwards records written after HAPI attaches, keeping
+    // pre-HAPI history out of the dashboard.
+    const usageWatcher = createMcodeUsageWatcher({
+        onUsage: (record) => {
+            const converted = buildMcodeUsageMessage(
+                record,
+                session.getModel() ?? opts.model ?? record.model,
+                session.getLastContextUsage()
+            );
+            if (converted) {
+                session.sendAgentMessage(converted);
+            }
+        }
     });
+    const attachUsageWatcher = (nativeSessionId: string): void => {
+        void usageWatcher.attach(nativeSessionId).catch((error) => {
+            logger.debug('[mcode] Failed to attach usage watcher', error);
+        });
+    };
+    session.addSessionFoundCallback(attachUsageWatcher);
+    if (session.sessionId) {
+        attachUsageWatcher(session.sessionId);
+    }
+
+    try {
+        await runLocalRemoteSession({
+            session,
+            startingMode: opts.startingMode,
+            logTag: 'mcode-loop',
+            runLocal: (instance) => mcodeLocalLauncher(instance, {
+                model: getCurrentModel()
+            }),
+            runRemote: (instance) => mcodeRemoteLauncher(instance, {
+                model: getCurrentModel(),
+                effort: getCurrentEffort(),
+                onConfigDiscovered: opts.onConfigDiscovered,
+                onModelRollback: opts.onModelRollback,
+                onEffortRollback: opts.onEffortRollback,
+                onPermissionModeRollback: opts.onPermissionModeRollback
+            }),
+            onSessionReady: opts.onSessionReady
+        });
+    } finally {
+        session.removeSessionFoundCallback(attachUsageWatcher);
+        await usageWatcher.cleanup();
+    }
 }
