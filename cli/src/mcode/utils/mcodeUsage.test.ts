@@ -1,15 +1,14 @@
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     buildMcodeUsageMessage,
     createMcodeUsageWatcher,
     findMcodeMessagesPath,
-    mcodeSessionDirSuffix,
     parseMcodeUsageLine,
     readMcodeUsageSince
 } from './mcodeUsage';
+import { mcodeSessionDirSuffix } from './mcodeSessionDirs';
 
 const tempDirs: string[] = [];
 
@@ -32,7 +31,8 @@ function assistantLine(opts: {
     cacheRead?: number;
     cacheWrite?: number;
     totalTokens?: number;
-    timestamp?: number;
+    timestamp?: number | string;
+    omitTimestamp?: boolean;
 } = {}): string {
     return JSON.stringify({
         message_id: opts.messageId ?? 'msg-assistant-1',
@@ -40,7 +40,7 @@ function assistantLine(opts: {
         message: {
             role: 'assistant',
             model: opts.model ?? 'MiniMax-M3.1-Flash',
-            timestamp: opts.timestamp ?? Date.now(),
+            ...(opts.omitTimestamp ? {} : { timestamp: opts.timestamp ?? Date.now() }),
             usage: {
                 input: opts.input ?? 100,
                 output: opts.output ?? 20,
@@ -111,6 +111,22 @@ describe('parseMcodeUsageLine', () => {
             cacheWriteTokens: 4,
             totalTokens: 24
         });
+    });
+
+    it('reads the timestamp from epoch milliseconds, epoch seconds and ISO strings', () => {
+        expect(parseMcodeUsageLine(assistantLine({ timestamp: 1_700_000_000_000 }))?.timestampMs)
+            .toBe(1_700_000_000_000);
+        expect(parseMcodeUsageLine(assistantLine({ timestamp: 1_700_000_000 }))?.timestampMs)
+            .toBe(1_700_000_000_000);
+        expect(parseMcodeUsageLine(assistantLine({ timestamp: '2023-11-14T22:13:20.000Z' }))?.timestampMs)
+            .toBe(1_700_000_000_000);
+        expect(parseMcodeUsageLine(assistantLine({ timestamp: '1700000000000' }))?.timestampMs)
+            .toBe(1_700_000_000_000);
+    });
+
+    it('reports an unreadable timestamp as missing', () => {
+        expect(parseMcodeUsageLine(assistantLine({ timestamp: 'not-a-date' }))?.timestampMs).toBeNull();
+        expect(parseMcodeUsageLine(assistantLine({ omitTimestamp: true }))?.timestampMs).toBeNull();
     });
 });
 
@@ -279,6 +295,177 @@ describe('createMcodeUsageWatcher', () => {
             await watcher.flush();
             expect(onUsage).toHaveBeenCalledTimes(1);
             expect(onUsage.mock.calls[0]?.[0]).toMatchObject({ messageId: 'post-attach' });
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
+    it('bills the previous session before switching to another native session', async () => {
+        const dataDir = await createTempDir();
+        const sessionId = 'mvs_switch_test';
+        const dir = sessionDir(dataDir, sessionId);
+        await mkdir(dir, { recursive: true });
+        const messagesPath = join(dir, 'messages.jsonl');
+
+        const onUsage = vi.fn();
+        const watcher = createMcodeUsageWatcher({ dataDir, onUsage, pollIntervalMs: 60_000 });
+        try {
+            await watcher.attach(sessionId);
+            await writeFile(messagesPath, `${assistantLine({ messageId: 'first' })}\n`);
+            await watcher.flush();
+            expect(onUsage).toHaveBeenCalledTimes(1);
+
+            await appendFile(messagesPath, `${assistantLine({ messageId: 'second' })}\n`);
+            // Switching sessions flushes what the previous session wrote.
+            await watcher.attach('mvs_other_session');
+
+            expect(onUsage).toHaveBeenCalledTimes(2);
+            expect(onUsage.mock.calls[1]?.[0]).toMatchObject({ messageId: 'second' });
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
+    it('reports a transcript that cannot be located', async () => {
+        const dataDir = await createTempDir();
+        const onUsage = vi.fn();
+        const onWarning = vi.fn();
+        const watcher = createMcodeUsageWatcher({
+            dataDir,
+            onUsage,
+            onWarning,
+            pollIntervalMs: 60_000,
+            discoveryRetryMs: 0,
+            maxSessionDirLookups: 1
+        });
+        try {
+            await watcher.attach('mvs_missing');
+            await vi.waitFor(() => {
+                expect(onWarning).toHaveBeenCalledTimes(1);
+            });
+            expect(onWarning.mock.calls[0]?.[0]).toMatch(/could not be located/);
+            expect(onUsage).not.toHaveBeenCalled();
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
+    it('reports a transcript that has not appeared yet without giving up', async () => {
+        const dataDir = await createTempDir();
+        const sessionId = 'mvs_idle_test';
+        await mkdir(sessionDir(dataDir, sessionId), { recursive: true });
+
+        const onUsage = vi.fn();
+        const onWarning = vi.fn();
+        const watcher = createMcodeUsageWatcher({
+            dataDir,
+            onUsage,
+            onWarning,
+            pollIntervalMs: 60_000,
+            discoveryRetryMs: 0,
+            maxJournalWaitAttempts: 1
+        });
+        try {
+            await watcher.attach(sessionId);
+            await vi.waitFor(() => {
+                expect(onWarning).not.toHaveBeenCalled();
+            });
+            // The transcript shows up with the first prompt.
+            const messagesPath = join(sessionDir(dataDir, sessionId), 'messages.jsonl');
+            await writeFile(messagesPath, `${assistantLine({ messageId: 'first-prompt' })}\n`);
+            await watcher.flush();
+
+            expect(onUsage).toHaveBeenCalledTimes(1);
+            expect(onUsage.mock.calls[0]?.[0]).toMatchObject({ messageId: 'first-prompt' });
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
+    it('skips a record without a readable timestamp while pre-attach history is excluded', async () => {
+        const dataDir = await createTempDir();
+        const sessionId = 'mvs_no_timestamp_test';
+        const dir = sessionDir(dataDir, sessionId);
+        await mkdir(dir, { recursive: true });
+        const messagesPath = join(dir, 'messages.jsonl');
+        await writeFile(
+            messagesPath,
+            `${assistantLine({ messageId: 'post-attach', timestamp: Date.now() + 30_000 })}\n`
+            + `${assistantLine({ messageId: 'no-timestamp', omitTimestamp: true })}\n`
+        );
+        // The journal was written after the attach, so the pre-attach floor
+        // applies and every record has to be checked against it.
+        const writtenAt = new Date(Date.now() + 60_000);
+        await utimes(messagesPath, writtenAt, writtenAt);
+
+        const onUsage = vi.fn();
+        const onWarning = vi.fn();
+        const watcher = createMcodeUsageWatcher({ dataDir, onUsage, onWarning, pollIntervalMs: 60_000 });
+        try {
+            await watcher.attach(sessionId);
+            await vi.waitFor(() => {
+                expect(onWarning).toHaveBeenCalledTimes(1);
+            });
+
+            // The record that cannot be proven to be new is skipped.
+            expect(onUsage).toHaveBeenCalledTimes(1);
+            expect(onUsage.mock.calls[0]?.[0]).toMatchObject({ messageId: 'post-attach' });
+            expect(onWarning.mock.calls[0]?.[0]).toMatch(/no readable timestamp/);
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
+    it('reports a transcript that was rewritten while it was being read', async () => {
+        const dataDir = await createTempDir();
+        const sessionId = 'mvs_rewritten_test';
+        const dir = sessionDir(dataDir, sessionId);
+        await mkdir(dir, { recursive: true });
+        const messagesPath = join(dir, 'messages.jsonl');
+        await writeFile(messagesPath, `${assistantLine({ messageId: 'long' })}\n`.repeat(20));
+
+        const onUsage = vi.fn();
+        const onWarning = vi.fn();
+        const watcher = createMcodeUsageWatcher({ dataDir, onUsage, onWarning, pollIntervalMs: 60_000 });
+        try {
+            await watcher.attach(sessionId);
+            await watcher.flush();
+
+            // A shorter journal means it was replaced rather than appended to.
+            await writeFile(messagesPath, `${assistantLine({ messageId: 'short' })}\n`);
+            await watcher.flush();
+
+            await vi.waitFor(() => {
+                expect(onWarning).toHaveBeenCalledTimes(1);
+            });
+            expect(onWarning.mock.calls[0]?.[0]).toMatch(/rewritten/);
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
+    it('reports a transcript that disappeared while it was being read', async () => {
+        const dataDir = await createTempDir();
+        const sessionId = 'mjs_vanished_test';
+        const dir = sessionDir(dataDir, sessionId);
+        await mkdir(dir, { recursive: true });
+        const messagesPath = join(dir, 'messages.jsonl');
+        await writeFile(messagesPath, `${assistantLine({ messageId: 'first' })}\n`);
+
+        const onUsage = vi.fn();
+        const onWarning = vi.fn();
+        const watcher = createMcodeUsageWatcher({ dataDir, onUsage, onWarning, pollIntervalMs: 60_000 });
+        try {
+            await watcher.attach(sessionId);
+            await watcher.flush();
+
+            await rm(messagesPath);
+            await watcher.flush();
+
+            await vi.waitFor(() => {
+                expect(onWarning).toHaveBeenCalledTimes(1);
+            });
+            expect(onWarning.mock.calls[0]?.[0]).toMatch(/disappeared/);
         } finally {
             await watcher.cleanup();
         }

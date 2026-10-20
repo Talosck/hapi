@@ -83,6 +83,11 @@ export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
             if (converted) {
                 session.sendAgentMessage(converted);
             }
+        },
+        // A transcript that cannot be found leaves the session without any
+        // usage at all, so say so instead of failing silently.
+        onWarning: (message) => {
+            session.sendSessionEvent({ type: 'message', message });
         }
     });
     const attachUsageWatcher = (nativeSessionId: string): void => {

@@ -1,8 +1,12 @@
-import { open, readdir, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { open, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { convertAgentMessage, type CodexMessage } from '@/agent/messageConverter';
 import { logger } from '@/ui/logger';
+import {
+    createMcodeSessionDirResolver,
+    findMcodeSessionDir,
+    getMcodeDataDir
+} from './mcodeSessionDirs';
 
 /**
  * Usage for one model call, as persisted by MiniMax Code in
@@ -22,6 +26,7 @@ export type McodeUsageRecord = {
     cacheReadTokens: number;
     cacheWriteTokens: number;
     totalTokens: number;
+    /** Message timestamp in milliseconds, or null when it cannot be read. */
     timestampMs: number | null;
 };
 
@@ -35,7 +40,12 @@ type JsonRecord = Record<string, unknown>;
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 const DISCOVERY_RETRY_MS = 1000;
 const MAX_SESSION_DIR_LOOKUPS = 120;
-const SESSION_DIR_PREFIX = 'session_';
+/**
+ * How long the transcript may stay missing before the wait is reported. The
+ * journal normally appears with the first prompt, so the wait continues past
+ * this point — the report only says that usage is not being recorded yet.
+ */
+const MAX_JOURNAL_WAIT_ATTEMPTS = 120;
 
 function asRecord(value: unknown): JsonRecord | null {
     return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -53,52 +63,30 @@ function asCount(value: unknown): number | null {
         : null;
 }
 
-/** `~/.minimax` by default; both env vars are honored by the mcode CLI. */
-export function getMcodeDataDir(): string {
-    const configured = process.env.MINIMAX_DATA_DIR?.trim() || process.env.MAVIS_DATA_DIR?.trim();
-    return configured || join(homedir(), '.minimax');
-}
-
-/** Directory names end in `session_<base64url(sessionId)>` (capped at 180 chars). */
-export function mcodeSessionDirSuffix(sessionId: string): string {
-    return `${SESSION_DIR_PREFIX}${Buffer.from(sessionId, 'utf8').toString('base64url').slice(0, 180)}`;
-}
-
-async function listDirectories(path: string): Promise<string[]> {
-    try {
-        const entries = await readdir(path, { withFileTypes: true });
-        return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
-    } catch {
-        return [];
-    }
-}
-
 /**
- * Locates the native session directory. The layout is
- * `<dataDir>/v2/sessions/<year>/<month>/<day>/<time>-<suffix>/`.
+ * The transcript timestamp in milliseconds, or null when it cannot be read.
+ *
+ * mcode writes epoch milliseconds, but the value is compared against the
+ * attach time to keep pre-HAPI history out of the dashboard, so a build that
+ * writes ISO strings or epoch seconds still has to yield a usable number.
  */
-export async function findMcodeSessionDir(
-    sessionId: string,
-    dataDir: string = getMcodeDataDir()
-): Promise<string | null> {
-    const root = join(dataDir, 'v2', 'sessions');
-    const suffix = mcodeSessionDirSuffix(sessionId);
-
-    for (const year of await listDirectories(root)) {
-        const yearPath = join(root, year);
-        for (const month of await listDirectories(yearPath)) {
-            const monthPath = join(yearPath, month);
-            for (const day of await listDirectories(monthPath)) {
-                const dayPath = join(monthPath, day);
-                for (const sessionDir of await listDirectories(dayPath)) {
-                    if (sessionDir.endsWith(`-${suffix}`)) {
-                        return join(dayPath, sessionDir);
-                    }
-                }
-            }
-        }
+function parseTimestampMs(value: unknown): number | null {
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value) || value < 0) return null;
+        // Epoch seconds are a thousand times smaller than milliseconds.
+        return value >= 1e8 && value < 1e11 ? Math.floor(value * 1000) : Math.floor(value);
     }
-    return null;
+    if (typeof value !== 'string') return null;
+
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    // A numeric string is an epoch value, not a date literal.
+    if (/^\d+$/.test(trimmed)) {
+        const numeric = Number(trimmed);
+        return numeric >= 1e8 && numeric < 1e11 ? Math.floor(numeric * 1000) : Math.floor(numeric);
+    }
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
 }
 
 /** Locates the canonical messages journal for a native mcode session. */
@@ -144,7 +132,7 @@ export function parseMcodeUsageLine(line: string): McodeUsageRecord | null {
         cacheReadTokens,
         cacheWriteTokens,
         totalTokens,
-        timestampMs: asCount(message.timestamp)
+        timestampMs: parseTimestampMs(message.timestamp)
     };
 }
 
@@ -238,8 +226,20 @@ export function buildMcodeUsageMessage(
 
 export type McodeUsageWatcherOptions = {
     onUsage: (record: McodeUsageRecord) => void;
+    /**
+     * Reports a problem that stops usage recording. The message is surfaced
+     * in the session so a silently missing transcript is not mistaken for an
+     * idle agent.
+     */
+    onWarning?: (message: string) => void;
     dataDir?: string;
     pollIntervalMs?: number;
+    /** Delay between discovery attempts. */
+    discoveryRetryMs?: number;
+    /** How many discovery attempts run before a missing transcript is reported. */
+    maxSessionDirLookups?: number;
+    /** How many attempts a missing transcript is waited for before it is reported. */
+    maxJournalWaitAttempts?: number;
 };
 
 export type McodeUsageWatcher = {
@@ -262,6 +262,12 @@ export type McodeUsageWatcher = {
 export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): McodeUsageWatcher {
     const dataDir = options.dataDir ?? getMcodeDataDir();
     const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    const discoveryRetryMs = options.discoveryRetryMs ?? DISCOVERY_RETRY_MS;
+    const maxSessionDirLookups = options.maxSessionDirLookups ?? MAX_SESSION_DIR_LOOKUPS;
+    const maxJournalWaitAttempts = options.maxJournalWaitAttempts ?? MAX_JOURNAL_WAIT_ATTEMPTS;
+    // The resolver keeps the day directories it already searched, so a
+    // discovery retry does not re-walk the whole dated session tree.
+    const sessionDirResolver = createMcodeSessionDirResolver({ dataDir });
 
     let sessionId: string | null = null;
     let sessionDir: string | null = null;
@@ -271,11 +277,36 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
     let minTimestampMs: number | null = null;
     let generation = 0;
     let discoveryAttempts = 0;
+    let journalWaitAttempts = 0;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
     let discoveryTimer: ReturnType<typeof setTimeout> | null = null;
     let pollPromise: Promise<void> | null = null;
     let discoveryPromise: Promise<void> | null = null;
     let stopped = false;
+    const reportedWarnings = new Set<string>();
+
+    /** Logs a warning once, for problems that do not need the user's attention. */
+    const warnOnce = (message: string): void => {
+        if (reportedWarnings.has(message)) return;
+        reportedWarnings.add(message);
+        logger.warn(`[mcode-usage] ${message}`);
+    };
+
+    /**
+     * Logs a warning once and surfaces it in the session. Used for failures
+     * that stop usage recording: without them the dashboard would just show
+     * an empty session and nothing would say why.
+     */
+    const warnUserOnce = (message: string): void => {
+        if (reportedWarnings.has(message)) return;
+        reportedWarnings.add(message);
+        logger.warn(`[mcode-usage] ${message}`);
+        try {
+            options.onWarning?.(message);
+        } catch (error) {
+            logger.debug('[mcode-usage] Failed to report a usage warning', error);
+        }
+    };
 
     const clearPollTimer = (): void => {
         if (pollTimer) {
@@ -310,6 +341,16 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
             // A mode handoff may attach the watcher to another native session
             // while this read was in flight; never bill the old one.
             if (stopped || targetGeneration !== generation) return;
+            if (result.nextOffset < startOffset) {
+                // The journal is append-only for a live session, so a smaller
+                // file means it was replaced. The replacement is not replayed
+                // (that would bill the same call twice), so the usage it holds
+                // is lost.
+                warnUserOnce(
+                    'The MiniMax Code transcript was rewritten while it was being read;'
+                    + ' some token usage for this session is missing.'
+                );
+            }
             offset = result.nextOffset;
             if (timestampFloor !== null && result.nextOffset > startOffset) {
                 // The catch-up read covered the file's current tail; later
@@ -318,17 +359,35 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
             }
             for (const record of result.records) {
                 if (stopped || targetGeneration !== generation) return;
-                if (
-                    timestampFloor !== null
-                    && record.timestampMs !== null
-                    && record.timestampMs < timestampFloor
-                ) {
-                    continue;
+                if (timestampFloor !== null) {
+                    if (record.timestampMs === null) {
+                        // The floor keeps pre-HAPI history out of the dashboard.
+                        // A record without a readable timestamp cannot be
+                        // proven to be newer than the attach, so it is skipped
+                        // rather than billed to this session.
+                        warnUserOnce(
+                            'Some MiniMax Code usage records have no readable timestamp and'
+                            + ' were skipped, so token usage for this session may be incomplete.'
+                        );
+                        continue;
+                    }
+                    if (record.timestampMs < timestampFloor) continue;
                 }
                 try {
                     options.onUsage(record);
                 } catch (error) {
                     logger.debug('[mcode-usage] Failed to forward a usage record', error);
+                }
+            }
+            if (result.records.length === 0 && result.nextOffset === startOffset) {
+                // Nothing was appended. A journal that vanished (rotated away)
+                // reads exactly like an idle one, so check for it explicitly.
+                const stats = await fileStats(targetPath);
+                if (!stats && !stopped && targetGeneration === generation) {
+                    warnUserOnce(
+                        'The MiniMax Code transcript disappeared while it was being read;'
+                        + ' token usage recording for this session has stopped.'
+                    );
                 }
             }
         })().finally(() => {
@@ -350,17 +409,25 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
         // A missing session directory means this mcode build does not use the
         // expected layout. A missing messages.jsonl is normal for an idle new
         // session, so only the directory lookup is bounded.
-        if (!sessionDir && discoveryAttempts >= MAX_SESSION_DIR_LOOKUPS) {
-            logger.debug(
-                `[mcode-usage] Native session directory not found after ${discoveryAttempts} attempts;`
-                + ' usage for this session will not be recorded'
+        if (!sessionDir && discoveryAttempts >= maxSessionDirLookups) {
+            warnUserOnce(
+                'MiniMax Code\'s session transcript could not be located, so token usage'
+                + ' will not be recorded for this session.'
             );
             return;
+        }
+        if (sessionDir && journalWaitAttempts >= maxJournalWaitAttempts) {
+            // The journal normally appears with the first prompt, so keep
+            // waiting for it, but say that usage is not being recorded yet.
+            warnOnce(
+                'MiniMax Code\'s session transcript has not appeared yet, so token usage'
+                + ' for this session is not being recorded.'
+            );
         }
         discoveryTimer = setTimeout(() => {
             discoveryTimer = null;
             void discover();
-        }, DISCOVERY_RETRY_MS);
+        }, discoveryRetryMs);
         discoveryTimer.unref?.();
     };
 
@@ -373,7 +440,7 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
         discoveryPromise = (async () => {
             let dir = sessionDir;
             if (!dir) {
-                dir = await findMcodeSessionDir(targetSessionId, dataDir);
+                dir = await sessionDirResolver.resolve(targetSessionId);
                 if (stopped || targetGeneration !== generation) return;
                 if (!dir) {
                     discoveryAttempts += 1;
@@ -388,11 +455,13 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
             if (!stats) {
                 // The journal appears with the first prompt; keep waiting even
                 // if the user leaves the session idle for a long time.
+                journalWaitAttempts += 1;
                 scheduleDiscovery();
                 return;
             }
 
             messagesPath = path;
+            journalWaitAttempts = 0;
             if (stats.mtimeMs < attachedAtMs) {
                 // The journal predates this attach: resume from its tail so
                 // pre-HAPI history is never attributed to this session.
@@ -427,6 +496,13 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
             return;
         }
 
+        // Bill what the previous native session wrote before switching away.
+        // A mode handoff would otherwise drop the last poll interval of usage
+        // for the session that is being left behind.
+        if (messagesPath) {
+            await flush();
+        }
+
         clearPollTimer();
         clearDiscoveryTimer();
         generation += 1;
@@ -437,6 +513,7 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
         attachedAtMs = Date.now();
         minTimestampMs = null;
         discoveryAttempts = 0;
+        journalWaitAttempts = 0;
         await discover();
     };
 
