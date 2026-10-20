@@ -113,6 +113,10 @@ export class McodeSession extends AgentSessionBase<McodeMode> {
         this.client.sendUserMessage(text);
     };
 
+    sendBackgroundTaskDelta = (delta: { started?: number; completed?: number }): void => {
+        this.client.sendBackgroundTaskDelta(delta);
+    };
+
     sendSessionEvent = (event: Parameters<ApiSessionClient['sendSessionEvent']>[0]): void => {
         this.client.sendSessionEvent(event);
     };

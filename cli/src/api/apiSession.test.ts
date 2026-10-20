@@ -218,6 +218,33 @@ describe('ApiSessionClient lazy materialization', () => {
         client.close()
     })
 
+    it('reports background task deltas on the session socket', async () => {
+        socketHarness.sockets.length = 0
+        const materialize = vi.fn(async (snapshot) => createSession({
+            namespace: 'default',
+            metadata: snapshot.metadata,
+            metadataVersion: 1,
+            agentState: snapshot.agentState,
+            agentStateVersion: 1
+        }))
+        const client = new ApiSessionClient('token', createSession(), { materialize })
+        client.updateMetadata(() => ({ path: '/tmp/project', host: 'localhost', codexSessionId: 'codex-thread' }))
+        client.sendUserMessage('hello')
+        await client.materialize()
+
+        const socket = socketHarness.sockets[0]
+        expect(socket).toBeDefined()
+        socket!.emitted.length = 0
+
+        client.sendBackgroundTaskDelta({ started: 2, completed: 1 })
+        client.sendBackgroundTaskDelta({})
+        client.close()
+
+        expect(socket!.emitted).toEqual([
+            { event: 'background-task', args: [{ sid: '11111111-1111-4111-8111-111111111111', started: 2, completed: 1 }] }
+        ])
+    })
+
     it('materializes on non-text user activity and preserves following agent events', async () => {
         socketHarness.sockets.length = 0
         const pendingMaterialization = deferred<Session>()

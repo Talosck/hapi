@@ -202,6 +202,38 @@ describe('SessionCache.applySessionPatch', () => {
         expect(cache.getSession(created.id)?.teamState?.teamName).toBe('crew')
     })
 
+    it('tracks background task counts with lifecycle deltas and floors at zero', () => {
+        const store = new Store(':memory:')
+        const events: SyncEvent[] = []
+        const cache = new SessionCache(store, createPublisher(events))
+
+        const created = cache.getOrCreateSession(
+            'background-task-session',
+            { path: '/tmp', host: 'h' },
+            null,
+            'default'
+        )
+
+        cache.applyBackgroundTaskDelta(created.id, { started: 2, completed: 0 })
+        expect(cache.getSession(created.id)?.backgroundTaskCount).toBe(2)
+        expect(events.at(-1)).toMatchObject({
+            type: 'session-updated',
+            sessionId: created.id,
+            data: { backgroundTaskCount: 2 }
+        })
+
+        cache.applyBackgroundTaskDelta(created.id, { started: 0, completed: 1 })
+        expect(cache.getSession(created.id)?.backgroundTaskCount).toBe(1)
+
+        cache.applyBackgroundTaskDelta(created.id, { started: 0, completed: 5 })
+        expect(cache.getSession(created.id)?.backgroundTaskCount).toBe(0)
+        expect(events.at(-1)).toMatchObject({
+            type: 'session-updated',
+            sessionId: created.id,
+            data: { backgroundTaskCount: 0 }
+        })
+    })
+
     it('refuses cross-namespace patches even if the session exists', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []

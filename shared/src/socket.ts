@@ -273,6 +273,12 @@ export interface ClientToServerEvents {
   /** CLI agent finished session/load (or equivalent) and can accept prompts. */
     'session-ready': (data: { sid: string; time: number }) => void
     'session-end': (data: { sid: string; time: number; reason?: SessionEndReason }) => void
+    /**
+     * Out-of-band background work (mcode subagents / background bash) reports
+     * task starts and completions here so the hub can keep the session's
+     * `backgroundTaskCount` live without inventing agent messages for it.
+     */
+    'background-task': (data: { sid: string; started?: number; completed?: number }) => void
     'messages-consumed': (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean; steered?: boolean }) => void
     'messages-indeterminate': (data: { sid: string; localIds: string[] }) => void
     /** Native shared-engine queue projection. null = positively acknowledged removal. */

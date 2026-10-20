@@ -56,6 +56,12 @@ const messageSchema = z.object({
     createdAt: z.number().optional()
 })
 
+const backgroundTaskDeltaSchema = z.object({
+    sid: z.string(),
+    started: z.number().int().min(0).optional(),
+    completed: z.number().int().min(0).optional()
+})
+
 const updateMetadataSchema = z.object({
     sid: z.string(),
     expectedVersion: z.number().int(),
@@ -410,6 +416,27 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
         onSessionReady?.(data)
+    })
+
+    // Out-of-band work (mcode subagents / background bash) reports lifecycle
+    // deltas directly instead of inventing chat messages. The hub keeps
+    // `backgroundTaskCount` in session state, which already drives the session
+    // list, status bar, and idle reconciliation.
+    socket.on('background-task', (data: unknown) => {
+        const parsed = backgroundTaskDeltaSchema.safeParse(data)
+        if (!parsed.success) return
+
+        const started = parsed.data.started ?? 0
+        const completed = parsed.data.completed ?? 0
+        if (started === 0 && completed === 0) return
+
+        const sessionAccess = resolveSessionAccess(parsed.data.sid)
+        if (!sessionAccess.ok) {
+            emitAccessError('session', parsed.data.sid, sessionAccess.reason)
+            return
+        }
+
+        onBackgroundTaskDelta?.(parsed.data.sid, { started, completed })
     })
 
     socket.on('messages-consumed', (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean; steered?: boolean }) => {

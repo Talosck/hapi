@@ -1204,6 +1204,26 @@ export class ApiSessionClient extends EventEmitter {
         }, event.type === 'message' || event.type === 'error' || event.type === 'compact-summary' ? 'lossless' : 'droppable')
     }
 
+    /**
+     * Reports out-of-band background work (mcode subagents / background bash)
+     * to the hub. Deliberately a socket event rather than a chat message: the
+     * count belongs to session state, and clients already render the owning
+     * tool card.
+     */
+    sendBackgroundTaskDelta(delta: { started?: number; completed?: number }): void {
+        const started = Math.max(0, Math.trunc(delta.started ?? 0))
+        const completed = Math.max(0, Math.trunc(delta.completed ?? 0))
+        if (started === 0 && completed === 0) return
+
+        this.emitOrQueue(() => {
+            this.socket.emit('background-task', {
+                sid: this.sessionId,
+                ...(started > 0 ? { started } : {}),
+                ...(completed > 0 ? { completed } : {})
+            })
+        }, 'lossless')
+    }
+
     emitAgentTerminalOutput(data: string): void {
         // Always capture the screen locally (in-memory, no network) so a late
         // subscriber can be replayed the CURRENT screen without depending on a

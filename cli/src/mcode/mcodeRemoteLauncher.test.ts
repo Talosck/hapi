@@ -123,6 +123,7 @@ function createSession(messages: QueuedMessage[] = []) {
             session.sessionId = id
         },
         onThinkingChange: vi.fn(),
+        sendBackgroundTaskDelta: vi.fn(),
         sendAgentMessage: vi.fn(),
         sendSessionEvent: vi.fn(),
         setModel: vi.fn(),
@@ -159,6 +160,7 @@ function createScriptedSession() {
             session.sessionId = id
         },
         onThinkingChange: vi.fn(),
+        sendBackgroundTaskDelta: vi.fn(),
         sendUserMessage: vi.fn(),
         sendAgentMessage: vi.fn(),
         sendSessionEvent: vi.fn(),
@@ -325,5 +327,125 @@ describe('mcodeRemoteLauncher config sync', () => {
             model: 'm:good',
             effort: 'max'
         })
+    })
+
+    it('normalizes mcode todowrite calls into the canonical TodoWrite shape', async () => {
+        const backend = createBackend({
+            prompt: vi.fn(async (
+                _sessionId: string,
+                _content: unknown,
+                onMessage: (message: unknown) => void
+            ) => {
+                onMessage({
+                    type: 'tool_call',
+                    id: 'call-todo',
+                    name: 'todowrite',
+                    input: {
+                        todos: [
+                            { content: 'Ship the fix', status: 'in_progress', priority: 'high' },
+                            { content: 'Abandoned idea', status: 'cancelled', priority: 'low' }
+                        ]
+                    },
+                    status: 'completed'
+                })
+            })
+        })
+        const session = createSession([{ message: 'plan', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(backend.prompt).toHaveBeenCalledTimes(1)
+        expect(session.sendAgentMessage).toHaveBeenCalledWith({
+            type: 'tool-call',
+            name: 'TodoWrite',
+            callId: 'call-todo',
+            input: {
+                todos: [
+                    { content: 'Ship the fix', status: 'in_progress', priority: 'high' },
+                    { content: 'Abandoned idea', status: 'completed', priority: 'low' }
+                ]
+            },
+            status: 'completed'
+        })
+    })
+
+    it('folds background task polls into the launch card', async () => {
+        const backend = createBackend({
+            prompt: vi.fn(async (
+                _sessionId: string,
+                _content: unknown,
+                onMessage: (message: unknown) => void
+            ) => {
+                onMessage({
+                    type: 'tool_call',
+                    id: 'task-call',
+                    name: 'task',
+                    input: { description: 'Research the repo', prompt: 'Look around' },
+                    status: 'in_progress'
+                })
+                onMessage({
+                    type: 'tool_result',
+                    id: 'task-call',
+                    output: {
+                        content: [{ type: 'text', text: '<task_background task_id="bg_1">Started</task_background>' }],
+                        details: { task_id: 'bg_1', status: 'started' }
+                    },
+                    status: 'completed'
+                })
+                onMessage({ type: 'tool_call', id: 'poll-1', name: 'task_output', input: null, status: 'pending' })
+                onMessage({
+                    type: 'tool_call',
+                    id: 'poll-1',
+                    name: 'task_output',
+                    input: { task_id: 'bg_1', wait_ms: 5000 },
+                    status: 'completed'
+                })
+                onMessage({
+                    type: 'tool_result',
+                    id: 'poll-1',
+                    output: {
+                        content: [{ type: 'text', text: '<task_output status="running">halfway there</task_output>' }],
+                        details: { task_id: 'bg_1', status: 'running' }
+                    },
+                    status: 'completed'
+                })
+                onMessage({
+                    type: 'tool_call',
+                    id: 'poll-2',
+                    name: 'task_output',
+                    input: { task_id: 'bg_1' },
+                    status: 'completed'
+                })
+                onMessage({
+                    type: 'tool_result',
+                    id: 'poll-2',
+                    output: {
+                        content: [{ type: 'text', text: '<task_output status="succeeded">all done</task_output>' }],
+                        details: { task_id: 'bg_1', status: 'succeeded' }
+                    },
+                    status: 'completed'
+                })
+            })
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const sent = session.sendAgentMessage.mock.calls.map((call) => call[0])
+        expect(sent).toHaveLength(3)
+        expect(sent[0]).toMatchObject({ type: 'tool-call', name: 'Task', callId: 'task-call' })
+        expect(sent[1]).toMatchObject({
+            type: 'tool-call',
+            name: 'Task',
+            callId: 'task-call',
+            progress: { content: [{ type: 'text', text: expect.stringContaining('halfway there') }] }
+        })
+        expect(sent[2]).toMatchObject({ type: 'tool-call-result', callId: 'task-call', is_error: false })
+        expect(JSON.stringify(sent[2])).toContain('all done')
+        expect(JSON.stringify(sent)).not.toContain('task_output')
+        expect(session.sendBackgroundTaskDelta.mock.calls.map((call) => call[0])).toEqual([
+            { started: 1, completed: 0 },
+            { started: 0, completed: 1 }
+        ])
     })
 })

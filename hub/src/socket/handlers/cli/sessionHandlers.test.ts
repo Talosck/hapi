@@ -488,4 +488,34 @@ describe('cli session handlers', () => {
             supersededBySessionId: 'owned-target', opencodeClearOperation: operation, lifecycleState: 'archived'
         })
     })
+
+    it('applies background task deltas from the CLI', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession('bg-delta', {}, null, 'default')
+        const socket = new FakeSocket()
+        const deltas: Array<{ sid: string; delta: { started: number; completed: number } }> = []
+        const accessErrors: Array<{ scope: string; id: string }> = []
+
+        registerSessionHandlers(socket as unknown as CliSocketWithData, {
+            store,
+            resolveSessionAccess: (sessionId) => sessionId === session.id
+                ? { ok: true, value: session as StoredSession }
+                : { ok: false, reason: 'not-found' },
+            emitAccessError: (scope, id) => { accessErrors.push({ scope, id }) },
+            onBackgroundTaskDelta: (sid, delta) => { deltas.push({ sid, delta }) }
+        })
+
+        socket.trigger('background-task', { sid: session.id, started: 2 })
+        socket.trigger('background-task', { sid: session.id, completed: 1 })
+        socket.trigger('background-task', { sid: session.id, started: 0, completed: 0 })
+        socket.trigger('background-task', { sid: session.id, started: -1 })
+        socket.trigger('background-task', { sid: 'unknown', started: 1 })
+
+        expect(deltas).toEqual([
+            { sid: session.id, delta: { started: 2, completed: 0 } },
+            { sid: session.id, delta: { started: 0, completed: 1 } }
+        ])
+        expect(accessErrors).toEqual([{ scope: 'session', id: 'unknown' }])
+        store.close()
+    })
 })

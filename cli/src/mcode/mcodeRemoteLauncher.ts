@@ -20,6 +20,8 @@ import {
     normalizeMcodeAskUserToolCall,
     type McodeAskUserCallHint
 } from './utils/questionHandler';
+import { BackgroundTaskAggregator } from './utils/backgroundTaskAggregator';
+import { normalizeMcodeToolCall } from './utils/toolCallNormalizer';
 
 export type McodeRemoteLauncherOptions = {
     model?: string;
@@ -51,6 +53,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private defaultBackendEffort: string | null = null;
     private appliedPermissionMode: PermissionMode | null = null;
     private hasAppliedPermissionMode = false;
+    private readonly backgroundTasks = new BackgroundTaskAggregator();
 
     constructor(session: McodeSession, opts: McodeRemoteLauncherOptions) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -274,6 +277,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 });
                 messageBuffer.addMessage(`MiniMax Code prompt failed: ${errorMessage}`, 'status');
             } finally {
+                this.flushBackgroundTasks();
                 session.onThinkingChange(false);
                 this.pendingAskUserCall = null;
                 // Questions outlive the turn: mcode's ask_user tool ends the
@@ -500,10 +504,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     }
 
     private handleAgentMessage(message: AgentMessage): void {
-        const { message: normalized, hint } = normalizeMcodeAskUserToolCall(message);
-        if (hint) {
-            this.pendingAskUserCall = hint;
+        const askUser = normalizeMcodeAskUserToolCall(message);
+        if (askUser.hint) {
+            this.pendingAskUserCall = askUser.hint;
         }
+        const normalized = normalizeMcodeToolCall(askUser.message);
         const terminalId = normalized.type === 'tool_result'
             ? normalized.id
             : normalized.type === 'tool_call'
@@ -514,22 +519,36 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             this.pendingAskUserCall = null;
         }
 
-        const converted = convertAgentMessage(normalized, this.currentBackendModel);
+        for (const forwarded of this.backgroundTasks.handle(normalized)) {
+            this.emitAgentMessage(forwarded);
+        }
+        this.reportBackgroundTaskDelta();
+    }
+
+    private reportBackgroundTaskDelta(): void {
+        const delta = this.backgroundTasks.takeBackgroundTaskDelta();
+        if (delta) {
+            this.session.sendBackgroundTaskDelta(delta);
+        }
+    }
+
+    private emitAgentMessage(message: AgentMessage): void {
+        const converted = convertAgentMessage(message, this.currentBackendModel);
         if (converted) {
             this.session.sendAgentMessage(converted);
         }
 
-        switch (normalized.type) {
+        switch (message.type) {
             case 'text':
-                this.messageBuffer.addMessage(normalized.text, 'assistant');
+                this.messageBuffer.addMessage(message.text, 'assistant');
                 break;
             case 'reasoning':
-                if (!normalized.live) {
-                    this.messageBuffer.addMessage(`[Thinking] ${normalized.text.substring(0, 100)}...`, 'system');
+                if (!message.live) {
+                    this.messageBuffer.addMessage(`[Thinking] ${message.text.substring(0, 100)}...`, 'system');
                 }
                 break;
             case 'tool_call':
-                this.messageBuffer.addMessage(`Tool call: ${normalized.name}`, 'tool');
+                this.messageBuffer.addMessage(`Tool call: ${message.name}`, 'tool');
                 break;
             case 'tool_result':
                 this.messageBuffer.addMessage('Tool result received', 'result');
@@ -538,10 +557,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 this.messageBuffer.addMessage('Plan updated', 'status');
                 break;
             case 'error':
-                this.messageBuffer.addMessage(normalized.message, 'status');
+                this.messageBuffer.addMessage(message.message, 'status');
                 break;
             case 'generated_image':
-                this.messageBuffer.addMessage(`Generated image: ${normalized.fileName}`, 'assistant');
+                this.messageBuffer.addMessage(`Generated image: ${message.fileName}`, 'assistant');
                 break;
             case 'turn_complete':
                 this.messageBuffer.addMessage('Turn complete', 'status');
@@ -549,10 +568,18 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             case 'usage':
                 break;
             default: {
-                const _exhaustive: never = normalized;
+                const _exhaustive: never = message;
                 return _exhaustive;
             }
         }
+    }
+
+    /** Release background task cards that could not be tracked reliably. */
+    private flushBackgroundTasks(): void {
+        for (const message of this.backgroundTasks.flushPromptEnd()) {
+            this.emitAgentMessage(message);
+        }
+        this.reportBackgroundTaskDelta();
     }
 
     private applyDisplayMode(permissionMode: PermissionMode | undefined, model?: string): void {
@@ -574,6 +601,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         this.pendingAskUserCall = null;
         await this.questionHandler?.cancelAll('User aborted');
         await this.permissionHandler?.cancelAll('User aborted');
+        for (const message of this.backgroundTasks.cancelAll('Session aborted')) {
+            this.emitAgentMessage(message);
+        }
+        this.reportBackgroundTaskDelta();
         this.session.sendSessionEvent({ type: 'message', message: 'Session aborted' });
         this.session.queue.reset();
         this.session.onThinkingChange(false);
