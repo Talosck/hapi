@@ -28,6 +28,14 @@ vi.mock('./utils/permissionHandler', () => ({
     }
 }))
 
+vi.mock('./utils/questionHandler', () => ({
+    McodeQuestionHandler: class {
+        async cancelAll(): Promise<void> {}
+        async handleResponse(): Promise<boolean> { return false }
+    },
+    normalizeMcodeAskUserToolCall: (message: unknown) => ({ message, hint: null })
+}))
+
 vi.mock('@/ui/ink/McodeDisplay', () => ({ McodeDisplay: () => null }))
 vi.mock('@/ui/logger', () => ({
     logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn() }

@@ -15,6 +15,11 @@ import type { PermissionMode } from './types';
 import { createMcodeBackend } from './utils/mcodeBackend';
 import { McodePermissionHandler } from './utils/permissionHandler';
 import { applyMcodePermissionMode } from './utils/permissionModes';
+import {
+    McodeQuestionHandler,
+    normalizeMcodeAskUserToolCall,
+    type McodeAskUserCallHint
+} from './utils/questionHandler';
 
 export type McodeRemoteLauncherOptions = {
     model?: string;
@@ -34,6 +39,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private readonly opts: McodeRemoteLauncherOptions;
     private backend: ReturnType<typeof createMcodeBackend> | null = null;
     private permissionHandler: McodePermissionHandler | null = null;
+    private questionHandler: McodeQuestionHandler | null = null;
+    private pendingAskUserCall: McodeAskUserCallHint | null = null;
     private happyServer: { stop: () => void } | null = null;
     private abortController = new AbortController();
     private displayModel: string | null = null;
@@ -84,6 +91,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
 
         await backend.initialize();
 
+        this.questionHandler = new McodeQuestionHandler(
+            session.client,
+            backend,
+            () => {
+                const hint = this.pendingAskUserCall;
+                this.pendingAskUserCall = null;
+                return hint;
+            }
+        );
+
         const acpMcpServers = toAcpMcpServers(mcpServers);
         let acpSessionId: string;
         if (session.sessionId) {
@@ -115,7 +132,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         this.permissionHandler = new McodePermissionHandler(
             session.client,
             backend,
-            () => session.getPermissionMode() as PermissionMode | undefined
+            () => session.getPermissionMode() as PermissionMode | undefined,
+            {
+                handleMissingResponse: (response) => (
+                    this.questionHandler?.handleResponse(response) ?? Promise.resolve(false)
+                )
+            }
         );
 
         // The permission policy is a per-process config option and the plan
@@ -242,6 +264,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 messageBuffer.addMessage(`MiniMax Code prompt failed: ${errorMessage}`, 'status');
             } finally {
                 session.onThinkingChange(false);
+                this.pendingAskUserCall = null;
+                await this.questionHandler?.cancelAll('Prompt finished');
                 await this.permissionHandler?.cancelAll('Prompt finished');
                 if (session.queue.size() === 0 && !this.shouldExit) {
                     sendReady();
@@ -252,6 +276,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+
+        this.pendingAskUserCall = null;
+        if (this.questionHandler) {
+            await this.questionHandler.cancelAll('Session ended');
+            this.questionHandler = null;
+        }
 
         if (this.permissionHandler) {
             await this.permissionHandler.cancelAll('Session ended');
@@ -423,22 +453,36 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     }
 
     private handleAgentMessage(message: AgentMessage): void {
-        const converted = convertAgentMessage(message, this.currentBackendModel);
+        const { message: normalized, hint } = normalizeMcodeAskUserToolCall(message);
+        if (hint) {
+            this.pendingAskUserCall = hint;
+        }
+        const terminalId = normalized.type === 'tool_result'
+            ? normalized.id
+            : normalized.type === 'tool_call'
+                && (normalized.status === 'completed' || normalized.status === 'failed')
+                ? normalized.id
+                : null;
+        if (terminalId && this.pendingAskUserCall?.id === terminalId) {
+            this.pendingAskUserCall = null;
+        }
+
+        const converted = convertAgentMessage(normalized, this.currentBackendModel);
         if (converted) {
             this.session.sendAgentMessage(converted);
         }
 
-        switch (message.type) {
+        switch (normalized.type) {
             case 'text':
-                this.messageBuffer.addMessage(message.text, 'assistant');
+                this.messageBuffer.addMessage(normalized.text, 'assistant');
                 break;
             case 'reasoning':
-                if (!message.live) {
-                    this.messageBuffer.addMessage(`[Thinking] ${message.text.substring(0, 100)}...`, 'system');
+                if (!normalized.live) {
+                    this.messageBuffer.addMessage(`[Thinking] ${normalized.text.substring(0, 100)}...`, 'system');
                 }
                 break;
             case 'tool_call':
-                this.messageBuffer.addMessage(`Tool call: ${message.name}`, 'tool');
+                this.messageBuffer.addMessage(`Tool call: ${normalized.name}`, 'tool');
                 break;
             case 'tool_result':
                 this.messageBuffer.addMessage('Tool result received', 'result');
@@ -447,10 +491,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 this.messageBuffer.addMessage('Plan updated', 'status');
                 break;
             case 'error':
-                this.messageBuffer.addMessage(message.message, 'status');
+                this.messageBuffer.addMessage(normalized.message, 'status');
                 break;
             case 'generated_image':
-                this.messageBuffer.addMessage(`Generated image: ${message.fileName}`, 'assistant');
+                this.messageBuffer.addMessage(`Generated image: ${normalized.fileName}`, 'assistant');
                 break;
             case 'turn_complete':
                 this.messageBuffer.addMessage('Turn complete', 'status');
@@ -458,7 +502,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             case 'usage':
                 break;
             default: {
-                const _exhaustive: never = message;
+                const _exhaustive: never = normalized;
                 return _exhaustive;
             }
         }
@@ -480,6 +524,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         if (backend && this.session.sessionId) {
             await backend.cancelPrompt(this.session.sessionId);
         }
+        this.pendingAskUserCall = null;
+        await this.questionHandler?.cancelAll('User aborted');
         await this.permissionHandler?.cancelAll('User aborted');
         this.session.sendSessionEvent({ type: 'message', message: 'Session aborted' });
         this.session.queue.reset();

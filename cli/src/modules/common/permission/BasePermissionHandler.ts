@@ -154,7 +154,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
         pending: PendingPermissionRequest<TResult>
     ): Promise<PermissionCompletion>;
 
-    protected abstract handleMissingPendingResponse(response: TResponse): void;
+    protected abstract handleMissingPendingResponse(response: TResponse): void | Promise<void>;
 
     protected onRequestRegistered(_id: string, _toolName: string, _input: unknown): void {
     }
@@ -261,7 +261,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
             const pending = this.pendingRequests.get(response.id);
 
             if (!pending) {
-                this.handleMissingPendingResponse(response);
+                await this.handleMissingPendingResponse(response);
                 return;
             }
 

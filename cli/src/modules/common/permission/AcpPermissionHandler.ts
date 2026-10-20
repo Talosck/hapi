@@ -10,11 +10,22 @@ import {
     type PermissionCompletion
 } from './BasePermissionHandler'
 
-interface PermissionResponseMessage {
+export interface AcpPermissionResponseMessage {
     id: string
     approved: boolean
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
     reason?: string
+    answers?: Record<string, string[]> | Record<string, { answers: string[] }>
+}
+
+export type AcpPermissionHandlerOptions = {
+    /**
+     * Handles a permission RPC whose request id is not a pending
+     * `session/request_permission` (for example an ACP `elicitation/create`
+     * questionnaire that shares HAPI's permission transport). Returns true
+     * when the response was consumed.
+     */
+    handleMissingResponse?: (response: AcpPermissionResponseMessage) => Promise<boolean>
 }
 
 function pickOptionId(request: PermissionRequest, preferredKinds: string[]): string | null {
@@ -27,7 +38,7 @@ function pickOptionId(request: PermissionRequest, preferredKinds: string[]): str
 
 function mapDecisionToOutcome(
     request: PermissionRequest,
-    decision: PermissionResponseMessage['decision']
+    decision: AcpPermissionResponseMessage['decision']
 ): PermissionResponse {
     if (decision === 'abort') return { outcome: 'cancelled' }
     if (decision === 'approved_for_session') {
@@ -43,13 +54,14 @@ function mapDecisionToOutcome(
 }
 
 /** Shared HAPI permission bridge for ACP agents with one-shot choices. */
-export class AcpPermissionHandler extends BasePermissionHandler<PermissionResponseMessage, void> {
+export class AcpPermissionHandler extends BasePermissionHandler<AcpPermissionResponseMessage, void> {
     private readonly pendingBackendRequests = new Map<string, PermissionRequest>()
 
     constructor(
         session: ApiSessionClient,
         private readonly backend: AgentBackend,
-        private readonly getPermissionMode: () => PermissionMode | undefined
+        private readonly getPermissionMode: () => PermissionMode | undefined,
+        private readonly options: AcpPermissionHandlerOptions = {}
     ) {
         super(session)
         this.backend.onPermissionRequest((request) => this.handlePermissionRequest(request))
@@ -105,7 +117,7 @@ export class AcpPermissionHandler extends BasePermissionHandler<PermissionRespon
     }
 
     protected async handlePermissionResponse(
-        response: PermissionResponseMessage,
+        response: AcpPermissionResponseMessage,
         pending: PendingPermissionRequest<void>
     ): Promise<PermissionCompletion> {
         const request = this.pendingBackendRequests.get(response.id)
@@ -127,7 +139,10 @@ export class AcpPermissionHandler extends BasePermissionHandler<PermissionRespon
         }
     }
 
-    protected handleMissingPendingResponse(response: PermissionResponseMessage): void {
+    protected async handleMissingPendingResponse(response: AcpPermissionResponseMessage): Promise<void> {
+        if (this.options.handleMissingResponse && await this.options.handleMissingResponse(response)) {
+            return
+        }
         logger.debug('[ACP] Permission response received for unknown request', response.id)
     }
 

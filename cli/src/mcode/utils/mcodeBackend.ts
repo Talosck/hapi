@@ -39,5 +39,11 @@ export function createMcodeBackend(): AcpSdkBackend {
         // text buffered so far, which would silently truncate the answer.
         textChunkMode: 'delta',
         flavor: 'mcode',
+        // MiniMax Code routes its `ask_user` tool through an ACP
+        // `elicitation/create` form request only when the client advertises
+        // form elicitation. Without it the questionnaire is dismissed silently
+        // because the one-shot permission fallback cannot represent multi-step
+        // questions or "Other" input.
+        elicitation: { form: true },
     });
 }

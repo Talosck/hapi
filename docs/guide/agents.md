@@ -328,6 +328,15 @@ approval.
 When MiniMax Code asks for approval, HAPI shows the request in the web and
 phone UIs with the usual Allow / Allow for session / Deny choices.
 
+### Questions
+
+MiniMax Code's `ask_user` tool is an ACP form elicitation. HAPI advertises the
+elicitation capability and renders the questionnaire as an interactive
+`ask_user_question` card, so single-select, multi-select, required, and
+free-form ("Other") steps can be answered from the web or phone UI. The
+question card reuses the agent's `ask_user` tool call, so the transcript shows
+one card instead of a duplicate.
+
 ### Model selection
 
 MiniMax Code identifies a model with the ACP wire id: `m:<provider>:<model>:u`

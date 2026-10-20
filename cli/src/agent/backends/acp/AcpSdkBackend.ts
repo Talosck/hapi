@@ -146,6 +146,13 @@ export class AcpSdkBackend implements AgentBackend {
         env?: Record<string, string>;
         textChunkMode?: AcpTextChunkMode;
         flavor?: AgentFlavor;
+        /**
+         * Advertise ACP `elicitation/create` support during initialize. Agents
+         * (notably MiniMax Code) only route interactive questions through
+         * elicitation when the client declares the matching mode; otherwise
+         * they may silently dismiss the request.
+         */
+        elicitation?: { form?: boolean; url?: boolean };
     }) {}
 
     async initialize(): Promise<void> {
@@ -199,12 +206,21 @@ export class AcpSdkBackend implements AgentBackend {
             return await this.handlePermissionRequest(params, requestId);
         });
 
+        const elicitation = this.options.elicitation;
+        const elicitationCapability = elicitation && (elicitation.form || elicitation.url)
+            ? {
+                ...(elicitation.form ? { form: {} } : {}),
+                ...(elicitation.url ? { url: {} } : {})
+            }
+            : undefined;
+
         const response = await withRetry(
             () => this.transport!.sendRequest('initialize', {
                 protocolVersion: 1,
                 clientCapabilities: {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false,
+                    ...(elicitationCapability ? { elicitation: elicitationCapability } : {}),
                     _meta: {
                         // Cursor ACP exposes Composer's non-fast/fast choice as separate
                         // `model` + `fast` config options only when the client advertises
@@ -295,6 +311,34 @@ export class AcpSdkBackend implements AgentBackend {
             throw new Error('ACP transport not initialized');
         }
         this.transport.registerRequestHandler(method, handler);
+    }
+
+    /**
+     * Waits for `session/update` work already queued by the transport to be
+     * forwarded. Incoming client requests such as `elicitation/create` are
+     * dispatched synchronously while updates are queued, so a question handler
+     * that correlates an elicitation with the immediately preceding tool call
+     * must drain the queue first. Bounded so a slow image registration cannot
+     * delay the prompt indefinitely.
+     */
+    async waitForSessionUpdateQueue(timeoutMs = 1500): Promise<void> {
+        if (timeoutMs <= 0) {
+            await this.sessionUpdateQueue;
+            return;
+        }
+
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        try {
+            await Promise.race([
+                this.sessionUpdateQueue,
+                new Promise<void>((resolve) => {
+                    timer = setTimeout(resolve, timeoutMs);
+                    timer.unref?.();
+                })
+            ]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
     }
 
     async setMode(sessionId: string, modeId: string): Promise<void> {
