@@ -15,6 +15,10 @@ describe('buildMcodeLocalArgs', () => {
             sessionId: 'mvs_abc',
             model: 'm:minimax:MiniMax-M3:v:thinking'
         })).toEqual(['--session', 'mvs_abc', '--model', 'minimax/MiniMax-M3#thinking']);
+        expect(buildMcodeLocalArgs({
+            sessionId: 'mvs_abc',
+            model: 'm:minimax:MiniMax-M3:u'
+        })).toEqual(['--session', 'mvs_abc', '--model', 'minimax/MiniMax-M3']);
     });
 
     it('drops a model id the CLI would reject instead of passing it on', () => {

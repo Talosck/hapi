@@ -75,7 +75,8 @@ export function resolveToolAutoApprovalDecision(
 
     const lowerTool = toolName.toLowerCase();
     const lowerId = toolCallId.toLowerCase();
-    const decisionForMode: AutoApprovalDecision = (mode === 'yolo' || mode === 'always-proceed') ? 'approved_for_session' : 'approved';
+    const fullAccessMode = mode === 'yolo' || mode === 'always-proceed' || mode === 'bypassPermissions';
+    const decisionForMode: AutoApprovalDecision = fullAccessMode ? 'approved_for_session' : 'approved';
 
     if (
         AUTO_APPROVE_EXACT_TOOL_NAMES.has(lowerTool)
@@ -88,7 +89,7 @@ export function resolveToolAutoApprovalDecision(
         return decisionForMode;
     }
 
-    if (mode === 'yolo' || mode === 'always-proceed') {
+    if (fullAccessMode) {
         return 'approved_for_session';
     }
 

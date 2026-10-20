@@ -19,6 +19,7 @@ export async function runMcode(opts: {
     startingMode?: 'local' | 'remote';
     permissionMode?: PermissionMode;
     model?: string;
+    effort?: string;
     resumeSessionId?: string;
     existingSessionId?: string;
     /** Fresh-spawn reserved hub id from `--hapi-session-id` (create/getOrCreate). */
@@ -52,6 +53,7 @@ export async function runMcode(opts: {
             workingDirectory,
             agentState: initialState,
             model: opts.model,
+            effort: opts.effort,
             reservedSessionId: opts.reservedSessionId
         });
     const { api, session } = bootstrap;
@@ -63,12 +65,14 @@ export async function runMcode(opts: {
 
     const messageQueue = new MessageQueue2<McodeMode>((mode) => hashObject({
         permissionMode: mode.permissionMode,
-        model: mode.model
+        model: mode.model,
+        effort: mode.effort
     }));
 
     const sessionWrapperRef: { current: McodeSession | null } = { current: null };
     let currentPermissionMode: PermissionMode = opts.permissionMode ?? 'default';
     let sessionModel: string | null = opts.model ?? null;
+    let sessionEffort: string | null = opts.effort && opts.effort !== 'default' ? opts.effort : null;
 
     const lifecycle = createRunnerLifecycle({
         session,
@@ -79,9 +83,10 @@ export async function runMcode(opts: {
     lifecycle.registerProcessHandlers();
     registerKillSessionHandler(session.rpcHandlerManager, lifecycle, session);
     registerLocalHandoffHandler(session.rpcHandlerManager, lifecycle);
-    // Registered here, not in the remote launcher: the catalog is backend
-    // independent, and a session running in local mode must answer the web
-    // picker's request before remote control is taken over.
+    // Registered here as the local-mode fallback: the catalog is backend
+    // independent, and a session in local mode must answer the web picker
+    // before remote control is taken over. The remote launcher replaces this
+    // handler with one that reads the live ACP session once it is ready.
     registerMcodeSessionModelHandlers(session.rpcHandlerManager, () => workingDirectory);
 
     const syncSessionMode = () => {
@@ -91,16 +96,35 @@ export async function runMcode(opts: {
         }
         sessionInstance.setPermissionMode(currentPermissionMode);
         sessionInstance.setModel(sessionModel);
+        sessionInstance.setEffort(sessionEffort);
         sessionInstance.pushKeepAlive();
 
         logger.debug(`[mcode] Synced session config for keepalive: permissionMode=${currentPermissionMode}, model=${sessionModel ?? 'agent default'}`);
+    };
+
+    // The remote launcher owns the ACP conversation, so it is the first place
+    // that learns which model the native session actually runs and whether a
+    // requested mode/model switch was accepted. Feed both back into the
+    // keepalive; otherwise the hub keeps advertising rejected config.
+    const applyDiscoveredModel = (model: string | null) => {
+        sessionModel = model;
+        syncSessionMode();
+    };
+    const applyRolledBackPermissionMode = (mode: PermissionMode) => {
+        currentPermissionMode = mode;
+        syncSessionMode();
+    };
+    const applyDiscoveredEffort = (effort: string | null) => {
+        sessionEffort = effort;
+        syncSessionMode();
     };
 
     session.onUserMessage((message, localId) => {
         const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
         const mode: McodeMode = {
             permissionMode: currentPermissionMode,
-            model: sessionModel
+            model: sessionModel,
+            effort: sessionEffort
         };
         messageQueue.push(formattedText, mode, localId);
     });
@@ -116,13 +140,16 @@ export async function runMcode(opts: {
         flavor: 'mcode',
         modelMode: 'nullable',
         modelReasoningEffortMode: 'ignore',
-        effortMode: 'ignore',
+        effortMode: 'nullable',
         onApply: (config) => {
             if (config.permissionMode !== undefined) {
                 currentPermissionMode = config.permissionMode;
             }
             if (config.model !== undefined) {
                 sessionModel = config.model;
+            }
+            if (config.effort !== undefined) {
+                sessionEffort = config.effort === 'default' ? null : config.effort;
             }
             syncSessionMode();
         }
@@ -140,8 +167,16 @@ export async function runMcode(opts: {
             api,
             permissionMode: currentPermissionMode,
             model: sessionModel ?? undefined,
+            effort: sessionEffort ?? undefined,
             resumeSessionId: opts.resumeSessionId,
             onModeChange: createModeChangeHandler(session),
+            onConfigDiscovered: (config) => {
+                applyDiscoveredModel(config.model);
+                applyDiscoveredEffort(config.effort);
+            },
+            onModelRollback: (model) => applyDiscoveredModel(model),
+            onEffortRollback: (effort) => applyDiscoveredEffort(effort),
+            onPermissionModeRollback: (mode) => applyRolledBackPermissionMode(mode),
             onSessionReady: (instance) => {
                 sessionWrapperRef.current = instance;
                 syncSessionMode();

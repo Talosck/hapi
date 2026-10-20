@@ -1130,6 +1130,16 @@ function SessionChatInner(props: SessionChatProps) {
             ]
             : undefined
     ), [agentFlavor, mcodeModelsState.availableModels])
+    const mcodeEffortOptions = useMemo(() => (
+        agentFlavor === 'mcode'
+            ? mcodeModelsState.effortOptions
+                .filter((option) => option.value !== 'default')
+                .map((option) => ({
+                    value: option.value,
+                    name: option.name
+                }))
+            : []
+    ), [agentFlavor, mcodeModelsState.effortOptions])
     const machineCursorModelsState = useCursorModelsForMachine({
         api: props.api,
         machineId: sessionMachineId,
@@ -2132,7 +2142,9 @@ function SessionChatInner(props: SessionChatProps) {
                         availableEffortOptions={
                             agentFlavor === 'grok' && grokEffortState.options.length > 0
                                 ? grokEffortState.options
-                                : undefined
+                                : agentFlavor === 'mcode' && mcodeEffortOptions.length > 0
+                                    ? mcodeEffortOptions
+                                    : undefined
                         }
                         active={props.session.active}
                         allowSendWhenInactive
@@ -2230,7 +2242,11 @@ function SessionChatInner(props: SessionChatProps) {
                                 ? (props.session.active && !controlledByUser && grokEffortState.options.length > 0
                                     ? handleEffortChange
                                     : undefined)
-                                : handleEffortChange
+                                : agentFlavor === 'mcode'
+                                    ? (props.session.active && !controlledByUser && mcodeEffortOptions.length > 0
+                                        ? handleEffortChange
+                                        : undefined)
+                                    : handleEffortChange
                         }
                         serviceTier={effectiveCodexServiceTier}
                         onServiceTierChange={

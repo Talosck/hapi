@@ -1,6 +1,10 @@
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { asString, isObject } from '@hapi/protocol';
 import type { McodeModelsResponse, McodeModelSummary } from '@hapi/protocol/apiTypes';
 import { AcpStdioTransport } from '@/agent/backends/acp/AcpStdioTransport';
+import { resolveHapiHomeDir } from '@/configuration';
+import { logger } from '@/ui/logger';
 import packageJson from '../../../package.json';
 import { getErrorMessage } from './rpcResponses';
 import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
@@ -16,10 +20,21 @@ interface CacheEntry {
     response: ListMcodeModelsForCwdResponse;
 }
 
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 5 * 60_000;
 const PROBE_TIMEOUT_MS = 30_000;
 const cache = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<ListMcodeModelsForCwdResponse>>();
+
+/**
+ * MiniMax Code has no ACP delete method, so a probe session cannot be removed
+ * once created. Reuse one probe session (stored in HAPI's home) instead of
+ * creating one per discovery: the catalog comes from the provider config, not
+ * the workspace, so a single stable probe cwd is enough.
+ */
+const PROBE_DIR_NAME = 'mcode-model-probe';
+const PROBE_SESSION_FILE = 'session.json';
+let cachedProbeSessionId: string | null | undefined;
+let probeSessionRead: Promise<string | null> | null = null;
 
 function normalizeAvailableModels(rawModels: unknown): McodeModelSummary[] {
     if (!Array.isArray(rawModels)) return [];
@@ -34,9 +49,25 @@ function normalizeAvailableModels(rawModels: unknown): McodeModelSummary[] {
     return out;
 }
 
+function normalizeEffortOptions(rawOptions: unknown): Array<{ value: string; name?: string }> {
+    if (!Array.isArray(rawOptions)) return [];
+    const out: Array<{ value: string; name?: string }> = [];
+    for (const entry of rawOptions) {
+        if (!isObject(entry)) continue;
+        const value = asString(entry.value) ?? asString(entry.modelId);
+        // `default` is the agent's own default level; HAPI represents that as
+        // the absence of an effort so the UI has a single Default entry.
+        if (!value || value === 'default') continue;
+        const name = asString(entry.name) ?? undefined;
+        out.push(name ? { value, name } : { value });
+    }
+    return out;
+}
+
 /**
  * MiniMax Code publishes its model catalog as the `model` ACP config option
- * (category `model`), not through `availableModels`.
+ * (category `model`), not through `availableModels`. The reasoning effort
+ * levels are the `thought_level` config option.
  */
 function extractModelConfigOption(response: unknown): {
     currentValue: string | null;
@@ -57,15 +88,37 @@ function extractModelConfigOption(response: unknown): {
     return null;
 }
 
+function extractEffortConfigOption(response: unknown): {
+    currentValue: string | null;
+    options: unknown[];
+} | null {
+    if (!isObject(response)) return null;
+    if (!Array.isArray(response.configOptions)) return null;
+
+    for (const entry of response.configOptions) {
+        if (!isObject(entry)) continue;
+        if (asString(entry.category) !== 'thought_level' && asString(entry.id) !== 'thinkingEffort') continue;
+        return {
+            currentValue: asString(entry.currentValue),
+            options: Array.isArray(entry.options) ? entry.options : []
+        };
+    }
+
+    return null;
+}
+
 export function extractMcodeModelsFromResponse(response: unknown): {
     availableModels: McodeModelSummary[];
     currentModelId: string | null;
+    effortOptions: Array<{ value: string; name?: string }>;
+    currentEffort: string | null;
 } {
     if (!isObject(response)) {
-        return { availableModels: [], currentModelId: null };
+        return { availableModels: [], currentModelId: null, effortOptions: [], currentEffort: null };
     }
 
     const configModelOption = extractModelConfigOption(response);
+    const configEffortOption = extractEffortConfigOption(response);
     const rawModels = Array.isArray(response.availableModels)
         ? response.availableModels
         : configModelOption?.options ?? null;
@@ -73,18 +126,76 @@ export function extractMcodeModelsFromResponse(response: unknown): {
         ? response.currentModelId
         : configModelOption?.currentValue ?? null;
 
+    const currentEffort = configEffortOption?.currentValue ?? null;
     return {
         availableModels: normalizeAvailableModels(rawModels),
-        currentModelId: rawCurrent
+        currentModelId: rawCurrent,
+        effortOptions: normalizeEffortOptions(configEffortOption?.options),
+        currentEffort: currentEffort === 'default' ? null : currentEffort
     };
 }
 
-async function runMcodeProbe(cwd: string): Promise<ListMcodeModelsForCwdResponse> {
+function getProbeDir(): string {
+    return join(resolveHapiHomeDir(), PROBE_DIR_NAME);
+}
+
+function getProbeSessionFile(): string {
+    return join(getProbeDir(), PROBE_SESSION_FILE);
+}
+
+async function readProbeSessionId(): Promise<string | null> {
+    if (cachedProbeSessionId !== undefined) return cachedProbeSessionId;
+    if (!probeSessionRead) {
+        probeSessionRead = (async () => {
+            try {
+                const parsed: unknown = JSON.parse(await readFile(getProbeSessionFile(), 'utf8'));
+                const id = isObject(parsed) ? asString(parsed.sessionId) : null;
+                cachedProbeSessionId = id;
+                return id;
+            } catch {
+                cachedProbeSessionId = null;
+                return null;
+            } finally {
+                probeSessionRead = null;
+            }
+        })();
+    }
+    return probeSessionRead;
+}
+
+async function writeProbeSessionId(sessionId: string): Promise<void> {
+    cachedProbeSessionId = sessionId;
+    try {
+        await mkdir(getProbeDir(), { recursive: true, mode: 0o700 });
+        const file = getProbeSessionFile();
+        const temp = `${file}.${process.pid}.tmp`;
+        await writeFile(temp, JSON.stringify({ sessionId }), { mode: 0o600 });
+        await rename(temp, file);
+    } catch (error) {
+        // In-memory reuse still works for this process.
+        logger.debug('Failed to persist the MiniMax Code model probe session:', error);
+    }
+}
+
+async function clearProbeSessionId(): Promise<void> {
+    cachedProbeSessionId = null;
+    try {
+        await rm(getProbeSessionFile(), { force: true });
+    } catch {
+        // Best effort.
+    }
+}
+
+async function runMcodeProbe(_cwd: string): Promise<ListMcodeModelsForCwdResponse> {
+    const probeCwd = getProbeDir();
+    await mkdir(probeCwd, { recursive: true, mode: 0o700 });
+
     const transport = await AcpStdioTransport.create({
         command: getAgentLaunchCommand('mcode'),
         args: ['acp']
     });
 
+    let probeSessionId: string | null = null;
     try {
         const initResponse = await transport.sendRequest('initialize', {
             protocolVersion: 1,
@@ -102,19 +213,51 @@ async function runMcodeProbe(cwd: string): Promise<ListMcodeModelsForCwdResponse
             return { success: false, error: 'Invalid initialize response from mcode acp' };
         }
 
-        const newResponse = await transport.sendRequest('session/new', {
-            cwd,
-            mcpServers: []
-        }, { timeoutMs: PROBE_TIMEOUT_MS });
+        let response: unknown = null;
+        const previousSessionId = await readProbeSessionId();
+        if (previousSessionId) {
+            try {
+                response = await transport.sendRequest('session/load', {
+                    sessionId: previousSessionId,
+                    cwd: probeCwd,
+                    mcpServers: []
+                }, { timeoutMs: PROBE_TIMEOUT_MS });
+                probeSessionId = previousSessionId;
+            } catch (error) {
+                logger.debug('MiniMax Code probe session is no longer loadable; creating a new one:', error);
+                await clearProbeSessionId();
+            }
+        }
 
-        const { availableModels, currentModelId } = extractMcodeModelsFromResponse(newResponse);
+        if (!response) {
+            response = await transport.sendRequest('session/new', {
+                cwd: probeCwd,
+                mcpServers: []
+            }, { timeoutMs: PROBE_TIMEOUT_MS });
+            probeSessionId = isObject(response) ? asString(response.sessionId) : null;
+            if (probeSessionId) await writeProbeSessionId(probeSessionId);
+        }
+
+        const { availableModels, currentModelId, effortOptions, currentEffort } =
+            extractMcodeModelsFromResponse(response);
 
         return {
             success: true,
             availableModels,
-            currentModelId
+            currentModelId,
+            effortOptions,
+            currentEffort
         };
     } finally {
+        // `session/close` releases the ACP attachment/plan state. MiniMax Code
+        // keeps the session itself in its data directory (there is no ACP
+        // delete), so the probe session is reused via `session/load` above.
+        if (probeSessionId) {
+            await transport.sendRequest('session/close', { sessionId: probeSessionId }, { timeoutMs: 5_000 })
+                .catch((error) => {
+                    logger.debug('Failed to close the MiniMax Code model probe session:', error);
+                });
+        }
         await transport.close().catch(() => undefined);
     }
 }
@@ -122,10 +265,13 @@ async function runMcodeProbe(cwd: string): Promise<ListMcodeModelsForCwdResponse
 /**
  * Discover the MiniMax Code models available for a working directory by
  * spawning a short-lived `mcode acp` subprocess, sending `initialize` +
- * `session/new`, and reading the `model` config option from the response.
+ * `session/load` (or `session/new` on the first run), and reading the `model`
+ * and `thinkingEffort` config options from the response.
  *
- * Results are cached per cwd for 60 seconds; concurrent requests for the same
- * cwd are coalesced through a single-flight promise.
+ * The agent's model catalog comes from provider configuration rather than the
+ * workspace, so every cwd shares one reusable probe session under HAPI's home
+ * directory. Results are cached per cwd for five minutes; concurrent requests
+ * for the same cwd are coalesced through a single-flight promise.
  */
 export async function listMcodeModelsForCwd(
     cwd: string
@@ -169,8 +315,10 @@ export async function listMcodeModelsForCwd(
     return promise;
 }
 
-/** Clear the in-process cache. Exposed for tests. */
+/** Clear the in-process cache and probe session pointer. Exposed for tests. */
 export function _resetMcodeModelsCacheForTests(): void {
     cache.clear();
     inflight.clear();
+    cachedProbeSessionId = undefined;
+    probeSessionRead = null;
 }

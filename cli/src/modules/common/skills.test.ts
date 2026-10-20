@@ -20,6 +20,8 @@ describe('listSkills', () => {
     const originalHome = process.env.HOME
     const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
     const originalCodexHome = process.env.CODEX_HOME
+    const originalMinimaxDataDir = process.env.MINIMAX_DATA_DIR
+    const originalMavisDataDir = process.env.MAVIS_DATA_DIR
     let sandboxDir: string
     let homeDir: string
 
@@ -29,6 +31,8 @@ describe('listSkills', () => {
         process.env.HOME = homeDir
         delete process.env.CLAUDE_CONFIG_DIR
         delete process.env.CODEX_HOME
+        delete process.env.MINIMAX_DATA_DIR
+        delete process.env.MAVIS_DATA_DIR
         await mkdir(homeDir, { recursive: true })
     })
 
@@ -49,6 +53,18 @@ describe('listSkills', () => {
             delete process.env.CODEX_HOME
         } else {
             process.env.CODEX_HOME = originalCodexHome
+        }
+
+        if (originalMinimaxDataDir === undefined) {
+            delete process.env.MINIMAX_DATA_DIR
+        } else {
+            process.env.MINIMAX_DATA_DIR = originalMinimaxDataDir
+        }
+
+        if (originalMavisDataDir === undefined) {
+            delete process.env.MAVIS_DATA_DIR
+        } else {
+            process.env.MAVIS_DATA_DIR = originalMavisDataDir
         }
 
         await rm(sandboxDir, { recursive: true, force: true })
@@ -132,6 +148,24 @@ describe('listSkills', () => {
         const skills = await listSkills(repoRoot, { flavor: 'copilot' })
 
         expect(skills.map((skill) => skill.name)).toEqual(['copilot-user', 'github-skill', 'shared'])
+    })
+
+    it('lists MiniMax Code user and project skills from the native .minimax roots', async () => {
+        const repoRoot = join(sandboxDir, 'mcode-repo')
+        await mkdir(join(repoRoot, '.git'), { recursive: true })
+        await writeSkill(join(homeDir, '.minimax', 'skills', 'mcode-user'), 'mcode-user', 'MiniMax user skill')
+        await writeSkill(join(homeDir, '.agents', 'skills', 'shared'), 'shared', 'Shared skill')
+        await writeSkill(join(repoRoot, '.minimax', 'skills', 'mcode-project'), 'mcode-project', 'MiniMax project skill')
+        await writeSkill(join(repoRoot, '.claude', 'skills', 'claude-project'), 'claude-project', 'Claude project skill')
+
+        const skills = await listSkills(repoRoot, { flavor: 'mcode' })
+
+        expect(skills.map((skill) => skill.name)).toEqual([
+            'claude-project',
+            'mcode-project',
+            'mcode-user',
+            'shared'
+        ])
     })
 
     it('scopes user skills to the requested flavor', async () => {

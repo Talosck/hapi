@@ -44,7 +44,7 @@ export async function mcodeLocal(opts: McodeLocalOptions): Promise<void> {
         shell: process.platform === 'win32',
         logLabel: 'McodeLocal',
         spawnName: 'mcode',
-        installHint: 'MiniMax Code CLI (npm install -g @minimax-ai/code)',
+        installHint: 'MiniMax Code CLI (https://agent.minimax.io/docs/cli/quick-start)',
         includeCause: true,
         logExit: true
     });

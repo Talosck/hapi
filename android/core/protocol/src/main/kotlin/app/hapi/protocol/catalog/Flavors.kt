@@ -66,7 +66,7 @@ object Flavors {
         "claude" to setOf(FlavorCapability.ModelChange, FlavorCapability.Effort),
         "gemini" to setOf(FlavorCapability.ModelChange),
         "kimi" to setOf(FlavorCapability.ModelChange),
-        "mcode" to setOf(FlavorCapability.ModelChange),
+        "mcode" to setOf(FlavorCapability.ModelChange, FlavorCapability.Effort),
         "copilot" to setOf(FlavorCapability.ModelChange),
         "grok" to setOf(FlavorCapability.ModelChange, FlavorCapability.Effort),
         "codex" to setOf(FlavorCapability.ModelChange),

@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
     notification: vi.fn(),
     checkPathsExists: vi.fn(),
     availableAgents: [
-        'agy', 'claude', 'codex', 'dsh', 'copilot', 'cursor', 'grok', 'kimi', 'opencode', 'pi'
+        'agy', 'claude', 'codex', 'dsh', 'copilot', 'cursor', 'grok', 'kimi', 'mcode', 'opencode', 'pi'
     ].map((agent) => ({ agent, available: true })),
     codexModelsLoading: false,
     agyModelsLoading: false,
@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => ({
     mcodeModels: [] as Array<{ modelId: string; name?: string }>,
     mcodeModelsLoading: false,
     mcodeModelsError: null as string | null,
+    mcodeEffortOptions: [] as Array<{ value: string; name?: string }>,
     opencodeModels: [] as Array<{ modelId: string; name?: string }>,
     opencodeCurrentModelId: null as string | null,
     opencodeModelsLoading: false,
@@ -181,6 +182,8 @@ vi.mock('@/hooks/queries/useMcodeModelsForCwd', () => ({
     useMcodeModelsForCwd: () => ({
         availableModels: mocks.mcodeModels,
         currentModelId: null,
+        effortOptions: mocks.mcodeEffortOptions,
+        currentEffort: null,
         isLoading: mocks.mcodeModelsLoading,
         error: mocks.mcodeModelsError
     })
@@ -261,10 +264,17 @@ vi.mock('./AgyModelSelector', () => ({
     )
 }))
 vi.mock('./EffortField', () => ({
-    EffortField: (props: { effort: string; reasoningEffort: string; opencodeVariantOptions?: string[] | null; onReasoningEffortChange: (v: string) => void }) => (
+    EffortField: (props: {
+        effort: string
+        reasoningEffort: string
+        opencodeVariantOptions?: string[] | null
+        mcodeOptions?: Array<{ value: string; label: string }>
+        onReasoningEffortChange: (v: string) => void
+    }) => (
         <>
             <div data-testid="launch-effort">{props.effort}</div>
             <div data-testid="opencode-variants">{props.opencodeVariantOptions?.join(',') ?? 'static'}</div>
+            <div data-testid="mcode-efforts">{props.mcodeOptions?.map((option) => option.label).join(',') ?? ''}</div>
             <button type="button" data-testid="reasoning" onClick={() => props.onReasoningEffortChange('max')}>
                 {props.reasoningEffort}
             </button>
@@ -275,6 +285,7 @@ vi.mock('./ModelSelector', () => ({
     ModelSelector: (props: {
         model: string
         options?: Array<{ value: string; label: string }>
+        error?: string | null
         onModelChange: (model: string) => void
     }) => (
         <>
@@ -282,6 +293,7 @@ vi.mock('./ModelSelector', () => ({
                 {props.model}
             </button>
             <div data-testid="model-options">{props.options?.map((option) => option.label).join(',')}</div>
+            {props.error ? <div data-testid="model-error">{props.error}</div> : null}
         </>
     )
 }))
@@ -313,7 +325,7 @@ describe('NewSession launch preferences', () => {
         mocks.availableAgents.splice(
             0,
             mocks.availableAgents.length,
-            ...['agy', 'claude', 'codex', 'dsh', 'copilot', 'cursor', 'grok', 'kimi', 'opencode', 'pi']
+            ...['agy', 'claude', 'codex', 'dsh', 'copilot', 'cursor', 'grok', 'kimi', 'mcode', 'opencode', 'pi']
                 .map((agent) => ({ agent, available: true }))
         )
         mocks.codexModelsLoading = false
@@ -328,6 +340,7 @@ describe('NewSession launch preferences', () => {
         mocks.mcodeModels = []
         mocks.mcodeModelsLoading = false
         mocks.mcodeModelsError = null
+        mocks.mcodeEffortOptions = []
         mocks.opencodeModels = [{ modelId: 'provider/current', name: 'Current' }]
         mocks.opencodeCurrentModelId = 'provider/current'
         mocks.opencodeModelsLoading = false
@@ -536,6 +549,101 @@ describe('NewSession launch preferences', () => {
                 'Default,thehive — thehive / GLM-5.3-flash,thehive — thehive / hive-deepseek,charm-hyper — charm-hyper / Hyper · GLM-5.3-Flash,openrouter — openrouter-union-alpha'
             )
         })
+    })
+
+    it('shows dynamic MiniMax Code models with Default for the selected directory', async () => {
+        mocks.mcodeModels = [
+            { modelId: 'm:minimax:MiniMax-M3:v:', name: 'M3' },
+            { modelId: 'm:minimax:MiniMax-M3:v:thinking', name: 'M3 · thinking' }
+        ]
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory={'C:\\repo'}
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByDisplayValue('mcode'))
+
+        await waitFor(() => {
+            expect(screen.getByTestId('model-options')).toHaveTextContent(
+                'Default,M3,M3 · thinking'
+            )
+        })
+    })
+
+    it('shows MiniMax Code thinking-effort options from the ACP probe', async () => {
+        mocks.mcodeEffortOptions = [
+            { value: 'low', name: 'Low' },
+            { value: 'max', name: 'Max' }
+        ]
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory={'C:\\repo'}
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByDisplayValue('mcode'))
+
+        await waitFor(() => {
+            expect(screen.getByTestId('mcode-efforts')).toHaveTextContent('Low,Max')
+        })
+    })
+
+    it('shows the MiniMax Code model discovery error instead of a silently disabled picker', async () => {
+        mocks.mcodeModelsError = 'probe failed'
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory={'C:\\repo'}
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByDisplayValue('mcode'))
+
+        await waitFor(() => {
+            expect(screen.getByTestId('model-error')).toHaveTextContent('probe failed')
+        })
+    })
+
+    it('disables creation while a remembered MiniMax Code model is being validated', async () => {
+        mocks.mcodeModelsLoading = true
+        savePreferredAgent('mcode')
+        savePreferredLaunchSettings('machine-1', 'mcode', {
+            model: 'm:minimax:MiniMax-M3:v:',
+            cursorSelectedBase: 'auto',
+            effort: 'auto',
+            modelReasoningEffort: 'default'
+        })
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory={'C:\\repo'}
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        await waitFor(() => expect(screen.getByTestId('create')).toBeDisabled())
     })
 
     it('restores a remembered Kimi alias instead of resetting it to Default', async () => {

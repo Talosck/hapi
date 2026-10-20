@@ -106,6 +106,7 @@ class CatalogTest {
     fun `flavor capabilities and labels match flavors-ts`() {
         assertTrue(Flavors.supportsEffort("claude"))
         assertTrue(Flavors.supportsEffort("grok"))
+        assertTrue(Flavors.supportsEffort("mcode"))
         assertTrue(Flavors.supportsEffort("pi"))
         assertFalse(Flavors.supportsEffort("codex"))
         assertFalse(Flavors.supportsEffort(null))

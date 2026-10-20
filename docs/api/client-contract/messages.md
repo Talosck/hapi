@@ -87,7 +87,7 @@ Reference: `web/src/chat/normalizeUser.ts`.
 
 ## `role: 'agent'` — family `'codex'`
 
-`payload.type === 'codex'` (`AGENT_MESSAGE_PAYLOAD_TYPE`, `shared/src/modes.ts:8`) is the **generic agent envelope** used by the non-Claude-SDK flavors (codex, gemini, cursor, copilot, grok, opencode, pi, kimi; agy uses the `'output'` family below). Dispatch on `payload.data.type` (`web/src/chat/normalizeAgent.ts`):
+`payload.type === 'codex'` (`AGENT_MESSAGE_PAYLOAD_TYPE`, `shared/src/modes.ts:8`) is the **generic agent envelope** used by the non-Claude-SDK flavors (codex, gemini, cursor, copilot, grok, opencode, pi, kimi, mcode; agy uses the `'output'` family below). Dispatch on `payload.data.type` (`web/src/chat/normalizeAgent.ts`):
 
 | `data.type` | Payload fields | Renders as |
 |---|---|---|

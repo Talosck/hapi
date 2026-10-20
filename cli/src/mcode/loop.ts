@@ -17,8 +17,22 @@ interface McodeLoopOptions {
     api: ApiClient;
     permissionMode?: PermissionMode;
     model?: string;
+    effort?: string;
     resumeSessionId?: string;
     onSessionReady?: (session: McodeSession) => void;
+    /**
+     * Fired when the remote launcher discovers the model the native session is
+     * actually using (or falls back after a rejected switch). `runMcode` feeds
+     * this back into the keepalive so the hub does not keep advertising a
+     * model the agent never accepted.
+     */
+    onConfigDiscovered?: (config: { model: string | null; effort: string | null }) => void;
+    /** Fired after a failed inline model switch, with the model still active. */
+    onModelRollback?: (model: string | null) => void;
+    /** Fired after a failed effort switch, with the effort still active. */
+    onEffortRollback?: (effort: string | null) => void;
+    /** Fired after a failed permission-mode apply, with the restored mode. */
+    onPermissionModeRollback?: (mode: PermissionMode) => void;
 }
 
 export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
@@ -37,7 +51,8 @@ export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
         mode: startingMode,
         startedBy,
         startingMode,
-        permissionMode: opts.permissionMode ?? 'default'
+        permissionMode: opts.permissionMode ?? 'default',
+        effort: opts.effort === 'default' ? undefined : opts.effort
     });
 
     if (opts.resumeSessionId) {
@@ -48,6 +63,10 @@ export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
         const sessionModel = session.getModel();
         return sessionModel != null ? sessionModel : opts.model;
     };
+    const getCurrentEffort = (): string | undefined => {
+        const sessionEffort = session.getEffort();
+        return sessionEffort != null ? sessionEffort : opts.effort;
+    };
 
     await runLocalRemoteSession({
         session,
@@ -57,7 +76,12 @@ export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
             model: getCurrentModel()
         }),
         runRemote: (instance) => mcodeRemoteLauncher(instance, {
-            model: getCurrentModel()
+            model: getCurrentModel(),
+            effort: getCurrentEffort(),
+            onConfigDiscovered: opts.onConfigDiscovered,
+            onModelRollback: opts.onModelRollback,
+            onEffortRollback: opts.onEffortRollback,
+            onPermissionModeRollback: opts.onPermissionModeRollback
         }),
         onSessionReady: opts.onSessionReady
     });

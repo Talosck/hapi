@@ -673,6 +673,15 @@ export function NewSession(props: {
         () => buildMcodeModelOptions(mcodeModelsState.availableModels),
         [mcodeModelsState.availableModels]
     )
+    const mcodeEffortOptions = useMemo(
+        () => mcodeModelsState.effortOptions
+            .filter((option) => option.value !== 'default')
+            .map((option) => ({
+                value: option.value,
+                label: option.name ?? option.value
+            })),
+        [mcodeModelsState.effortOptions]
+    )
     const copilotModelOptions = useMemo(
         () => [
             { value: 'auto', label: 'Auto' },
@@ -1000,6 +1009,27 @@ export function NewSession(props: {
         mcodeModelsState.isLoading,
         deferredDirectoryExists,
         model
+    ])
+    useEffect(() => {
+        if (
+            agent === 'mcode'
+            && deferredDirectoryExists === true
+            && !mcodeModelsState.isLoading
+            && !mcodeModelsState.error
+            && mcodeModelsState.availableModels.length > 0
+            && effort !== 'auto'
+            && !mcodeEffortOptions.some((option) => option.value === effort)
+        ) {
+            setEffort('auto')
+        }
+    }, [
+        agent,
+        deferredDirectoryExists,
+        effort,
+        mcodeEffortOptions,
+        mcodeModelsState.availableModels,
+        mcodeModelsState.error,
+        mcodeModelsState.isLoading
     ])
 
     const currentDirectoryExists = trimmedDirectory ? pathExistence[trimmedDirectory] : undefined
@@ -1609,7 +1639,7 @@ export function NewSession(props: {
                     : agent === 'cursor'
                         ? (model === 'auto' || !model ? 'auto' : model)
                         : (model !== 'auto' ? model : undefined)
-            const resolvedEffort = (agent === 'claude' || agent === 'grok' || agent === 'pi') && effort !== 'auto'
+            const resolvedEffort = (agent === 'claude' || agent === 'grok' || agent === 'mcode' || agent === 'pi') && effort !== 'auto'
                 ? effort
                 : undefined
             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
@@ -1779,6 +1809,13 @@ export function NewSession(props: {
             && (
                 deferredDirectoryExists === undefined
                 || (deferredDirectoryExists === true && kimiModelsState.isLoading)
+            ))
+        || (agent === 'mcode'
+            && deferredDirectory !== ''
+            && (model !== 'auto' || effort !== 'auto')
+            && (
+                deferredDirectoryExists === undefined
+                || (deferredDirectoryExists === true && mcodeModelsState.isLoading)
             ))
         || (agent === 'pi'
             && model !== 'auto'
@@ -1998,6 +2035,8 @@ export function NewSession(props: {
                                     ? `${t('newSession.model.loadFailed')}: ${copilotModelsState.error}`
                                     : agent === 'kimi' && kimiModelsState.error
                                         ? `${t('newSession.model.loadFailed')}: ${kimiModelsState.error}`
+                                        : agent === 'mcode' && mcodeModelsState.error
+                                            ? `${t('newSession.model.loadFailed')}: ${mcodeModelsState.error}`
                                         : agent === 'pi' && piModelsState.error
                                             ? `${t('newSession.model.loadFailed')}: ${piModelsState.error}`
                                     : null}
@@ -2012,8 +2051,11 @@ export function NewSession(props: {
                     onEffortChange={setEffort}
                     reasoningEffort={modelReasoningEffort}
                     onReasoningEffortChange={setModelReasoningEffort}
-                    isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
+                    isDisabled={isFormDisabled
+                        || (agent === 'codex' && codexModelsState.isLoading)
+                        || (agent === 'mcode' && mcodeModelsState.isLoading)}
                     grokOptions={agent === 'grok' ? grokEffortOptions : undefined}
+                    mcodeOptions={agent === 'mcode' ? mcodeEffortOptions : undefined}
                     codexReasoningOptions={agent === 'codex' ? codexReasoningEffortOptions : undefined}
                     opencodeVariantOptions={agent === 'opencode' ? opencodeVariantOptions : undefined}
                     piSelectedModel={agent === 'pi' ? piSelectedModel : null}

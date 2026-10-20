@@ -101,3 +101,17 @@ describe('resolveToolAutoApprovalDecision list_peers', () => {
         )).toBeNull()
     })
 })
+
+describe('resolveToolAutoApprovalDecision full-access modes', () => {
+    it.each(['yolo', 'always-proceed', 'bypassPermissions'] as const)(
+        'auto-approves every tool in %s mode',
+        (mode) => {
+            expect(resolveToolAutoApprovalDecision(mode, 'Write', 'call-1')).toBe('approved_for_session')
+            expect(resolveToolAutoApprovalDecision(mode, 'Bash', 'call-2')).toBe('approved_for_session')
+        }
+    )
+
+    it('does not auto-approve unknown tools in auto mode', () => {
+        expect(resolveToolAutoApprovalDecision('auto', 'Write', 'call-1')).toBeNull()
+    })
+})

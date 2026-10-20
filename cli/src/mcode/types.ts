@@ -14,4 +14,6 @@ export interface McodeMode {
     permissionMode: PermissionMode;
     /** `null` means "back to the agent default"; `undefined` means "no choice". */
     model?: string | null;
+    /** ACP `thinkingEffort` value; `null` = agent default, `undefined` = no choice. */
+    effort?: string | null;
 }

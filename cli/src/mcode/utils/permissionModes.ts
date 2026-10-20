@@ -46,10 +46,11 @@ export function resolveMcodePermissionConfigId(backend: AcpSdkBackend, sessionId
 /**
  * Applies a HAPI permission mode to the MiniMax Code session.
  *
- * The tool permission policy is applied through the ACP config option and the
- * plan mode through `session/set_mode`. Failures are surfaced to the caller so
- * the launcher can roll the session back to the previous mode instead of
- * silently running with a policy the user did not pick.
+ * The plan mode is applied through `session/set_mode` first, then the tool
+ * permission policy through the ACP config option. Applying the session mode
+ * first means a rejected plan transition cannot leave the process-scoped
+ * permission policy changed; the launcher rolls both axes back if either call
+ * fails.
  */
 export async function applyMcodePermissionMode(
     backend: AcpSdkBackend,
@@ -58,11 +59,11 @@ export async function applyMcodePermissionMode(
 ): Promise<void> {
     const { permissionOption, sessionMode } = mapMcodePermissionMode(mode);
 
-    const configId = resolveMcodePermissionConfigId(backend, sessionId);
-    await backend.setConfigOption(sessionId, configId, permissionOption);
-
     // `session/set_mode` carries the session mode (default / plan), not the
     // reasoning effort — see AcpSdkBackend.setSessionMode.
     await backend.setSessionMode(sessionId, sessionMode);
+
+    const configId = resolveMcodePermissionConfigId(backend, sessionId);
+    await backend.setConfigOption(sessionId, configId, permissionOption);
     logger.debug(`[mcode-remote] Applied permission mode ${mode} (option=${permissionOption}, sessionMode=${sessionMode})`);
 }

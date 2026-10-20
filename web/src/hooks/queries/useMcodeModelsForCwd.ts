@@ -11,6 +11,8 @@ export function useMcodeModelsForCwd(args: {
 }): {
     availableModels: McodeModelSummary[]
     currentModelId: string | null
+    effortOptions: Array<{ value: string; name?: string }>
+    currentEffort: string | null
     isLoading: boolean
     error: string | null
 } {
@@ -36,6 +38,8 @@ export function useMcodeModelsForCwd(args: {
     return {
         availableModels: query.data?.availableModels ?? [],
         currentModelId: query.data?.currentModelId ?? null,
+        effortOptions: query.data?.effortOptions ?? [],
+        currentEffort: query.data?.currentEffort ?? null,
         isLoading: query.isLoading,
         error: query.data?.success === false
             ? (query.data.error ?? 'Failed to load MiniMax Code models')

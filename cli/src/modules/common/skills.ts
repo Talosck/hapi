@@ -55,6 +55,12 @@ function getAgentConfigDir(flavor?: string): string {
             return process.env.CODEX_HOME || join(getHomeDirectory(), '.codex');
         case 'grok':
             return process.env.GROK_HOME || join(getHomeDirectory(), '.grok');
+        case 'mcode': {
+            // MiniMax Code's data directory is `~/.minimax` (or the configured
+            // MINIMAX_DATA_DIR/MAVIS_DATA_DIR), not `~/.mcode`.
+            const dataDir = process.env.MINIMAX_DATA_DIR?.trim() || process.env.MAVIS_DATA_DIR?.trim();
+            return dataDir || join(getHomeDirectory(), '.minimax');
+        }
         default:
             return join(getHomeDirectory(), `.${normalizedFlavor}`);
     }
@@ -74,6 +80,9 @@ function getUserSkillsRoots(flavor?: string): string[] {
             roots.push(join(getAgentConfigDir(flavor), 'skills'));
             break;
         case 'copilot':
+            roots.push(join(getAgentConfigDir(flavor), 'skills'));
+            break;
+        case 'mcode':
             roots.push(join(getAgentConfigDir(flavor), 'skills'));
             break;
     }
@@ -99,6 +108,12 @@ function getProjectSkillsRoots(directory: string, flavor?: string): string[] {
         case 'copilot':
             roots.push(join(directory, '.copilot', 'skills'));
             roots.push(join(directory, '.github', 'skills'));
+            break;
+        case 'mcode':
+            // MiniMax Code's native workspace root plus the shared .claude
+            // root its runtime also reads.
+            roots.push(join(directory, '.minimax', 'skills'));
+            roots.push(join(directory, '.claude', 'skills'));
             break;
     }
     return roots;

@@ -869,8 +869,10 @@ export type ListKimiModelsResponse = KimiModelsResponse
 
 export type McodeModelSummary = {
     /**
-     * MiniMax Code ACP wire model id (`m:<provider>:<model>:v:<variant>`),
-     * as published by the agent's `model` config option.
+     * MiniMax Code ACP wire model id, as published by the agent's `model`
+     * config option: `m:<provider>:<model>:u` for a model without a variant,
+     * or `m:<provider>:<model>:v:<variant>` for a variant model. Provider,
+     * model, and variant are URI-encoded by the agent.
      */
     modelId: string
     name?: string
@@ -880,6 +882,9 @@ export type McodeModelsResponse = {
     success: boolean
     availableModels?: McodeModelSummary[]
     currentModelId?: string | null
+    /** ACP `thinkingEffort` options; empty when the agent advertises none. */
+    effortOptions?: Array<{ value: string; name?: string }>
+    currentEffort?: string | null
     error?: string
 }
 

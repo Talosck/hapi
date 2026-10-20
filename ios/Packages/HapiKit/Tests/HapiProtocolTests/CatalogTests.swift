@@ -191,6 +191,7 @@ struct CatalogTests {
     @Test func effortSupportMatchesFlavorsTs() {
         #expect(AgentFlavor.claude.supportsEffort)
         #expect(AgentFlavor.grok.supportsEffort)
+        #expect(AgentFlavor.mcode.supportsEffort)
         #expect(AgentFlavor.pi.supportsEffort)
         #expect(!AgentFlavor.codex.supportsEffort)
         #expect(!AgentFlavor.cursor.supportsEffort)

@@ -75,8 +75,10 @@ export const BUILTIN_SLASH_COMMANDS = {
         { name: 'usage', description: 'Show session usage metrics', source: 'builtin' },
     ],
     kimi: [],
-    // MiniMax Code advertises its own commands over ACP (`available_commands`),
-    // so HAPI does not need to inject built-ins.
+    // MiniMax Code executes its `/help`, `/compact`, ... commands from the
+    // prompt text itself. The remote launcher forwards the ACP
+    // `available_commands` roster through ListSlashCommands, so the static
+    // built-in list stays empty.
     mcode: [],
     // Pi runs `pi --mode rpc` over stdio; only commands HAPI can translate
     // to Pi RPC calls are listed. Terminal-only Pi builtins (e.g. /tree,

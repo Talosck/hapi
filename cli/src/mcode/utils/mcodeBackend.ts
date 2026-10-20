@@ -7,9 +7,6 @@ export const MCODE_PERMISSION_CONFIG_ID = 'permissionMode';
 /** Category the MiniMax Code permission config option is published under. */
 export const MCODE_PERMISSION_CONFIG_CATEGORY = '_permission';
 
-/** Config option id MiniMax Code uses for its model picker. */
-export const MCODE_MODEL_CONFIG_ID = 'model';
-
 /** ACP session mode ids MiniMax Code advertises on `session/new`. */
 export const MCODE_SESSION_MODE_DEFAULT = 'default';
 export const MCODE_SESSION_MODE_PLAN = 'plan';

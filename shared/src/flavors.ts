@@ -14,7 +14,7 @@ const FLAVOR_CAPS: Record<AgentFlavor, ReadonlySet<Capability>> = {
     claude: new Set([Capabilities.ModelChange, Capabilities.Effort]),
     gemini: new Set([Capabilities.ModelChange]),
     kimi: new Set([Capabilities.ModelChange]),
-    mcode: new Set([Capabilities.ModelChange]),
+    mcode: new Set([Capabilities.ModelChange, Capabilities.Effort]),
     copilot: new Set([Capabilities.ModelChange]),
     grok: new Set([Capabilities.ModelChange, Capabilities.Effort]),
     codex: new Set([Capabilities.ModelChange]),

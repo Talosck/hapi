@@ -11,6 +11,7 @@ export type ParsedMcodeCommandOptions = {
     startingMode?: 'local' | 'remote'
     permissionMode?: McodePermissionMode
     model?: string
+    effort?: string
     resumeSessionId?: string
     existingSessionId?: string
     /** Fresh-spawn reserved hub id (`--hapi-session-id`); not reopen. */
@@ -72,6 +73,12 @@ export function parseMcodeCommandOptions(commandArgs: string[]): ParsedMcodeComm
                 throw new Error('Missing --model value');
             }
             options.model = model;
+        } else if (arg === '--effort') {
+            const effort = commandArgs[++i];
+            if (!effort) {
+                throw new Error('Missing --effort value');
+            }
+            options.effort = effort;
         }
     }
 

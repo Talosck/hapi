@@ -362,6 +362,7 @@ describe('AcpSdkBackend', () => {
             ]
         });
         expect(backend.hasAvailableCommand(sessionId, 'auto')).toBe(true);
+        expect(backend.getAvailableCommands(sessionId)).toEqual([{ name: 'auto' }]);
 
         await backend.setMode(sessionId, 'high');
 

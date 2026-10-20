@@ -23,7 +23,7 @@ export function getReasoningEffortForFlavor(
     if (agentFlavor === 'codex' || agentFlavor === 'opencode') {
         return modelReasoningEffort?.trim() || null
     }
-    if (agentFlavor === 'pi') {
+    if (agentFlavor === 'pi' || agentFlavor === 'mcode') {
         return effort?.trim() || null
     }
     return null
@@ -35,8 +35,8 @@ export function shouldShowReasoningStatusLabel(
 ): boolean {
     // Codex/OpenCode retain their existing explicit default label when unset.
     if (agentFlavor === 'codex' || agentFlavor === 'opencode') return true
-    // Pi has no meaningful default for non-reasoning models; only show a real level.
-    return agentFlavor === 'pi' && Boolean(reasoningEffort?.trim())
+    // Pi/mcode have no meaningful default; only show a real level.
+    return (agentFlavor === 'pi' || agentFlavor === 'mcode') && Boolean(reasoningEffort?.trim())
 }
 
 /** Codex-only aliases retained for tool-card and thread call sites. */

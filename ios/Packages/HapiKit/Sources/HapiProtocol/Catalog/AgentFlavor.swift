@@ -119,10 +119,10 @@ extension AgentFlavor {
         }
     }
 
-    /// `hasCapability(flavor, 'effort')` — claude, grok, and pi only.
+    /// `hasCapability(flavor, 'effort')` — claude, grok, mcode, and pi.
     public var supportsEffort: Bool {
         switch self {
-        case .claude, .grok, .pi: return true
+        case .claude, .grok, .mcode, .pi: return true
         default: return false
         }
     }

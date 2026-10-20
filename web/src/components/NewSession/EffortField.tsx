@@ -17,6 +17,8 @@ export type EffortFieldProps = {
     isDisabled: boolean
     /** Model-dependent launch-effort options (Grok). */
     grokOptions?: Array<{ value: string; label: string }>
+    /** ACP thinking-effort options (MiniMax Code). */
+    mcodeOptions?: Array<{ value: string; label: string }>
     /** Model-dependent reasoning-effort options (Codex). */
     codexReasoningOptions?: Array<{ value: string; name?: string }>
     /** Model-dependent variant values from the OpenCode catalog (OpenCode). Array = dynamic list, [] = hide field, null/undefined = static fallback. */
@@ -49,6 +51,11 @@ export function EffortField(props: EffortFieldProps) {
     let options: Array<{ value: string; label: string }>
     if (props.agent === 'grok') {
         options = props.grokOptions ?? GROK_EFFORT_OPTIONS
+    } else if (props.agent === 'mcode') {
+        options = [
+            { value: 'auto', label: t('newSession.model.default') },
+            ...(props.mcodeOptions ?? [])
+        ]
     } else if (props.agent === 'pi') {
         if (props.piSelectedModel?.reasoning === false) {
             return null

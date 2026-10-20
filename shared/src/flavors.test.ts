@@ -48,9 +48,9 @@ describe('hasCapability', () => {
         expect(hasCapability('opencode', Capabilities.Effort)).toBe(false)
     })
 
-    test('mcode supports model-change but not effort', () => {
+    test('mcode supports model-change and effort', () => {
         expect(hasCapability('mcode', Capabilities.ModelChange)).toBe(true)
-        expect(hasCapability('mcode', Capabilities.Effort)).toBe(false)
+        expect(hasCapability('mcode', Capabilities.Effort)).toBe(true)
     })
 
     test('pi supports model-change and effort', () => {

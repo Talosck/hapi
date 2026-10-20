@@ -7,12 +7,14 @@ describe('parseMcodeCommandOptions', () => {
             '--started-by', 'runner',
             '--hapi-starting-mode', 'remote',
             '--hapi-session-id', 'reserved-id',
-            '--model', 'm:minimax:MiniMax-M3:v:thinking'
+            '--model', 'm:minimax:MiniMax-M3:v:thinking',
+            '--effort', 'high'
         ])).toEqual({
             startedBy: 'runner',
             startingMode: 'remote',
             reservedSessionId: 'reserved-id',
-            model: 'm:minimax:MiniMax-M3:v:thinking'
+            model: 'm:minimax:MiniMax-M3:v:thinking',
+            effort: 'high'
         });
     });
 

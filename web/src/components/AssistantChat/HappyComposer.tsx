@@ -1100,7 +1100,7 @@ export function HappyComposer(props: {
     const claudeEffortOptions = useMemo(
         () => agentFlavor === 'pi'
             ? getPiThinkingLevelOptions(effort, selectedPiModel?.thinkingLevelMap)
-            : agentFlavor === 'grok' && availableEffortOptions && availableEffortOptions.length > 0
+            : (agentFlavor === 'grok' || agentFlavor === 'mcode') && availableEffortOptions && availableEffortOptions.length > 0
                 ? [
                     { value: null, label: 'Default' },
                     ...availableEffortOptions.map((option) => ({

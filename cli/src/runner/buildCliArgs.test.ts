@@ -306,6 +306,15 @@ describe('buildCliArgs', () => {
         expect(args).toContain('hapi-child-id')
     })
 
+    it('passes --effort for mcode agent', () => {
+        const args = buildCliArgs('mcode', {
+            directory: '/tmp',
+            effort: 'high',
+        })
+        expect(args).toContain('--effort')
+        expect(args).toContain('high')
+    })
+
     it('passes --effort for pi agent', () => {
         const args = buildCliArgs('pi', {
             directory: '/tmp',

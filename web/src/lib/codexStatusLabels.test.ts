@@ -48,10 +48,11 @@ describe('reasoning status metadata', () => {
         expect(formatCompactReasoningLabel(' MAX ')).toBe('max')
     })
 
-    it('uses model reasoning effort for Codex/OpenCode and ordinary effort only for Pi', () => {
+    it('uses model reasoning effort for Codex/OpenCode and ordinary effort for Pi/mcode', () => {
         expect(getReasoningEffortForFlavor('codex', 'xhigh', 'max')).toBe('xhigh')
         expect(getReasoningEffortForFlavor('opencode', 'high', 'max')).toBe('high')
         expect(getReasoningEffortForFlavor('pi', 'xhigh', 'max')).toBe('max')
+        expect(getReasoningEffortForFlavor('mcode', 'xhigh', 'max')).toBe('max')
         expect(getReasoningEffortForFlavor('claude', 'xhigh', 'max')).toBeNull()
         expect(getReasoningEffortForFlavor('grok', 'xhigh', 'max')).toBeNull()
         expect(getReasoningEffortForFlavor(null, 'xhigh', 'max')).toBeNull()
@@ -61,6 +62,7 @@ describe('reasoning status metadata', () => {
         expect(shouldShowReasoningStatusLabel('codex', null)).toBe(true)
         expect(shouldShowReasoningStatusLabel('opencode', null)).toBe(true)
         expect(shouldShowReasoningStatusLabel('pi', 'max')).toBe(true)
+        expect(shouldShowReasoningStatusLabel('mcode', 'max')).toBe(true)
         expect(shouldShowReasoningStatusLabel('pi', null)).toBe(false)
         expect(shouldShowReasoningStatusLabel('pi', '   ')).toBe(false)
         expect(shouldShowReasoningStatusLabel('claude', 'max')).toBe(false)

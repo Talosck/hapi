@@ -266,7 +266,7 @@ drives the same conversation remotely over the Agent Client Protocol (`mcode acp
 curl -fsSL https://filecdn.minimax.chat/public/install.sh | bash
 
 # or, with a compatible Node.js 22.19+ / 24+ / 25 / 26
-npm install -g @minimax-ai/code
+npm install -g @minimax-ai/code@latest --registry=https://registry.npmjs.org/ --ignore-scripts=false --include=optional --allow-scripts=@minimax-ai/code,better-sqlite3
 ```
 
 Verify the installation:
@@ -294,13 +294,21 @@ You can also bring your own key through the CLI's own provider configuration
 hapi mcode                        # Start a MiniMax Code session
 hapi mcode --model m:minimax:MiniMax-M3:v:thinking
 hapi mcode --permission-mode auto # Ask / Auto / Full access
-hapi mcode --plan                 # Start in Plan mode
-hapi mcode --yolo                 # Full access (bypassPermissions)
+hapi mcode --effort high          # Thinking effort (applied on remote control)
+hapi mcode --plan                 # Plan mode (applied on remote control)
+hapi mcode --yolo                 # Full access (applied on remote control)
 ```
 
 Sessions created from a HAPI runner start in remote mode automatically.
 Terminal-created sessions start in the native MiniMax Code TUI and can switch
 to remote control without parsing terminal output.
+
+The native TUI has no CLI flags for permission mode or thinking effort, so
+`--permission-mode`, `--plan`, `--yolo`, and `--effort` are applied by HAPI's
+remote launcher. A terminal-created session starts with whatever mode/effort
+the TUI has; HAPI records the requested values and applies them when the
+session switches to remote control. Changes made inside the TUI are not
+mirrored back to HAPI.
 
 ### Permission modes
 
@@ -322,12 +330,30 @@ phone UIs with the usual Allow / Allow for session / Deny choices.
 
 ### Model selection
 
-MiniMax Code identifies a model with the ACP wire id
-(`m:<provider>:<model>:v:<variant>`, e.g. `m:minimax:MiniMax-M3:v:thinking`).
+MiniMax Code identifies a model with the ACP wire id: `m:<provider>:<model>:u`
+for a model without a variant, or `m:<provider>:<model>:v:<variant>` for a
+variant model (e.g. `m:minimax:MiniMax-M3:u` and
+`m:minimax:MiniMax-M3:v:thinking`). Provider, model, and variant are
+URI-encoded by the agent; an empty variant (`...:v:`) is valid.
+
 HAPI discovers the catalog for the selected directory and offers it in the
-create-session form and in the session's model picker. The MiniMax Code CLI
-uses the shorter `provider/model[#variant]` form; HAPI translates between the
-two when it hands the model to the local TUI.
+web create-session form and in the web session model picker. The MiniMax Code
+CLI uses the shorter `provider/model[#variant]` form; HAPI translates between
+the two when it hands the model to the local TUI.
+
+### Thinking effort
+
+MiniMax Code publishes its reasoning levels as the ACP `thinkingEffort`
+config option. HAPI discovers those levels alongside the model catalog and
+offers them in the create form and the session settings. `--effort` is applied
+when the session runs remotely; the native TUI has no CLI flag for it.
+
+### Slash commands
+
+MiniMax Code advertises its own command roster over ACP (`/help`, `/compact`,
+`/status`, ...). HAPI forwards that roster to the web `/` menu for remote
+sessions; typing a command still runs it natively in the agent. The native TUI
+owns its command menu while HAPI is not in remote mode.
 
 ### Resume and handoff
 
@@ -349,6 +375,13 @@ same conversation.
   applies model changes through `session/set_config_option` instead.
 - MiniMax Code's ACP build does not advertise image prompts
   (`promptCapabilities.image: false`), so attachments are sent as text.
+- The native TUI owns its permission mode and thinking effort while HAPI is
+  not in remote mode; `--plan` / `--yolo` / `--permission-mode` / `--effort`
+  therefore apply on remote control.
+- Model/effort discovery and pickers are currently web-only; the native
+  iOS/Android create forms start with the agent default.
+- MiniMax Code has no ACP delete method, so model discovery reuses one probe
+  session under HAPI's home directory instead of creating one per lookup.
 - Signing in must be completed outside the HAPI web UI.
 
 ## DeepSeek Harness

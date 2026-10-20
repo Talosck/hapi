@@ -26,6 +26,7 @@ export class McodeSession extends AgentSessionBase<McodeMode> {
         startedBy: 'runner' | 'terminal';
         startingMode: 'local' | 'remote';
         permissionMode?: PermissionMode;
+        effort?: string;
     }) {
         super({
             api: opts.api,
@@ -42,12 +43,14 @@ export class McodeSession extends AgentSessionBase<McodeMode> {
                 ...metadata,
                 mcodeSessionId: sessionId
             }),
-            permissionMode: opts.permissionMode
+            permissionMode: opts.permissionMode,
+            effort: opts.effort
         });
 
         this.startedBy = opts.startedBy;
         this.startingMode = opts.startingMode;
         this.permissionMode = opts.permissionMode;
+        this.effort = opts.effort;
     }
 
     setPermissionMode = (mode: PermissionMode): void => {
@@ -56,6 +59,10 @@ export class McodeSession extends AgentSessionBase<McodeMode> {
 
     setModel = (model: string | null): void => {
         this.model = model;
+    };
+
+    setEffort = (effort: string | null): void => {
+        this.effort = effort;
     };
 
     recordLocalLaunchFailure = (message: string, exitReason: LocalLaunchExitReason): void => {
