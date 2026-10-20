@@ -44,6 +44,45 @@ export function resolveMcodePermissionConfigId(backend: AcpSdkBackend, sessionId
 }
 
 /**
+ * Reads the tool permission policy the agent currently runs.
+ *
+ * The agent re-publishes its config options whenever the (process-scoped)
+ * policy changes, so the cached descriptor is the agent's own statement about
+ * what it does — not what HAPI last asked for.
+ */
+export function readMcodePermissionOption(backend: AcpSdkBackend, sessionId: string): string | null {
+    const options = backend.getSessionConfigOptions(sessionId) ?? [];
+    const configId = resolveMcodePermissionConfigId(backend, sessionId);
+    const option = options.find((entry) => entry.id === configId)
+        ?? options.find((entry) => entry.category === MCODE_PERMISSION_CONFIG_CATEGORY);
+    return option?.currentValue ?? null;
+}
+
+/**
+ * Maps the state the agent reports onto HAPI's single permission-mode axis.
+ *
+ * MiniMax Code keeps the tool permission policy and the ACP session mode on
+ * separate axes, while HAPI exposes one mode per session. The session mode
+ * wins when it is `plan`: that is the mode the user is looking at, and the
+ * policy it runs with is the agent's default ("Ask").
+ */
+export function resolveMcodePermissionMode(
+    sessionMode: string | null | undefined,
+    permissionOption: string | null | undefined
+): PermissionMode {
+    if (sessionMode === MCODE_SESSION_MODE_PLAN) {
+        return 'plan';
+    }
+    if (permissionOption === 'auto') {
+        return 'auto';
+    }
+    if (permissionOption === 'bypassPermissions') {
+        return 'bypassPermissions';
+    }
+    return 'default';
+}
+
+/**
  * Applies a HAPI permission mode to the MiniMax Code session.
  *
  * The plan mode is applied through `session/set_mode` first, then the tool

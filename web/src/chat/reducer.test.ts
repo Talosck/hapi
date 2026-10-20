@@ -333,6 +333,33 @@ describe('reduceChatBlocks', () => {
         })
     })
 
+    it('keeps a delegation snapshot out of the timeline', () => {
+        const reduced = reduceChatBlocks([
+            {
+                id: 'snapshot-1',
+                localId: null,
+                createdAt: 1,
+                role: 'event',
+                isSidechain: false,
+                content: {
+                    type: 'subagent-snapshot',
+                    members: [{
+                        id: 'child-1',
+                        parentId: null,
+                        title: 'Explore',
+                        detail: null,
+                        status: 'running',
+                        startedAt: 1,
+                        endedAt: null,
+                        depth: 0
+                    }]
+                }
+            }
+        ], null)
+
+        expect(reduced.blocks).toHaveLength(0)
+    })
+
     it('uses goal clear events to clear latest goal without rendering timeline prompts', () => {
         const reduced = reduceChatBlocks([
             goalMessage('goal-active', 'active', 1),

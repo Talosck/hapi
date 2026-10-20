@@ -1,5 +1,5 @@
 import type { AttachmentMetadata, MessageStatus } from '@/types/api'
-import type { ThreadGoal } from '@/types/api'
+import type { SubagentSnapshotMember, ThreadGoal } from '@/types/api'
 import type { InlineMediaSource } from '@/chat/inlineMediaSource'
 
 export type UsageData = {
@@ -50,6 +50,10 @@ export type AgentEvent =
     | { type: 'recap'; text: string }
     | { type: 'thread-goal-updated'; goal: ThreadGoal; threadId?: string; turnId?: string }
     | { type: 'thread-goal-cleared'; threadId?: string }
+    // Live delegation tree reported by MiniMax Code's ACP extension. The
+    // members are the session's subagents; the snapshot is session state, not
+    // a timeline entry.
+    | { type: 'subagent-snapshot'; members: SubagentSnapshotMember[] }
     | { type: 'abort-restore'; text: string }
     | ({ type: string } & Record<string, unknown>)
 

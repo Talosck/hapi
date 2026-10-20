@@ -74,6 +74,7 @@ export type {
     SessionPatch,
     SessionSummary,
     SessionSummaryMetadata,
+    SubagentSnapshotMember,
     TeamMember,
     TeamMessage,
     TeamState,

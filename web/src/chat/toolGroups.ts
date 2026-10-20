@@ -62,6 +62,7 @@ type ToolGroupingOptions = {
 const PLAN_TOOL_NAMES = new Set([
     'TodoWrite',
     'update_plan',
+    'plan_document',
     'ExitPlanMode',
     'exit_plan_mode',
     'CodexReasoning'

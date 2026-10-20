@@ -122,6 +122,7 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
             case 'tool_call':
             case 'tool_result':
             case 'plan':
+            case 'plan_document':
                 break
             default: {
                 const _exhaustive: never = message

@@ -13,8 +13,14 @@ import { McodeDisplay } from '@/ui/ink/McodeDisplay';
 import type { McodeSession } from './session';
 import type { PermissionMode } from './types';
 import { createMcodeBackend } from './utils/mcodeBackend';
+import type { AcpSessionStateUpdate } from '@/agent/backends/acp';
 import { McodePermissionHandler } from './utils/permissionHandler';
-import { applyMcodePermissionMode } from './utils/permissionModes';
+import {
+    applyMcodePermissionMode,
+    mapMcodePermissionMode,
+    readMcodePermissionOption,
+    resolveMcodePermissionMode
+} from './utils/permissionModes';
 import {
     McodeQuestionHandler,
     normalizeMcodeAskUserToolCall,
@@ -22,6 +28,15 @@ import {
 } from './utils/questionHandler';
 import { BackgroundTaskAggregator } from './utils/backgroundTaskAggregator';
 import { normalizeMcodeToolCall } from './utils/toolCallNormalizer';
+import {
+    MCODE_NOTIFICATION_DELEGATION_UPDATE,
+    MCODE_NOTIFICATION_GOAL_UPDATE,
+    goalLifecycleSignature,
+    parseMcodeDelegationUpdate,
+    parseMcodeGoalUpdate,
+    toHapiThreadGoal,
+    toSubagentSnapshotMembers
+} from './utils/mcodeExtensions';
 
 export type McodeRemoteLauncherOptions = {
     model?: string;
@@ -34,6 +49,11 @@ export type McodeRemoteLauncherOptions = {
     onEffortRollback?: (effort: string | null) => void;
     /** Fired after a failed permission-mode apply, with the restored mode. */
     onPermissionModeRollback?: (mode: PermissionMode) => void;
+    /**
+     * Fired when the agent reports a permission mode of its own — the session
+     * mode it switched to, or the tool permission policy it re-published.
+     */
+    onPermissionModeChanged?: (mode: PermissionMode) => void;
 };
 
 class McodeRemoteLauncher extends RemoteLauncherBase {
@@ -54,6 +74,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private appliedPermissionMode: PermissionMode | null = null;
     private hasAppliedPermissionMode = false;
     private readonly backgroundTasks = new BackgroundTaskAggregator();
+    /** ACP session id of the running MiniMax Code session. */
+    private acpSessionId: string | null = null;
+    /** Last delegation snapshot forwarded to the hub (state dedupe). */
+    private lastDelegationSignature: string | null = null;
+    /** Last goal lifecycle state rendered as a chat card. */
+    private lastGoalLifecycleSignature: string | null = null;
+    /** ACP session mode last reported by the agent (`default` / `plan`). */
+    private currentSessionMode: string | null = null;
+    /** The permission mode the hub currently shows for this session. */
+    private hubPermissionMode: PermissionMode | null = null;
 
     constructor(session: McodeSession, opts: McodeRemoteLauncherOptions) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -93,6 +123,20 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         });
 
         await backend.initialize();
+
+        // MiniMax Code streams its delegation tree and thread goal through
+        // ACP extension notifications; the agent only emits them because the
+        // backend advertised the matching capability during initialize.
+        backend.setExtensionNotificationListener((method, params) => {
+            this.handleExtensionNotification(method, params);
+        });
+
+        // The agent publishes the mode and the config options it actually runs
+        // over the standard ACP session updates. HAPI mirrors them so the
+        // session never advertises a mode the agent moved away from.
+        backend.setSessionStateListener((update) => {
+            this.handleSessionStateUpdate(update);
+        });
 
         this.questionHandler = new McodeQuestionHandler(
             session.client,
@@ -137,6 +181,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             });
         }
         session.onSessionFound(acpSessionId);
+        this.acpSessionId = acpSessionId;
 
         this.permissionHandler = new McodePermissionHandler(
             session.client,
@@ -363,6 +408,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             await applyMcodePermissionMode(this.backend, sessionId, mode);
             this.appliedPermissionMode = mode ?? null;
             this.hasAppliedPermissionMode = true;
+            this.hubPermissionMode = mode ?? null;
+            // HAPI's own request decides the session mode the agent runs with:
+            // MiniMax Code applies a mode transition on the next prompt.
+            this.currentSessionMode = mapMcodePermissionMode(mode).sessionMode;
             return true;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -377,6 +426,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             }
             this.appliedPermissionMode = previous;
             this.hasAppliedPermissionMode = false;
+            this.hubPermissionMode = previous;
+            this.currentSessionMode = mapMcodePermissionMode(previous).sessionMode;
             this.opts.onPermissionModeRollback?.(previous);
             this.session.sendSessionEvent({
                 type: 'message',
@@ -532,6 +583,114 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         }
     }
 
+    /**
+     * Routes MiniMax Code's ACP extension notifications. Unknown methods are
+     * ignored: the agent may add more extensions over time.
+     */
+    private handleExtensionNotification(method: string, params: unknown): void {
+        if (method === MCODE_NOTIFICATION_DELEGATION_UPDATE) {
+            this.handleDelegationUpdate(params);
+            return;
+        }
+        if (method === MCODE_NOTIFICATION_GOAL_UPDATE) {
+            this.handleGoalUpdate(params);
+        }
+    }
+
+    /**
+     * Handles the ACP session updates that publish the agent's own state: the
+     * session mode it switched to and the config options it re-published.
+     */
+    private handleSessionStateUpdate(update: AcpSessionStateUpdate): void {
+        if (update.kind === 'mode') {
+            this.currentSessionMode = update.modeId;
+        }
+        this.publishAgentPermissionMode();
+    }
+
+    /**
+     * Publishes the permission mode the agent runs with.
+     *
+     * MiniMax Code keeps the tool permission policy and the ACP session mode
+     * on separate axes, and the policy is process-scoped: another session
+     * attached to the same process changes it without HAPI asking. The agent
+     * re-publishes its config options whenever that happens, so the effective
+     * mode is derived from what the agent reports rather than from what HAPI
+     * last requested.
+     *
+     * Publishing starts once HAPI applied a mode of its own: before that the
+     * agent may still report the state of a session HAPI has not taken over
+     * yet, and the user's choice is the one that counts.
+     */
+    private publishAgentPermissionMode(): void {
+        const backend = this.backend;
+        const sessionId = this.acpSessionId;
+        if (!backend || !sessionId) return;
+        if (!this.hasAppliedPermissionMode) return;
+
+        const permissionMode = resolveMcodePermissionMode(
+            this.currentSessionMode,
+            readMcodePermissionOption(backend, sessionId)
+        );
+        if (permissionMode === this.hubPermissionMode) return;
+        this.hubPermissionMode = permissionMode;
+        this.opts.onPermissionModeChanged?.(permissionMode);
+    }
+
+    /**
+     * Forwards the live delegation tree. MiniMax Code does not stream the
+     * subagents' own tool calls, so this snapshot is the only view of them.
+     */
+    private handleDelegationUpdate(params: unknown): void {
+        const snapshot = parseMcodeDelegationUpdate(params);
+        if (!snapshot) {
+            logger.debug('[mcode-remote] ignoring malformed delegation update');
+            return;
+        }
+
+        const members = toSubagentSnapshotMembers(snapshot);
+        const signature = JSON.stringify(members);
+        if (signature === this.lastDelegationSignature) {
+            return;
+        }
+        this.lastDelegationSignature = signature;
+
+        this.session.sendSessionEvent({ type: 'subagent-snapshot', members });
+    }
+
+    /**
+     * Forwards the live thread goal. The goal state event keeps the web
+     * status panel current; the chat card records the goal's lifecycle
+     * (objective / status / budget) without one card per accounting update.
+     */
+    private handleGoalUpdate(params: unknown): void {
+        const update = parseMcodeGoalUpdate(params);
+        if (!update) {
+            logger.debug('[mcode-remote] ignoring malformed goal update');
+            return;
+        }
+
+        if (update.kind === 'cleared') {
+            this.lastGoalLifecycleSignature = null;
+            this.session.sendSessionEvent({ type: 'thread-goal-cleared' });
+            return;
+        }
+
+        const threadId = this.acpSessionId ?? update.goal.sessionId;
+        const goal = toHapiThreadGoal(update.goal, threadId);
+        this.session.sendSessionEvent({ type: 'thread-goal-updated', goal });
+
+        const signature = goalLifecycleSignature(goal);
+        if (signature === this.lastGoalLifecycleSignature) {
+            return;
+        }
+        this.lastGoalLifecycleSignature = signature;
+        this.session.sendSessionEvent({
+            type: 'message',
+            message: JSON.stringify({ goal })
+        });
+    }
+
     private emitAgentMessage(message: AgentMessage): void {
         const converted = convertAgentMessage(message, this.currentBackendModel);
         if (converted) {
@@ -555,6 +714,9 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 break;
             case 'plan':
                 this.messageBuffer.addMessage('Plan updated', 'status');
+                break;
+            case 'plan_document':
+                this.messageBuffer.addMessage('Plan document received', 'status');
                 break;
             case 'error':
                 this.messageBuffer.addMessage(message.message, 'status');

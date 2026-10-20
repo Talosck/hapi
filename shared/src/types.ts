@@ -14,6 +14,7 @@ export type {
     Session,
     SessionPatch,
     SessionUpdatedData,
+    SubagentSnapshotMember,
     SyncEvent,
     TeamMember,
     TeamMessage,

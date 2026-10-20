@@ -1,5 +1,6 @@
 import { isObject } from '@hapi/protocol'
-import type { ThreadGoal, TodoItem } from '@/types/api'
+import { SubagentSnapshotMemberSchema } from '@hapi/protocol/schemas'
+import type { SubagentSnapshotMember, ThreadGoal, TodoItem } from '@/types/api'
 import type { ChatBlock, NormalizedMessage, ToolCallBlock } from '@/chat/types'
 import { isSubagentToolName } from '@/chat/subagentTool'
 import { getCodexAgentActivity, getCodexAgentSummary } from '@/components/ToolCard/codexAgents'
@@ -12,6 +13,8 @@ export type SessionStatusSubagent = {
     state: 'running' | 'waiting' | 'error'
     startedAt: number | null
     endedAt: number | null
+    /** Nesting level in the delegation tree (0 = a direct subagent). */
+    depth?: number
 }
 
 export type SessionStatusTerminal = {
@@ -148,6 +151,87 @@ function subagentFromBlock(block: ToolCallBlock): SessionStatusSubagent | null {
     }
 }
 
+/**
+ * The state a delegation snapshot maps onto. Finished members are not listed:
+ * the status panel shows the work that is still going on, and the transcript
+ * keeps the history.
+ */
+const SNAPSHOT_SUBAGENT_STATES: Record<
+    SubagentSnapshotMember['status'],
+    SessionStatusSubagent['state'] | null
+> = {
+    queued: 'waiting',
+    running: 'running',
+    failed: 'error',
+    completed: null,
+    stopped: null,
+    unknown: null
+}
+
+/** The newest delegation snapshot the session reported, if any. */
+export function latestSubagentSnapshot(
+    messages: readonly NormalizedMessage[]
+): SubagentSnapshotMember[] | null {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index]
+        if (message.role !== 'event') continue
+        const event = message.content
+        if (event.type !== 'subagent-snapshot') continue
+        const parsed = SubagentSnapshotMemberSchema.array().safeParse(event.members)
+        if (!parsed.success) continue
+        return parsed.data
+    }
+    return null
+}
+
+/**
+ * Orders the delegation members as a tree: a parent comes before its
+ * children, and siblings keep the order the agent reported them in.
+ */
+function orderByTree(members: readonly SubagentSnapshotMember[]): SubagentSnapshotMember[] {
+    const byId = new Map(members.map((member) => [member.id, member]))
+    const childrenOf = new Map<string | null, SubagentSnapshotMember[]>()
+    for (const member of members) {
+        const parentId = member.parentId && byId.has(member.parentId) ? member.parentId : null
+        const siblings = childrenOf.get(parentId) ?? []
+        siblings.push(member)
+        childrenOf.set(parentId, siblings)
+    }
+
+    const ordered: SubagentSnapshotMember[] = []
+    const visit = (parentId: string | null): void => {
+        for (const member of childrenOf.get(parentId) ?? []) {
+            ordered.push(member)
+            visit(member.id)
+        }
+    }
+    visit(null)
+    return ordered
+}
+
+/** The subagents a delegation snapshot describes, in tree order. */
+export function subagentsFromSnapshot(
+    messages: readonly NormalizedMessage[]
+): SessionStatusSubagent[] {
+    const members = latestSubagentSnapshot(messages)
+    if (!members) return []
+    return orderByTree(members)
+        .map((member): SessionStatusSubagent | null => {
+            const state = SNAPSHOT_SUBAGENT_STATES[member.status]
+            if (!state) return null
+            return {
+                id: member.id,
+                title: member.title,
+                detail: member.detail,
+                state,
+                startedAt: member.startedAt,
+                endedAt: member.endedAt,
+                depth: member.depth
+            }
+        })
+        .filter((subagent): subagent is SessionStatusSubagent => subagent !== null)
+}
+
 export function buildSessionStatusData(args: {
     goal: ThreadGoal | null | undefined
     tasks: readonly TodoItem[] | null | undefined
@@ -168,12 +252,16 @@ export function buildSessionStatusData(args: {
     const possibleTerminalCommands = undiscoveredTerminalCount > 0
         ? detectedTerminals.uncertain.map((terminal) => terminal.command)
         : []
+    const snapshotSubagents = subagentsFromSnapshot(args.messages)
     const data: SessionStatusData = {
         goal: args.goal ?? null,
         tasks: args.tasks ? [...args.tasks] : [],
-        subagents: tools
-            .map(subagentFromBlock)
-            .filter((subagent): subagent is SessionStatusSubagent => subagent !== null),
+        subagents: [
+            ...snapshotSubagents,
+            ...tools
+                .map(subagentFromBlock)
+                .filter((subagent): subagent is SessionStatusSubagent => subagent !== null)
+        ],
         terminals,
         undiscoveredTerminalCount,
         possibleTerminalCommands

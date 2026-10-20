@@ -303,6 +303,27 @@ export const ThreadGoalSchema = z.object({
 
 export type ThreadGoal = z.infer<typeof ThreadGoalSchema>
 
+/**
+ * One member of a live delegation tree. MiniMax Code runs its subagents as
+ * delegated sessions and reports the tree over an ACP extension, so the web
+ * renders the members as the session's subagents.
+ */
+export const SubagentSnapshotMemberSchema = z.object({
+    id: z.string(),
+    parentId: z.string().nullable(),
+    title: z.string(),
+    detail: z.string().nullable(),
+    status: z.enum(['queued', 'running', 'completed', 'failed', 'stopped', 'unknown']),
+    /** Epoch milliseconds. */
+    startedAt: z.number().nullable(),
+    /** Epoch milliseconds. */
+    endedAt: z.number().nullable(),
+    /** Nesting level in the delegation tree (0 = the session itself). */
+    depth: z.number().int().min(0)
+})
+
+export type SubagentSnapshotMember = z.infer<typeof SubagentSnapshotMemberSchema>
+
 export const AttachmentMetadataSchema = z.object({
     id: z.string(),
     filename: z.string(),

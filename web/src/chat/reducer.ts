@@ -80,24 +80,30 @@ function isRedundantGoalStatusMessage(event: AgentEvent): boolean {
     return isRedundantGoalStatusMessageText(event.message)
 }
 
-function isSilentGoalEventBlock(block: ChatBlock): boolean {
+/**
+ * Session state that belongs in the status panel, not in the timeline: the
+ * goal of the session and the live delegation tree. The web renders them in
+ * the session status panel, so a timeline row would only repeat them.
+ */
+function isSilentStateEventBlock(block: ChatBlock): boolean {
     return block.kind === 'agent-event'
         && (
             block.event.type === 'thread-goal-updated'
             || block.event.type === 'thread-goal-cleared'
+            || block.event.type === 'subagent-snapshot'
             || isRedundantGoalStatusMessage(block.event)
         )
 }
 
-function filterSilentGoalBlocks(blocks: ChatBlock[]): ChatBlock[] {
+function filterSilentStateBlocks(blocks: ChatBlock[]): ChatBlock[] {
     const filtered: ChatBlock[] = []
 
     for (const block of blocks) {
-        if (isSilentGoalEventBlock(block)) continue
+        if (isSilentStateEventBlock(block)) continue
         if (block.kind === 'tool-call' && block.children.length > 0) {
             filtered.push({
                 ...block,
-                children: filterSilentGoalBlocks(block.children)
+                children: filterSilentStateBlocks(block.children)
             })
             continue
         }
@@ -194,7 +200,7 @@ export function reduceChatBlocks(
     }
 
     return {
-        blocks: filterSilentGoalBlocks(dedupeAgentEvents(foldApiErrorEvents(rootResult.blocks))),
+        blocks: filterSilentStateBlocks(dedupeAgentEvents(foldApiErrorEvents(rootResult.blocks))),
         hasReadyEvent,
         latestUsage,
         latestGoal: getLatestThreadGoal(options.goalStateMessages ?? normalized)

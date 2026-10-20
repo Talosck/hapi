@@ -11,6 +11,7 @@ import { CursorCreatePlanView } from '@/components/ToolCard/views/CursorCreatePl
 import { MultiEditFullView, MultiEditView } from '@/components/ToolCard/views/MultiEditView'
 import { TodoWriteView } from '@/components/ToolCard/views/TodoWriteView'
 import { UpdatePlanView } from '@/components/ToolCard/views/UpdatePlanView'
+import { PlanDocumentView } from '@/components/ToolCard/views/PlanDocumentView'
 import { WriteView } from '@/components/ToolCard/views/WriteView'
 import { GoalView } from '@/components/ToolCard/views/GoalView'
 import { canShowGoalPreview, isGoalToolName } from '@/components/ToolCard/goalTools'
@@ -82,6 +83,7 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
     Write: WriteView,
     TodoWrite: TodoWriteView,
     update_plan: UpdatePlanView,
+    plan_document: PlanDocumentView,
     CodexDiff: CodexDiffCompactView,
     CodexAgent: CodexAgentView,
     spawn_agent: CodexAgentView,
@@ -110,6 +112,7 @@ export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     CodexPatch: CodexPatchView,
     CodexAgent: CodexAgentView,
     Skill: SkillFullView,
+    plan_document: PlanDocumentView,
     spawn_agent: CodexAgentView,
     send_input: CodexAgentView,
     send_message: CodexAgentView,

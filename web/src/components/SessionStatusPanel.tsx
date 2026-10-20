@@ -71,8 +71,15 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
                         <div className="flex flex-col gap-1.5">
                             {data.subagents.map((subagent) => {
                                 const elapsed = elapsedSince(subagent.startedAt, subagent.endedAt ?? now)
+                                // Delegated subagents nest; the indent shows the
+                                // tree the agent reported.
+                                const indent = Math.min(subagent.depth ?? 0, 3) * 12
                                 return (
-                                    <div key={subagent.id} className="min-w-0 text-sm">
+                                    <div
+                                        key={subagent.id}
+                                        className="min-w-0 text-sm"
+                                        style={indent > 0 ? { paddingLeft: indent } : undefined}
+                                    >
                                         <div className="flex min-w-0 items-baseline gap-1.5">
                                             <span className={`shrink-0 text-xs ${subagentTone(subagent.state)}`}>●</span>
                                             <span className="min-w-0 break-words text-[var(--app-fg)]">{subagent.title}</span>

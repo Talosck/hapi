@@ -12,7 +12,7 @@ import type { RawJSONLines } from '@/claude/types'
 import { configuration } from '@/configuration'
 import { extractUserRequest } from '@/agy/utils/agyMessageText'
 import { AGENT_MESSAGE_PAYLOAD_TYPE } from "@hapi/protocol"
-import type { SessionEndReason } from '@hapi/protocol'
+import type { SessionEndReason, SubagentSnapshotMember, ThreadGoal } from '@hapi/protocol'
 import type { ClientToServerEvents, ServerToClientEvents, TerminalOutputPayload, Update } from '@hapi/protocol'
 import {
     AgentTerminalInputPayloadSchema,
@@ -185,6 +185,14 @@ type PendingOutboundEvent = {
 const MAX_PENDING_DROPPABLE_EVENTS = 256
 const MATERIALIZATION_RETRY_MIN_MS = 1_000
 const MATERIALIZATION_RETRY_MAX_MS = 30_000
+
+/**
+ * Session events that must survive a full outbound queue. Everything else is
+ * droppable: the queue sheds the oldest pending event, and for state events
+ * (delegation snapshot, thread goal) the newest one is the only one that
+ * matters.
+ */
+const LOSSLESS_SESSION_EVENT_TYPES = new Set(['message', 'error', 'compact-summary'])
 
 function isTransientMaterializationError(error: unknown): boolean {
     if (!axios.isAxiosError(error)) {
@@ -1186,6 +1194,20 @@ export class ApiSessionClient extends EventEmitter {
         summary: string
         tokensBefore?: number
         estimatedTokensAfter?: number
+    } | {
+        // Live delegation tree of the session (MiniMax Code reports its
+        // subagents through an ACP extension). The web renders the members as
+        // the session's subagents.
+        type: 'subagent-snapshot'
+        members: SubagentSnapshotMember[]
+    } | {
+        // Live thread goal of the session. Carries HAPI's thread-goal contract
+        // so the web status panel can show the current goal.
+        type: 'thread-goal-updated'
+        goal: ThreadGoal
+    } | {
+        type: 'thread-goal-cleared'
+        threadId?: string
     }, id?: string): void {
         const content = {
             role: 'agent',
@@ -1201,7 +1223,7 @@ export class ApiSessionClient extends EventEmitter {
                 sid: this.sessionId,
                 message: content
             })
-        }, event.type === 'message' || event.type === 'error' || event.type === 'compact-summary' ? 'lossless' : 'droppable')
+        }, LOSSLESS_SESSION_EVENT_TYPES.has(event.type) ? 'lossless' : 'droppable')
     }
 
     /**

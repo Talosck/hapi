@@ -415,3 +415,33 @@ describe('getToolPresentation — request_user_input', () => {
         expect(presentation.subtitle).toBe('Continue?')
     })
 })
+
+describe('plan_document presentation', () => {
+    it('titles a plan document and shows its first heading', () => {
+        const presentation = getToolPresentation({
+            toolName: 'plan_document',
+            input: { plan: '# Rewrite the parser\n\nSteps', format: 'markdown' },
+            result: null,
+            childrenCount: 0,
+            description: null,
+            metadata: null,
+        })
+
+        expect(presentation.title).toBe('Plan')
+        expect(presentation.subtitle).toBe('Rewrite the parser')
+        expect(presentation.minimal).toBe(false)
+    })
+
+    it('labels a plan document stored in a file', () => {
+        const presentation = getToolPresentation({
+            toolName: 'plan_document',
+            input: { plan: 'docs/plan.md', format: 'file' },
+            result: null,
+            childrenCount: 0,
+            description: null,
+            metadata: null,
+        })
+
+        expect(presentation.subtitle).toBe('document')
+    })
+})

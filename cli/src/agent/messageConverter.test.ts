@@ -233,6 +233,20 @@ describe('convertAgentMessage', () => {
             inputTokenSemantics: 'includes-cache'
         });
     });
+    it('converts a plan document into a plan-document wire payload', () => {
+        const converted = convertAgentMessage({
+            type: 'plan_document',
+            plan: { planId: 'plan-1', format: 'markdown', content: '# Plan' }
+        });
+
+        expect(converted).toEqual({
+            type: 'plan-document',
+            planId: 'plan-1',
+            format: 'markdown',
+            content: '# Plan'
+        });
+    });
+
     it('returns null instead of echoing an unrecognized message shape', () => {
         // Unreachable through the type system, but callers forward any non-null
         // result straight into the chat stream — so the runtime contract has to

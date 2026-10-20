@@ -104,6 +104,7 @@ Reference: `web/src/chat/normalizeUser.ts`.
 | `thread_goal_cleared` | `threadId?` | `thread-goal-cleared` event. |
 | `plan` | `entries`/`items`/`steps`: list of steps | Synthetic completed `update_plan` tool pair (cursor flavor). Steps accept `step\|content\|text\|title\|description` + `status\|state` (normalized to `pending\|in_progress\|completed`). Empty plan ⇒ drop. |
 | `plan_update` | `plan`/`update`/`items`/`steps` | Same, codex flavor. |
+| `plan-document` | `planId?`, `format` (`markdown`\|`file`), `content` (the markdown source, or the file path) | Synthetic completed `plan_document` tool pair — the plan rendered as a document. The card is keyed by `planId`, so a revised plan replaces the previous revision. Missing `content` ⇒ drop. |
 | `agent-run-start` / `agent-run-update` / `agent-run-trace` | run payload | Background agent-run event rows (windowed separately, see [pagination](./pagination.md#client-windowing-normative-recommendation)). |
 | *anything else* | — | **Drop silently** (`normalize.ts`: unknown codex content returns `null`, not a stringified bubble). |
 
@@ -195,6 +196,7 @@ A visible `data.type` not matched above ⇒ stringified agent text fallback (unl
 | `recap` | `text` |
 | `thread-goal-updated` | `goal: ThreadGoal`, `threadId?`, `turnId?` |
 | `thread-goal-cleared` | `threadId?` |
+| `subagent-snapshot` | `members: SubagentSnapshotMember[]` — live delegation tree (MiniMax Code subagents); state only, the web renders it in the session status panel |
 | `abort-restore` | `text` |
 | *(catch-all)* | `{type: string, …}` |
 

@@ -90,6 +90,8 @@ function createBackend(overrides: Record<string, unknown> = {}) {
         respondToPermission: vi.fn(async () => {}),
         onStderrError: vi.fn(),
         setSessionInfoUpdateListener: vi.fn(),
+        setExtensionNotificationListener: vi.fn(),
+        setSessionStateListener: vi.fn(),
         onPermissionRequest: vi.fn(),
         disconnect: vi.fn(async () => {}),
         ...overrides
@@ -98,7 +100,7 @@ function createBackend(overrides: Record<string, unknown> = {}) {
     return backend
 }
 
-function createSession(messages: QueuedMessage[] = []) {
+function createSession(messages: QueuedMessage[] = [], permissionMode: 'default' | 'plan' = 'default') {
     const queue = new MessageQueue2<McodeMode>((mode) => JSON.stringify(mode))
     for (const message of messages) {
         queue.push(message.message, message.mode)
@@ -118,7 +120,7 @@ function createSession(messages: QueuedMessage[] = []) {
         client,
         queue,
         sessionId: null as string | null,
-        getPermissionMode: () => 'default' as const,
+        getPermissionMode: () => permissionMode,
         onSessionFound(id: string) {
             session.sessionId = id
         },
@@ -447,5 +449,233 @@ describe('mcodeRemoteLauncher config sync', () => {
             { started: 1, completed: 0 },
             { started: 0, completed: 1 }
         ])
+    })
+})
+
+describe('mcodeRemoteLauncher ACP extensions', () => {
+    afterEach(() => {
+        harness.backend = {}
+    })
+
+    function createExtensionBackend(notifications: Array<[string, unknown]>) {
+        let listener: ((method: string, params: unknown) => void) | null = null
+        const backend = createBackend({
+            setExtensionNotificationListener: vi.fn((next: (method: string, params: unknown) => void) => {
+                listener = next
+            }),
+            prompt: vi.fn(async () => {
+                for (const [method, params] of notifications) {
+                    listener?.(method, params)
+                }
+            })
+        })
+        return backend
+    }
+
+    it('forwards the delegation snapshot to the hub', async () => {
+        createExtensionBackend([
+            ['mcode/session/delegation_update', {
+                sessionId: 'mcode-session-1',
+                snapshot: {
+                    rootSessionId: 'mcode-session-1',
+                    members: [
+                        {
+                            sessionId: 'child-1',
+                            parentSessionId: 'mcode-session-1',
+                            agentName: 'explore',
+                            task: 'Explore the API',
+                            status: 'running',
+                            createdAtMs: 5
+                        }
+                    ]
+                }
+            }]
+        ])
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'subagent-snapshot',
+            members: [{
+                id: 'child-1',
+                parentId: 'mcode-session-1',
+                title: 'Explore the API',
+                detail: 'explore',
+                status: 'running',
+                startedAt: 5,
+                endedAt: null,
+                depth: 0
+            }]
+        })
+    })
+
+    it('ignores a malformed delegation snapshot', async () => {
+        createExtensionBackend([['mcode/session/delegation_update', { snapshot: { members: [] } }]])
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events).not.toContainEqual(expect.objectContaining({ type: 'subagent-snapshot' }))
+    })
+
+    it('forwards the thread goal and records its lifecycle', async () => {
+        createExtensionBackend([
+            ['mcode/session/goal_update', {
+                sessionId: 'mcode-session-1',
+                goal: {
+                    goalId: 'goal-1',
+                    sessionId: 'mcode-session-1',
+                    objective: 'Ship the feature',
+                    status: 'active',
+                    createdAt: 1_700_000_000_000,
+                    updatedAt: 1_700_000_060_000,
+                    tokensUsed: 1200,
+                    turnsUsed: 3,
+                    timeUsedSeconds: 42,
+                    tokenBudget: 10_000
+                }
+            }]
+        ])
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const goal = {
+            threadId: 'mcode-session-1',
+            objective: 'Ship the feature',
+            status: 'active',
+            tokenBudget: 10_000,
+            tokensUsed: 1200,
+            timeUsedSeconds: 42,
+            createdAt: 1_700_000_000,
+            updatedAt: 1_700_000_060
+        }
+        expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'thread-goal-updated', goal })
+        expect(session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: JSON.stringify({ goal })
+        })
+    })
+
+    it('forwards a cleared thread goal', async () => {
+        createExtensionBackend([
+            ['mcode/session/goal_update', { sessionId: 'mcode-session-1', goal: null, goalId: 'goal-1' }]
+        ])
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'thread-goal-cleared' })
+    })
+})
+
+describe('mcodeRemoteLauncher session state', () => {
+    afterEach(() => {
+        harness.backend = {}
+    })
+
+    type ConfigOption = {
+        id: string
+        category?: string
+        currentValue?: string
+        options: Array<{ value: string }>
+    }
+
+    function createStateBackend(options: {
+        configOptions?: ConfigOption[]
+        updates?: Array<{ kind: 'mode'; sessionId: string | null; modeId: string } | { kind: 'config-options'; sessionId: string | null }>
+    }) {
+        let listener: ((update: never) => void) | null = null
+        const configOptions: ConfigOption[] = options.configOptions ?? [
+            { id: 'permissionMode', category: '_permission', currentValue: 'default', options: [] }
+        ]
+        const backend = createBackend({
+            setSessionStateListener: vi.fn((next: (update: never) => void) => {
+                listener = next
+            }),
+            getSessionConfigOptions: vi.fn(() => configOptions),
+            getConfigOptionByCategory: vi.fn((_sessionId: string, category: string) =>
+                configOptions.find((option) => option.category === category)),
+            prompt: vi.fn(async () => {
+                for (const update of options.updates ?? []) {
+                    listener?.(update as never)
+                }
+            })
+        })
+        return backend
+    }
+
+    it('publishes the mode the agent reports when it disagrees with the applied mode', async () => {
+        createStateBackend({
+            updates: [{ kind: 'mode', sessionId: 'mcode-session-1', modeId: 'default' }]
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'plan', model: null } }], 'plan')
+        const onPermissionModeChanged = vi.fn()
+
+        await mcodeRemoteLauncher(session as never, { onPermissionModeChanged })
+
+        expect(onPermissionModeChanged).toHaveBeenCalledWith('default')
+    })
+
+    it('does not publish a mode the agent confirms', async () => {
+        createStateBackend({
+            updates: [{ kind: 'mode', sessionId: 'mcode-session-1', modeId: 'plan' }]
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'plan', model: null } }], 'plan')
+        const onPermissionModeChanged = vi.fn()
+
+        await mcodeRemoteLauncher(session as never, { onPermissionModeChanged })
+
+        expect(onPermissionModeChanged).not.toHaveBeenCalled()
+    })
+
+    it('publishes the permission policy the agent republishes', async () => {
+        createStateBackend({
+            configOptions: [
+                { id: 'permissionMode', category: '_permission', currentValue: 'bypassPermissions', options: [] }
+            ],
+            updates: [{ kind: 'config-options', sessionId: 'mcode-session-1' }]
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+        const onPermissionModeChanged = vi.fn()
+
+        await mcodeRemoteLauncher(session as never, { onPermissionModeChanged })
+
+        expect(onPermissionModeChanged).toHaveBeenCalledWith('bypassPermissions')
+    })
+
+    it('republishes the applied mode when the agent returns to it', async () => {
+        createStateBackend({
+            updates: [
+                { kind: 'mode', sessionId: 'mcode-session-1', modeId: 'default' },
+                { kind: 'mode', sessionId: 'mcode-session-1', modeId: 'plan' }
+            ]
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'plan', model: null } }], 'plan')
+        const onPermissionModeChanged = vi.fn()
+
+        await mcodeRemoteLauncher(session as never, { onPermissionModeChanged })
+
+        expect(onPermissionModeChanged.mock.calls.map((call) => call[0])).toEqual(['default', 'plan'])
+    })
+
+    it('keeps the plan mode while the agent reports the plan session mode', async () => {
+        createStateBackend({
+            configOptions: [
+                { id: 'permissionMode', category: '_permission', currentValue: 'default', options: [] }
+            ],
+            updates: [
+                { kind: 'config-options', sessionId: 'mcode-session-1' },
+                { kind: 'mode', sessionId: 'mcode-session-1', modeId: 'plan' }
+            ]
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'plan', model: null } }], 'plan')
+        const onPermissionModeChanged = vi.fn()
+
+        await mcodeRemoteLauncher(session as never, { onPermissionModeChanged })
+
+        expect(onPermissionModeChanged).not.toHaveBeenCalled()
     })
 })

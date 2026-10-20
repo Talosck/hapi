@@ -285,6 +285,10 @@ export function getEventPresentation(event: AgentEvent): EventPresentation {
     if (event.type === 'thread-goal-cleared') {
         return { icon: null, text: 'Goal cleared' }
     }
+    if (event.type === 'subagent-snapshot') {
+        const members = Array.isArray(event.members) ? event.members : []
+        return { icon: '🤖', text: `Subagents updated (${members.length})` }
+    }
     if (event.type === 'token-count') {
         return formatTokenCountEvent(event)
     }

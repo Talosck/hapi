@@ -114,6 +114,13 @@ export async function runMcode(opts: {
         currentPermissionMode = mode;
         syncSessionMode();
     };
+    // The agent publishes the mode it runs with (its ACP session mode and the
+    // process-scoped tool permission policy). When it disagrees with the mode
+    // HAPI applied, the agent is right: it is the one running the session.
+    const applyAgentPermissionMode = (mode: PermissionMode) => {
+        currentPermissionMode = mode;
+        syncSessionMode();
+    };
     const applyDiscoveredEffort = (effort: string | null) => {
         sessionEffort = effort;
         syncSessionMode();
@@ -177,6 +184,7 @@ export async function runMcode(opts: {
             onModelRollback: (model) => applyDiscoveredModel(model),
             onEffortRollback: (effort) => applyDiscoveredEffort(effort),
             onPermissionModeRollback: (mode) => applyRolledBackPermissionMode(mode),
+            onPermissionModeChanged: (mode) => applyAgentPermissionMode(mode),
             onSessionReady: (instance) => {
                 sessionWrapperRef.current = instance;
                 syncSessionMode();

@@ -372,6 +372,51 @@ MiniMax Code advertises its own command roster over ACP (`/help`, `/compact`,
 sessions; typing a command still runs it natively in the agent. The native TUI
 owns its command menu while HAPI is not in remote mode.
 
+### Subagents and goal
+
+MiniMax Code publishes two ACP extensions that HAPI consumes:
+
+- **Delegation tree** (`mcode/session/delegation_update`): MiniMax Code runs
+  subagents as delegated sessions and reports the live tree over ACP. HAPI
+  lists them in the session status panel — the same list Claude Code and Codex
+  subagents use — with the nesting shown as indentation.
+- **Thread goal** (`mcode/session/goal_update`): the goal of an autonomous run
+  shows in the session status panel, and its lifecycle (objective, status,
+  budget) is recorded in the chat as a goal card.
+
+Both notifications are gated on a client capability, so HAPI advertises
+`clientCapabilities._meta["minimax-code/extensions"]` when it initializes the
+mcode backend.
+
+### Mode and config options
+
+MiniMax Code publishes the state it actually runs with over the standard ACP
+session updates, and HAPI consumes both:
+
+- **`current_mode_update`**: the ACP session mode (`default` / `plan`) the
+  agent switched to. MiniMax Code applies a mode transition on the next
+  prompt, so the notification is the agent's confirmation of the mode HAPI
+  asked for.
+- **`config_option_update`**: the config options (tool permission policy,
+  model, thinking effort) the agent re-published. The tool permission policy
+  is process-scoped in MiniMax Code, so it can change without HAPI asking —
+  for example when another session attached to the same process changes it.
+
+HAPI derives the effective permission mode from what the agent reports and
+publishes it to the hub when it disagrees with the mode HAPI applied, so the
+web never advertises a mode the agent moved away from.
+
+### Plan review
+
+When MiniMax Code prepares a plan for review it asks a question and attaches
+the plan document to the session. The document only arrives when the client
+advertises the ACP `plan` capability, so HAPI declares it when it initializes
+the mcode backend. The plan is rendered in the chat as a document (the
+markdown source, or the path of the file the agent wrote).
+
+The review question itself is a regular MiniMax Code questionnaire, answered
+like any other `ask_user` question.
+
 ### Resume and handoff
 
 Remote mode uses the MiniMax Code ACP server (`mcode acp`). HAPI stores the
@@ -399,6 +444,11 @@ same conversation.
   iOS/Android create forms start with the agent default.
 - MiniMax Code has no ACP delete method, so model discovery reuses one probe
   session under HAPI's home directory instead of creating one per lookup.
+- MiniMax Code does not stream the tool calls of a delegated subagent over
+  ACP, so the delegation tree shows the subagents and their state but not the
+  steps they ran.
+- MiniMax Code never emits the ACP `plan_removed` update, so a plan document
+  stays in the transcript after the review is answered.
 - Signing in must be completed outside the HAPI web UI.
 
 ## DeepSeek Harness

@@ -41,6 +41,12 @@ export type CodexMessage =
         is_error?: boolean;
     }
     | { type: 'plan'; entries: PlanItem[] }
+    | {
+        type: 'plan-document';
+        planId: string;
+        format: 'markdown' | 'file';
+        content: string;
+    }
     | { type: 'error'; message: string }
     | {
         type: 'generated-image';
@@ -119,6 +125,13 @@ export function convertAgentMessage(message: AgentMessage, model?: string | null
             return {
                 type: 'plan',
                 entries: message.items
+            };
+        case 'plan_document':
+            return {
+                type: 'plan-document',
+                planId: message.plan.planId,
+                format: message.plan.format,
+                content: message.plan.content
             };
         case 'generated_image':
             return {

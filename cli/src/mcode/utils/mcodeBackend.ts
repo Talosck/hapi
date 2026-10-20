@@ -1,5 +1,6 @@
 import { AcpSdkBackend } from '@/agent/backends/acp';
 import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
+import { MCODE_EXTENSION_CAPABILITY_META } from './mcodeExtensions';
 
 /** Config option id MiniMax Code uses for its tool permission policy. */
 export const MCODE_PERMISSION_CONFIG_ID = 'permissionMode';
@@ -45,5 +46,14 @@ export function createMcodeBackend(): AcpSdkBackend {
         // because the one-shot permission fallback cannot represent multi-step
         // questions or "Other" input.
         elicitation: { form: true },
+        // The plan a MiniMax Code session prepares for review is attached to
+        // the session as an ACP `plan_update` only when the client declares
+        // the `plan` capability; without it the questionnaire arrives with no
+        // plan to look at.
+        plan: true,
+        // MiniMax Code only emits its `mcode/session/*` extension
+        // notifications (delegation tree, thread goal) when the client
+        // advertises the matching capability during initialize.
+        clientCapabilityMeta: MCODE_EXTENSION_CAPABILITY_META,
     });
 }

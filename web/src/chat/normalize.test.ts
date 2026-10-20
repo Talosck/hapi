@@ -1207,6 +1207,63 @@ describe('normalizeDecryptedMessage', () => {
         })
     })
 
+    it('normalizes a plan document as a plan_document tool pair', () => {
+        const message = makeMessage({
+            role: 'agent',
+            content: {
+                type: 'codex',
+                data: {
+                    type: 'plan-document',
+                    planId: 'plan-1',
+                    format: 'markdown',
+                    content: '# Plan\n\n1. Do it'
+                }
+            }
+        })
+
+        const normalized = normalizeDecryptedMessage(message)
+
+        expect(normalized).toMatchObject({
+            role: 'agent',
+            content: [
+                {
+                    type: 'tool-call',
+                    id: 'plan-document:plan-1',
+                    name: 'plan_document',
+                    input: {
+                        plan: '# Plan\n\n1. Do it',
+                        format: 'markdown'
+                    }
+                },
+                {
+                    type: 'tool-result',
+                    tool_use_id: 'plan-document:plan-1',
+                    content: {
+                        plan: '# Plan\n\n1. Do it',
+                        format: 'markdown'
+                    }
+                }
+            ]
+        })
+    })
+
+    it('drops a plan document without content', () => {
+        const message = makeMessage({
+            role: 'agent',
+            content: {
+                type: 'codex',
+                data: {
+                    type: 'plan-document',
+                    planId: 'plan-2',
+                    format: 'markdown',
+                    content: ''
+                }
+            }
+        })
+
+        expect(normalizeDecryptedMessage(message)).toBeNull()
+    })
+
     it('normalizes Codex token_count as usage data for context display', () => {
         const message = makeMessage({
             role: 'agent',

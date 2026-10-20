@@ -334,6 +334,38 @@ export const codexCases: FixtureCase[] = [
         ]
     },
     {
+        name: 'codex-plan-document',
+        description: 'Generic agent family: a plan published as a document (data.type plan-document) normalizes to a completed plan_document tool pair keyed by the plan id — the plan is rendered as the document the agent produced, and a revision with the same plan id replaces the previous card.',
+        messages: [
+            wireMessage({
+                id: 'msg-user-531',
+                seq: 1,
+                createdAt: T0,
+                content: {
+                    role: 'user',
+                    content: { type: 'text', text: 'Plan the pagination fix before touching the code.' }
+                }
+            }),
+            wireMessage({
+                id: 'msg-codex-532',
+                seq: 2,
+                createdAt: T0 + 1_400,
+                content: {
+                    role: 'agent',
+                    content: {
+                        type: 'codex',
+                        data: {
+                            type: 'plan-document',
+                            planId: 'plan-7',
+                            format: 'markdown',
+                            content: '# Pagination fix\n\n1. Read the page cursor\n2. Cache the boundary'
+                        }
+                    }
+                }
+            })
+        ]
+    },
+    {
         name: 'codex-thread-goal-cleared',
         description: 'Codex family: thread_goal_cleared normalizes to a thread-goal-cleared event which is SILENT in the timeline — expected blocks contain only the user text.',
         messages: [

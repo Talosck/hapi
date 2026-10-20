@@ -2544,4 +2544,72 @@ describe('AcpMessageHandler', () => {
         }
         clearGeneratedImages();
     });
+
+    it('turns a markdown plan update into a plan document', async () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.planUpdate,
+            plan: { type: 'markdown', planId: 'plan-1', content: '# Plan\n\n1. Do it' }
+        });
+
+        expect(messages).toEqual([{
+            type: 'plan_document',
+            plan: { planId: 'plan-1', format: 'markdown', content: '# Plan\n\n1. Do it' }
+        }]);
+    });
+
+    it('turns a file plan update into a plan document', async () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.planUpdate,
+            plan: { type: 'file', planId: 'plan-2', uri: 'file:///tmp/plan.md' }
+        });
+
+        expect(messages).toEqual([{
+            type: 'plan_document',
+            plan: { planId: 'plan-2', format: 'file', content: 'file:///tmp/plan.md' }
+        }]);
+    });
+
+    it('turns an items plan update into a checklist plan', async () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.planUpdate,
+            plan: {
+                type: 'items',
+                planId: 'plan-3',
+                entries: [{ content: 'Step 1', priority: 'high', status: 'pending' }]
+            }
+        });
+
+        expect(messages).toEqual([{
+            type: 'plan',
+            items: [{ content: 'Step 1', priority: 'high', status: 'pending' }]
+        }]);
+    });
+
+    it('drops a plan update without a usable payload', async () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.planUpdate,
+            plan: { type: 'markdown', planId: 'plan-4', content: '' }
+        });
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.planUpdate,
+            plan: { type: 'unknown', planId: 'plan-5' }
+        });
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.planUpdate
+        });
+
+        expect(messages).toEqual([]);
+    });
 });

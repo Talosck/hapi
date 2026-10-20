@@ -29,6 +29,21 @@ export type PlanItem = {
     status: 'pending' | 'in_progress' | 'completed';
 };
 
+/**
+ * A plan the agent published as a document instead of a checklist.
+ *
+ * ACP `plan_update` carries one of three payloads: an item list (rendered as
+ * a checklist), an inline markdown document, or a reference to a file. The
+ * latter two have no checklist equivalent, so they travel as a document.
+ */
+export type PlanDocument = {
+    planId: string;
+    /** `markdown` carries the plan inline, `file` points at a document on disk. */
+    format: 'markdown' | 'file';
+    /** The markdown source, or the file URI for the `file` format. */
+    content: string;
+};
+
 export type AgentMessage =
     | { type: 'text'; text: string; id?: string; live?: boolean; streamSnapshot?: boolean }
     | { type: 'reasoning'; text: string; id?: string; live?: boolean }
@@ -55,6 +70,7 @@ export type AgentMessage =
         contextWindow?: number;
     }
     | { type: 'plan'; items: PlanItem[] }
+    | { type: 'plan_document'; plan: PlanDocument }
     | { type: 'generated_image'; imageId: string; fileName: string; mimeType: string; source?: InlineMediaSource }
     | { type: 'turn_complete'; stopReason: string }
     | { type: 'error'; message: string };

@@ -402,6 +402,19 @@ export const knownTools: Record<string, {
         subtitle: (opts) => formatChecklistCount(extractUpdatePlanChecklist(opts.input, opts.result), 'step'),
         minimal: (opts) => extractUpdatePlanChecklist(opts.input, opts.result).length === 0
     },
+    plan_document: {
+        icon: () => <ClipboardIcon className={DEFAULT_ICON_CLASS} />,
+        title: () => 'Plan',
+        subtitle: (opts) => {
+            if (!isObject(opts.input)) return null
+            if (opts.input.format === 'file') return 'document'
+            const plan = typeof opts.input.plan === 'string' ? opts.input.plan : null
+            if (!plan) return null
+            const heading = plan.split('\n').find((line) => line.trim().startsWith('#'))
+            return heading ? truncate(heading.trim().replace(/^#+\s*/, ''), 80) : null
+        },
+        minimal: false
+    },
     Skill: {
         icon: () => <PuzzleIcon className={DEFAULT_ICON_CLASS} />,
         title: (opts) => {

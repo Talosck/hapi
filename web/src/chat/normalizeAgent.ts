@@ -1318,6 +1318,50 @@ export function normalizeAgentRecord(
                 meta
             }
         }
+
+        if (data.type === 'plan-document') {
+            const content = asString(data.content)
+            if (!content) return null
+            const format = data.format === 'file' ? 'file' : 'markdown'
+            const planId = asString(data.planId) ?? ''
+            // Key the card by the plan id so a revised plan replaces the
+            // previous revision instead of stacking another card.
+            const toolId = planId ? `plan-document:${planId}` : `plan-document:${messageId}`
+            const uuid = asString(data.id) ?? messageId
+            return {
+                id: messageId,
+                localId,
+                createdAt,
+                role: 'agent',
+                isSidechain: false,
+                content: [
+                    {
+                        type: 'tool-call',
+                        id: toolId,
+                        name: 'plan_document',
+                        input: {
+                            plan: content,
+                            format
+                        },
+                        description: null,
+                        uuid,
+                        parentUUID: null
+                    },
+                    {
+                        type: 'tool-result',
+                        tool_use_id: toolId,
+                        content: {
+                            plan: content,
+                            format
+                        },
+                        is_error: false,
+                        uuid: `${uuid}:result`,
+                        parentUUID: null
+                    }
+                ],
+                meta
+            }
+        }
     }
 
     return null

@@ -34,6 +34,11 @@ interface McodeLoopOptions {
     onEffortRollback?: (effort: string | null) => void;
     /** Fired after a failed permission-mode apply, with the restored mode. */
     onPermissionModeRollback?: (mode: PermissionMode) => void;
+    /**
+     * Fired when the agent reports a permission mode of its own (the session
+     * mode it switched to, or the tool permission policy it re-published).
+     */
+    onPermissionModeChanged?: (mode: PermissionMode) => void;
 }
 
 export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
@@ -114,7 +119,8 @@ export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
                 onConfigDiscovered: opts.onConfigDiscovered,
                 onModelRollback: opts.onModelRollback,
                 onEffortRollback: opts.onEffortRollback,
-                onPermissionModeRollback: opts.onPermissionModeRollback
+                onPermissionModeRollback: opts.onPermissionModeRollback,
+                onPermissionModeChanged: opts.onPermissionModeChanged
             }),
             onSessionReady: opts.onSessionReady
         });

@@ -261,6 +261,9 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
             case 'plan':
                 this.messageBuffer.addMessage('Plan updated', 'status');
                 break;
+            case 'plan_document':
+                this.messageBuffer.addMessage('Plan document received', 'status');
+                break;
             case 'error':
                 this.messageBuffer.addMessage(message.message, 'status');
                 break;

@@ -50,6 +50,17 @@ export type AcpConfigOptionDescriptor = {
     options: Array<{ value: string; name?: string }>;
 };
 
+/**
+ * Session state the agent publishes over `session/update` outside of the
+ * message stream. These updates describe what the agent currently runs, so a
+ * launcher can keep the displayed mode / model / effort honest.
+ */
+export type AcpSessionStateUpdate =
+    /** The agent switched its ACP session mode (`default` / `plan`, …). */
+    | { kind: 'mode'; sessionId: string | null; modeId: string }
+    /** The agent re-published its config options (model, thinking effort, …). */
+    | { kind: 'config-options'; sessionId: string | null };
+
 /** One command advertised by the agent over ACP (`available_commands`). */
 export type AcpAvailableCommand = {
     name: string;
@@ -106,6 +117,10 @@ export class AcpSdkBackend implements AgentBackend {
     private runningThinkingTimer: ReturnType<typeof setTimeout> | null = null;
     private lastForwardedUsageUpdate: AcpUsageUpdate | null = null;
     private sessionUpdateQueue: Promise<void> = Promise.resolve();
+    /** Receives agent-specific notifications that are not `session/update`. */
+    private extensionNotificationListener: ((method: string, params: unknown) => void) | null = null;
+    /** Receives `session/update` notifications that carry session state. */
+    private sessionStateListener: ((update: AcpSessionStateUpdate) => void) | null = null;
 
     /** Retry configuration for ACP initialization */
     private static readonly INIT_RETRY_OPTIONS = {
@@ -153,6 +168,18 @@ export class AcpSdkBackend implements AgentBackend {
          * they may silently dismiss the request.
          */
         elicitation?: { form?: boolean; url?: boolean };
+        /**
+         * Advertise ACP `plan` support during initialize. Agents that publish
+         * a plan for review (MiniMax Code) only attach the plan document to
+         * the session when the client declares this capability.
+         */
+        plan?: boolean;
+        /**
+         * Extra `clientCapabilities._meta` entries advertised during
+         * initialize. Agents that do not know the metadata ignore it; agents
+         * that do (MiniMax Code) gate their extension notifications on it.
+         */
+        clientCapabilityMeta?: Record<string, unknown>;
     }) {}
 
     async initialize(): Promise<void> {
@@ -195,6 +222,8 @@ export class AcpSdkBackend implements AgentBackend {
                 && 'auto_permission_mode_enabled' in params
             ) {
                 this.autoPermissionModeEnabled = params.auto_permission_mode_enabled === true;
+            } else {
+                this.extensionNotificationListener?.(method, params);
             }
         });
 
@@ -221,11 +250,13 @@ export class AcpSdkBackend implements AgentBackend {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false,
                     ...(elicitationCapability ? { elicitation: elicitationCapability } : {}),
+                    ...(this.options.plan ? { plan: {} } : {}),
                     _meta: {
                         // Cursor ACP exposes Composer's non-fast/fast choice as separate
                         // `model` + `fast` config options only when the client advertises
                         // this capability. Agents that do not know this metadata ignore it.
-                        parameterizedModelPicker: true
+                        parameterizedModelPicker: true,
+                        ...(this.options.clientCapabilityMeta ?? {})
                     }
                 },
                 clientInfo: {
@@ -597,6 +628,25 @@ export class AcpSdkBackend implements AgentBackend {
     /** Forwards stable ACP session metadata updates independently of prompt streaming. */
     setSessionInfoUpdateListener(listener: ((update: AcpSessionInfoUpdate) => void) | null): void {
         this.sessionInfoUpdateListener = listener;
+    }
+
+    /**
+     * Registers a listener for agent-specific notifications that arrive next to
+     * `session/update` (e.g. MiniMax Code's `mcode/session/*` extensions).
+     * The listener owns the payload shape — the backend forwards the method
+     * name and the raw params unchanged.
+     */
+    setExtensionNotificationListener(listener: ((method: string, params: unknown) => void) | null): void {
+        this.extensionNotificationListener = listener;
+    }
+
+    /**
+     * Registers a listener for `session/update` notifications that publish
+     * session state instead of message content: the current session mode and
+     * the config options (model, thinking effort, permission policy).
+     */
+    setSessionStateListener(listener: ((update: AcpSessionStateUpdate) => void) | null): void {
+        this.sessionStateListener = listener;
     }
 
     /**
@@ -1032,6 +1082,7 @@ export class AcpSdkBackend implements AgentBackend {
         }
         this.forwardSessionInfoUpdate(sessionId, update);
         this.captureUsageUpdate(update);
+        this.forwardSessionStateUpdate(sessionId, update);
         this.notifyAgentActivity(update);
         // Capture the handler at enqueue time. Looking up `this.messageHandler`
         // when the queued microtask runs can leak a suppressUpdatesDuring
@@ -1048,6 +1099,34 @@ export class AcpSdkBackend implements AgentBackend {
                     error instanceof Error ? error.message : String(error)
                 );
             });
+    }
+
+    /**
+     * Forwards the `session/update` notifications that publish session state:
+     * the current ACP session mode and the config options (model, thinking
+     * effort, permission policy).
+     *
+     * `config_option_update` also refreshes the cached descriptors, so a
+     * launcher that reads the model or the effort afterwards sees the values
+     * the agent just published instead of the ones from `session/new`.
+     */
+    private forwardSessionStateUpdate(sessionId: string | null, update: unknown): void {
+        if (!isObject(update)) return;
+
+        if (update.sessionUpdate === ACP_SESSION_UPDATE_TYPES.configOptionUpdate) {
+            if (sessionId) {
+                this.mergeSessionConfigOptions(sessionId, update.configOptions);
+                this.captureSessionModelsMetadata(sessionId, { configOptions: update.configOptions });
+            }
+            this.sessionStateListener?.({ kind: 'config-options', sessionId });
+            return;
+        }
+
+        if (update.sessionUpdate === ACP_SESSION_UPDATE_TYPES.currentModeUpdate) {
+            const modeId = asString(update.currentModeId);
+            if (!modeId) return;
+            this.sessionStateListener?.({ kind: 'mode', sessionId, modeId });
+        }
     }
 
     private notifyAgentActivity(update: unknown): void {
@@ -1434,26 +1513,7 @@ export class AcpSdkBackend implements AgentBackend {
     private captureSessionConfigOptions(sessionId: string, response: unknown): void {
         if (!isObject(response)) return;
 
-        const options = (Array.isArray(response.configOptions) ? response.configOptions : [])
-            .filter((entry): entry is Record<string, unknown> => isObject(entry))
-            .map((entry): AcpConfigOptionDescriptor | null => {
-                const id = asString(entry.id);
-                if (!id) return null;
-                const rawOptions = Array.isArray(entry.options) ? entry.options : [];
-                return {
-                    id,
-                    category: asString(entry.category) ?? undefined,
-                    currentValue: asString(entry.currentValue) ?? undefined,
-                    options: rawOptions
-                        .filter((option): option is Record<string, unknown> => isObject(option))
-                        .map((option) => ({
-                            value: asString(option.value) ?? '',
-                            name: asString(option.name) ?? undefined
-                        }))
-                        .filter((option) => option.value.length > 0)
-                };
-            })
-            .filter((entry): entry is AcpConfigOptionDescriptor => entry !== null);
+        const options = this.parseConfigOptions(response.configOptions);
 
         const meta = isObject(response._meta) ? response._meta : null;
         const xaiConfig = meta && isObject(meta['x.ai/sessionConfig'])
@@ -1482,6 +1542,47 @@ export class AcpSdkBackend implements AgentBackend {
         if (options.length > 0) {
             this.sessionConfigOptions.set(sessionId, options);
         }
+    }
+
+    /** Normalises the raw `configOptions` array of an ACP payload. */
+    private parseConfigOptions(raw: unknown): AcpConfigOptionDescriptor[] {
+        return (Array.isArray(raw) ? raw : [])
+            .filter((entry): entry is Record<string, unknown> => isObject(entry))
+            .map((entry): AcpConfigOptionDescriptor | null => {
+                const id = asString(entry.id);
+                if (!id) return null;
+                const rawOptions = Array.isArray(entry.options) ? entry.options : [];
+                return {
+                    id,
+                    category: asString(entry.category) ?? undefined,
+                    currentValue: asString(entry.currentValue) ?? undefined,
+                    options: rawOptions
+                        .filter((option): option is Record<string, unknown> => isObject(option))
+                        .map((option) => ({
+                            value: asString(option.value) ?? '',
+                            name: asString(option.name) ?? undefined
+                        }))
+                        .filter((option) => option.value.length > 0)
+                };
+            })
+            .filter((entry): entry is AcpConfigOptionDescriptor => entry !== null);
+    }
+
+    /**
+     * Refreshes the cached config options from a `config_option_update`.
+     *
+     * The update carries the options the agent re-published; options it left
+     * out keep their cached value, so a partial update does not drop the model
+     * or the thinking effort the session still runs with.
+     */
+    private mergeSessionConfigOptions(sessionId: string, raw: unknown): void {
+        const options = this.parseConfigOptions(raw);
+        if (options.length === 0) return;
+        const byId = new Map((this.sessionConfigOptions.get(sessionId) ?? []).map((option) => [option.id, option]));
+        for (const option of options) {
+            byId.set(option.id, option);
+        }
+        this.sessionConfigOptions.set(sessionId, [...byId.values()]);
     }
 
     /**

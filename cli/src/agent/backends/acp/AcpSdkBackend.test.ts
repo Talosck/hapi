@@ -78,6 +78,86 @@ describe('AcpSdkBackend', () => {
         expect(updates).toEqual([{ sessionId: 'session-1', title: 'Native session title' }]);
     });
 
+    it('forwards the current session mode and republished config options to the session state listener', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const updates: Array<{ kind: string; sessionId: string | null; modeId?: string }> = [];
+        backend.setSessionStateListener((update) => updates.push(update));
+
+        const backendInternal = backend as unknown as {
+            handleSessionUpdate: (params: unknown) => void;
+        };
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.currentModeUpdate,
+                currentModeId: 'plan'
+            }
+        });
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.configOptionUpdate,
+                configOptions: [
+                    {
+                        id: 'permissionMode',
+                        category: '_permission',
+                        currentValue: 'auto',
+                        options: [{ value: 'default' }, { value: 'auto' }]
+                    }
+                ]
+            }
+        });
+
+        expect(updates).toEqual([
+            { kind: 'mode', sessionId: 'session-1', modeId: 'plan' },
+            { kind: 'config-options', sessionId: 'session-1' }
+        ]);
+    });
+
+    it('ignores a session state update without a usable payload', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const updates: unknown[] = [];
+        backend.setSessionStateListener((update) => updates.push(update));
+
+        const backendInternal = backend as unknown as {
+            handleSessionUpdate: (params: unknown) => void;
+        };
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: { sessionUpdate: ACP_SESSION_UPDATE_TYPES.currentModeUpdate }
+        });
+
+        expect(updates).toEqual([]);
+    });
+
+    it('refreshes the cached config options from a config option update', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            handleSessionUpdate: (params: unknown) => void;
+            captureSessionConfigOptions: (sessionId: string, response: unknown) => void;
+        };
+        backendInternal.captureSessionConfigOptions('session-1', {
+            configOptions: [
+                { id: 'permissionMode', category: '_permission', currentValue: 'default', options: [] },
+                { id: 'thinkingEffort', category: 'thought_level', currentValue: 'high', options: [] }
+            ]
+        });
+
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.configOptionUpdate,
+                configOptions: [
+                    { id: 'permissionMode', category: '_permission', currentValue: 'auto', options: [] }
+                ]
+            }
+        });
+
+        expect(backend.getConfigOptionByCategory('session-1', '_permission')?.currentValue).toBe('auto');
+        // An option the update left out keeps the value the session runs with.
+        expect(backend.getThoughtLevelConfigOption('session-1')?.currentValue).toBe('high');
+    });
+
     it('refreshes native titles through ACP session/list', async () => {
         const backend = new AcpSdkBackend({ command: 'opencode' });
         const calls: Array<{ method: string; params: unknown; options: unknown }> = [];

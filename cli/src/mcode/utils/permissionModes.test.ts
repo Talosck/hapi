@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
-import { applyMcodePermissionMode, mapMcodePermissionMode } from './permissionModes';
+import {
+    applyMcodePermissionMode,
+    mapMcodePermissionMode,
+    readMcodePermissionOption,
+    resolveMcodePermissionMode
+} from './permissionModes';
 
 function createBackend() {
     const calls: string[] = [];
@@ -72,5 +77,51 @@ describe('applyMcodePermissionMode', () => {
         await expect(applyMcodePermissionMode(backend, 'session-1', 'plan'))
             .rejects.toThrow('Unsupported Session mode');
         expect(calls).toEqual(['mode']);
+    });
+});
+
+describe('resolveMcodePermissionMode', () => {
+    it('prefers the plan session mode over the tool permission policy', () => {
+        expect(resolveMcodePermissionMode('plan', 'bypassPermissions')).toBe('plan');
+    });
+
+    it('maps the tool permission policy when the session is not planning', () => {
+        expect(resolveMcodePermissionMode('default', 'auto')).toBe('auto');
+        expect(resolveMcodePermissionMode('default', 'bypassPermissions')).toBe('bypassPermissions');
+        expect(resolveMcodePermissionMode('default', 'default')).toBe('default');
+    });
+
+    it('falls back to the default mode for an unknown policy', () => {
+        expect(resolveMcodePermissionMode('default', null)).toBe('default');
+        expect(resolveMcodePermissionMode('default', 'something-else')).toBe('default');
+    });
+});
+
+describe('readMcodePermissionOption', () => {
+    function createConfigBackend(options: Array<{ id: string; category?: string; currentValue?: string }>) {
+        return {
+            getSessionConfigOptions: () => options.map((option) => ({
+                id: option.id,
+                category: option.category,
+                currentValue: option.currentValue,
+                options: []
+            })),
+            getConfigOptionByCategory: (_sessionId: string, category: string) =>
+                options.find((option) => option.category === category)
+        } as unknown as AcpSdkBackend;
+    }
+
+    it('reads the policy the agent published', () => {
+        const backend = createConfigBackend([
+            { id: 'permissionMode', category: '_permission', currentValue: 'auto' }
+        ]);
+
+        expect(readMcodePermissionOption(backend, 'session-1')).toBe('auto');
+    });
+
+    it('returns null when the agent published no policy', () => {
+        const backend = createConfigBackend([]);
+
+        expect(readMcodePermissionOption(backend, 'session-1')).toBeNull();
     });
 });

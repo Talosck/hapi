@@ -698,6 +698,49 @@ export class AcpMessageHandler {
             if (items.length > 0) {
                 this.onMessage({ type: 'plan', items });
             }
+            return;
+        }
+
+        if (updateType === ACP_SESSION_UPDATE_TYPES.planUpdate) {
+            this.flushReasoning();
+            this.flushText();
+            this.handlePlanUpdate(update);
+        }
+    }
+
+    /**
+     * Handles the ACP `plan_update` notification, which publishes a plan in
+     * one of three shapes: a checklist of items, an inline markdown document,
+     * or a reference to a file. The item shape reuses the checklist message;
+     * the document shapes have no checklist equivalent and travel as a
+     * document so the client can render the plan itself.
+     */
+    private handlePlanUpdate(update: Record<string, unknown>): void {
+        const plan = update.plan;
+        if (!isObject(plan)) return;
+
+        const planId = asString(plan.planId) ?? '';
+        const planType = asString(plan.type);
+
+        if (planType === 'items') {
+            const items = normalizePlanEntries(plan.entries);
+            if (items.length > 0) {
+                this.onMessage({ type: 'plan', items });
+            }
+            return;
+        }
+
+        if (planType === 'markdown') {
+            const content = asString(plan.content);
+            if (!content) return;
+            this.onMessage({ type: 'plan_document', plan: { planId, format: 'markdown', content } });
+            return;
+        }
+
+        if (planType === 'file') {
+            const uri = asString(plan.uri);
+            if (!uri) return;
+            this.onMessage({ type: 'plan_document', plan: { planId, format: 'file', content: uri } });
         }
     }
 

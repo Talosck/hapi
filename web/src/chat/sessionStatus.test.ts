@@ -153,3 +153,116 @@ describe('buildSessionStatusData', () => {
         })
     })
 })
+
+function delegationSnapshot(members: unknown[]): NormalizedMessage {
+    return {
+        id: 'snapshot-1',
+        localId: null,
+        createdAt: 300,
+        role: 'event',
+        isSidechain: false,
+        content: {
+            type: 'subagent-snapshot',
+            members
+        }
+    }
+}
+
+describe('delegation snapshots', () => {
+    it('lists the subagents of the latest delegation snapshot', () => {
+        const messages = [delegationSnapshot([
+            {
+                id: 'child-1',
+                parentId: 'session-1',
+                title: 'Explore the API',
+                detail: 'explore',
+                status: 'running',
+                startedAt: 5,
+                endedAt: null,
+                depth: 0
+            },
+            {
+                id: 'child-2',
+                parentId: 'child-1',
+                title: 'Nested',
+                detail: 'nested',
+                status: 'queued',
+                startedAt: 6,
+                endedAt: null,
+                depth: 1
+            },
+            {
+                id: 'child-3',
+                parentId: 'session-1',
+                title: 'Done already',
+                detail: null,
+                status: 'completed',
+                startedAt: 7,
+                endedAt: 9,
+                depth: 0
+            }
+        ])]
+
+        const data = buildSessionStatusData({ goal: null, tasks: [], blocks: [], messages })
+
+        expect(data?.subagents).toEqual([
+            {
+                id: 'child-1',
+                title: 'Explore the API',
+                detail: 'explore',
+                state: 'running',
+                startedAt: 5,
+                endedAt: null,
+                depth: 0
+            },
+            {
+                id: 'child-2',
+                title: 'Nested',
+                detail: 'nested',
+                state: 'waiting',
+                startedAt: 6,
+                endedAt: null,
+                depth: 1
+            }
+        ])
+    })
+
+    it('keeps the newest delegation snapshot', () => {
+        const messages = [
+            delegationSnapshot([{
+                id: 'old',
+                parentId: null,
+                title: 'Old',
+                detail: null,
+                status: 'running',
+                startedAt: 1,
+                endedAt: null,
+                depth: 0
+            }]),
+            {
+                ...delegationSnapshot([{
+                    id: 'new',
+                    parentId: null,
+                    title: 'New',
+                    detail: null,
+                    status: 'running',
+                    startedAt: 2,
+                    endedAt: null,
+                    depth: 0
+                }]),
+                id: 'snapshot-2',
+                createdAt: 400
+            }
+        ]
+
+        const data = buildSessionStatusData({ goal: null, tasks: [], blocks: [], messages })
+
+        expect(data?.subagents.map((subagent) => subagent.id)).toEqual(['new'])
+    })
+
+    it('ignores a malformed delegation snapshot', () => {
+        const messages = [delegationSnapshot([{ id: 'child-1' }])]
+
+        expect(buildSessionStatusData({ goal: null, tasks: [], blocks: [], messages })).toBeNull()
+    })
+})

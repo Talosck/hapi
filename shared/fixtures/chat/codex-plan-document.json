@@ -1,0 +1,104 @@
+{
+    "description": "Generic agent family: a plan published as a document (data.type plan-document) normalizes to a completed plan_document tool pair keyed by the plan id — the plan is rendered as the document the agent produced, and a revision with the same plan id replaces the previous card.",
+    "expected": {
+        "blocks": [
+            {
+                "createdAt": 1755000000000,
+                "id": "msg-user-531",
+                "kind": "user-text",
+                "localId": null,
+                "text": "Plan the pagination fix before touching the code."
+            },
+            {
+                "createdAt": 1755000001400,
+                "id": "plan-document:plan-7",
+                "kind": "tool-call",
+                "localId": null,
+                "tool": {
+                    "id": "plan-document:plan-7",
+                    "input": {
+                        "format": "markdown",
+                        "plan": "# Pagination fix\n\n1. Read the page cursor\n2. Cache the boundary"
+                    },
+                    "name": "plan_document",
+                    "result": {
+                        "format": "markdown",
+                        "plan": "# Pagination fix\n\n1. Read the page cursor\n2. Cache the boundary"
+                    },
+                    "state": "completed"
+                }
+            }
+        ],
+        "hasReadyEvent": false,
+        "latestUsage": null,
+        "visibleBlocks": [
+            {
+                "createdAt": 1755000000000,
+                "id": "msg-user-531",
+                "kind": "user-text",
+                "localId": null,
+                "text": "Plan the pagination fix before touching the code."
+            },
+            {
+                "createdAt": 1755000001400,
+                "id": "plan-document:plan-7",
+                "kind": "tool-call",
+                "localId": null,
+                "tool": {
+                    "id": "plan-document:plan-7",
+                    "input": {
+                        "format": "markdown",
+                        "plan": "# Pagination fix\n\n1. Read the page cursor\n2. Cache the boundary"
+                    },
+                    "name": "plan_document",
+                    "result": {
+                        "format": "markdown",
+                        "plan": "# Pagination fix\n\n1. Read the page cursor\n2. Cache the boundary"
+                    },
+                    "state": "completed"
+                }
+            }
+        ]
+    },
+    "fixtureVersion": 1,
+    "input": {
+        "agentState": null,
+        "messages": [
+            {
+                "content": {
+                    "content": {
+                        "text": "Plan the pagination fix before touching the code.",
+                        "type": "text"
+                    },
+                    "role": "user"
+                },
+                "createdAt": 1755000000000,
+                "id": "msg-user-531",
+                "localId": null,
+                "seq": 1
+            },
+            {
+                "content": {
+                    "content": {
+                        "data": {
+                            "content": "# Pagination fix\n\n1. Read the page cursor\n2. Cache the boundary",
+                            "format": "markdown",
+                            "planId": "plan-7",
+                            "type": "plan-document"
+                        },
+                        "type": "codex"
+                    },
+                    "role": "agent"
+                },
+                "createdAt": 1755000001400,
+                "id": "msg-codex-532",
+                "localId": null,
+                "seq": 2
+            }
+        ],
+        "options": {
+            "hasMoreMessages": false
+        }
+    },
+    "name": "codex-plan-document"
+}
