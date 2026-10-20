@@ -336,12 +336,17 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     await stopRunnerSession(spawnResponse.sessionId);
   });
 
-  it('should not allow starting a second runner', async () => {
+  it('should attach a second start-sync instead of exiting or starting a duplicate', async () => {
     // Runner is already running from beforeEach
-    // Try to start another runner
+    const runningBefore = await readRunnerState();
+    expect(runningBefore?.pid).toBeDefined();
+
     const secondChild = spawn('bun', ['src/index.ts', 'runner', 'start-sync'], {
       cwd: process.cwd(),
-      env: buildTestChildEnv(),
+      // Supervisor env: an unsupervised `start-sync` deliberately exits instead
+      // of attaching, so the attachment contract needs the same opt-in a
+      // systemd/pm2 unit provides.
+      env: { ...buildTestChildEnv(), HAPI_RUNNER_SUPERVISED: '1' },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     // Register immediately so the registry can reap it if the test fails.
@@ -355,13 +360,59 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
       output += data.toString();
     });
 
-    // Wait for the second runner to exit
-    await new Promise<void>((resolve) => {
-      secondChild.on('exit', () => resolve());
+    await waitFor(async () => output.includes('already running'), 15_000);
+
+    // Supervisor contract: `start-sync` stays alive while the runner it found
+    // is alive. Exiting 0 here is what made systemd's Restart=always spin.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(secondChild.exitCode).toBeNull();
+
+    // It must not have replaced the running runner with a second one.
+    const runningAfter = await readRunnerState();
+    expect(runningAfter?.pid).toBe(runningBefore?.pid);
+
+    // A supervisor stop (systemctl stop / SIGTERM) still ends it cleanly.
+    secondChild.kill('SIGTERM');
+    const exitCode = await new Promise<number | null>((resolve) => {
+      secondChild.once('exit', (code) => resolve(code));
+    });
+    expect(exitCode).toBe(0);
+  });
+
+  it('exits non-zero when the runner it follows goes away', async () => {
+    const secondChild = spawn('bun', ['src/index.ts', 'runner', 'start-sync'], {
+      cwd: process.cwd(),
+      // Supervisor env: an unsupervised `start-sync` deliberately exits instead
+      // of attaching, so the attachment contract needs the same opt-in a
+      // systemd/pm2 unit provides.
+      env: { ...buildTestChildEnv(), HAPI_RUNNER_SUPERVISED: '1' },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    trackChildProcess(secondChild, 'second-runner');
+
+    let output = '';
+    secondChild.stdout?.on('data', (data) => {
+      output += data.toString();
+    });
+    secondChild.stderr?.on('data', (data) => {
+      output += data.toString();
     });
 
-    // Should report that runner is already running
-    expect(output).toContain('already running');
+    await waitFor(async () => output.includes('already running'), 15_000);
+
+    // The followed runner disappears (crash, or `hapi runner stop`). A
+    // supervisor only regains ownership if this process exits non-zero, so
+    // Restart=always cold-starts a runner the unit can adopt.
+    await stopRunner();
+
+    const exitCode = await new Promise<number | null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), 12_000);
+      secondChild.once('exit', (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+    expect(exitCode).toBe(1);
   });
 
   it('should handle concurrent session operations', async () => {

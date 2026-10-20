@@ -35,6 +35,7 @@ import { isRetryableConnectionError } from '@/utils/errorUtils';
 
 import { cleanupRunnerState, getInstalledCliMtimeMs, isRunnerRunningCurrentlyInstalledHappyVersion, stopRunner, waitForRunnerHandoff } from './controlClient';
 import { startRunnerControlServer } from './controlServer';
+import { attachToExistingRunner, shouldAttachToExistingRunner } from './attachExistingRunner';
 import { createWorktree, removeWorktree, type WorktreeInfo } from './worktree';
 import { validateWorkspaceDirectory } from './validateWorkspaceDirectory';
 import { join } from 'path';
@@ -250,7 +251,32 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     } else {
       logger.debug('[RUNNER RUN] Runner version matches, keeping existing runner');
       console.log('Runner already running with matching version');
-      process.exit(0);
+
+      // Supervisor contract: never exit 0 while a runner this process did not
+      // start is alive. A clean exit is indistinguishable from a crash to
+      // `Restart=always`, and since that runner can never be adopted (it stays
+      // put under `KillMode=process`), every re-exec would find it again and
+      // exit again — a spin that only the operator can break. Stay attached
+      // and follow the running generation instead; when it dies, exit
+      // non-zero so the supervisor starts a runner this unit really owns.
+      if (!shouldAttachToExistingRunner()) {
+        logger.debug('[RUNNER RUN] Not started by a supervisor; exiting instead of attaching');
+        process.exit(0);
+      }
+      const attachedState = await readRunnerState();
+      if (!attachedState) {
+        logger.debug('[RUNNER RUN] Runner vanished between the version check and attach');
+        process.exit(1);
+      }
+      const abort = new AbortController();
+      process.once('SIGTERM', () => abort.abort());
+      process.once('SIGINT', () => abort.abort());
+      const outcome = await attachToExistingRunner({
+        initialPid: attachedState.pid,
+        signal: abort.signal,
+      });
+      logger.debug(`[RUNNER RUN] Attachment to running runner ended: ${outcome}`);
+      process.exit(outcome === 'shutdown' ? 0 : 1);
     }
   }
 

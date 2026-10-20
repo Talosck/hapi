@@ -56,6 +56,17 @@ the rest of the heartbeat. A foreground supervisor should run
 `hapi runner start-sync`; advertise `HAPI_RUNNER_SUPERVISED=1` only when it
 will restart the process after exit.
 
+Because step 5 exits the old runner with status 0 while the replacement keeps
+running, `start-sync` must not treat "a runner I did not start is alive" as a
+reason to exit: `Restart=always` would re-exec it every `RestartSec`, and the
+replacement can never be adopted (it survives `KillMode=process`). Under a
+supervisor (`INVOCATION_ID` from systemd, or `HAPI_RUNNER_SUPERVISED=1`),
+`start-sync` therefore attaches to the running runner — following later
+handoffs — and exits non-zero once that runner disappears, so the supervisor
+cold-starts a runner it owns. It exits 0 only when the supervisor signals it.
+An unsupervised invocation (detached `hapi runner start` child, shell, CI)
+keeps exiting immediately; waiting there would leak a process nobody restarts.
+
 ### Heartbeat System
 
 Every 60 seconds (configurable via `HAPI_RUNNER_HEARTBEAT_INTERVAL`):

@@ -300,6 +300,8 @@ WantedBy=default.target
 
 > **Why `KillMode=process`?** Agent sessions are detached from the runner. The default `KillMode=control-group` would terminate them when the runner service stops; `KillMode=process` preserves them during runner restarts and upgrades. It does not keep processes running through an operating-system shutdown or sleep.
 
+> **What `start-sync` guarantees.** It is written to be a supervisor's foreground process: it becomes the runner when none is running, and when a runner it did not start is already running (manual `hapi runner start`, or the child that takes over during a CLI-upgrade self-restart) it **stays attached** to that runner instead of exiting. It exits `0` only when the supervisor asks it to stop, and non-zero once the runner it was following dies, so `Restart=always` cold-starts a runner the unit owns. This is what makes `Restart=always` safe here — older CLI builds exited `0` in the "already running" case, which turns this unit into a 5-second restart loop (`journalctl --user -u hapi-runner` shows `Runner already running with matching version` followed by `Scheduled restart job`). On such a build, either upgrade or switch to `Restart=on-failure`.
+
 Enable and start:
 
 ```bash

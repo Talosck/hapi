@@ -109,7 +109,7 @@ See `src/commands/auth.ts`.
 
 - `hapi runner start` - Replace any existing runner and start a detached process with the supplied flags/environment.
 - `hapi runner stop` - Stop runner gracefully; agent sessions stay alive.
-- `hapi runner start-sync` - Run in the foreground (for a process supervisor).
+- `hapi runner start-sync` - Run in the foreground (for a process supervisor). Attaches to an already-running runner instead of exiting, and exits non-zero when it goes away, so `Restart=always` can supervise it.
 - `hapi runner status` - Show runner diagnostics.
 - `hapi runner list` - List active sessions managed by runner.
 - `hapi runner stop-session <sessionId>` - Terminate specific session.
