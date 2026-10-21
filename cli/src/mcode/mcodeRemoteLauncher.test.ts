@@ -111,7 +111,8 @@ function createBackend(overrides: Record<string, unknown> = {}) {
                     'mcode/session/goal/patch',
                     'mcode/session/goal/clear',
                     'mcode/session/delegation/get',
-                    'mcode/session/delegation/stop'
+                    'mcode/session/delegation/stop',
+                    'mcode/session/steer'
                 ],
                 notifications: ['mcode/session/goal_update', 'mcode/session/delegation_update']
             }
@@ -120,6 +121,7 @@ function createBackend(overrides: Record<string, unknown> = {}) {
             if (method === 'mcode/session/goal/get') return { goal: null }
             if (method === 'mcode/session/delegation/get') return { snapshot: null }
             if (method === 'session/fork') return { sessionId: 'mvs-forked-1' }
+            if (method === 'mcode/session/steer') return { turnId: 'turn-1', mode: 'steered' }
             throw new Error(`unexpected method ${method}`)
         }),
         supportsSessionFork: vi.fn(() => true),
@@ -153,7 +155,8 @@ function createSession(messages: QueuedMessage[] = [], permissionMode: 'default'
         sendSessionEvent: vi.fn(),
         sendClaudeSessionMessage: vi.fn(),
         updateAgentState: vi.fn(),
-        updateMetadata: vi.fn()
+        updateMetadata: vi.fn(),
+        emitMessagesConsumed: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -200,7 +203,8 @@ function createScriptedSession() {
         sendSessionEvent: vi.fn(),
         sendClaudeSessionMessage: vi.fn(),
         updateAgentState: vi.fn(),
-        updateMetadata: vi.fn()
+        updateMetadata: vi.fn(),
+        emitMessagesConsumed: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -245,7 +249,8 @@ function createBlockingSession() {
         sendSessionEvent: vi.fn(),
         sendClaudeSessionMessage: vi.fn(),
         updateAgentState: vi.fn(),
-        updateMetadata: vi.fn()
+        updateMetadata: vi.fn(),
+        emitMessagesConsumed: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -267,6 +272,52 @@ function createBlockingSession() {
         pushKeepAlive: vi.fn()
     }
     return { session, finish: () => release(null) }
+}
+
+/**
+ * A session with a real message queue, so the steer handler can take a
+ * message out of the queue and put it back.
+ */
+function createSteerSession() {
+    const queue = new MessageQueue2<McodeMode>((mode) => JSON.stringify(mode))
+    const client = {
+        rpcHandlerManager: { registerHandler: vi.fn() },
+        sendAgentMessage: vi.fn(),
+        sendSessionEvent: vi.fn(),
+        sendClaudeSessionMessage: vi.fn(),
+        updateAgentState: vi.fn(),
+        updateMetadata: vi.fn(),
+        emitMessagesConsumed: vi.fn()
+    }
+    const session = {
+        path: '/tmp/mcode-test',
+        logPath: '/tmp/mcode-test/test.log',
+        client,
+        queue,
+        sessionId: null as string | null,
+        getPermissionMode: () => 'default' as const,
+        onSessionFound(id: string) {
+            session.sessionId = id
+        },
+        onThinkingChange: vi.fn(),
+        sendBackgroundTaskDelta: vi.fn(),
+        sendUserMessage: vi.fn(),
+        sendAgentMessage: vi.fn(),
+        sendSessionEvent: vi.fn(),
+        setModel: vi.fn(),
+        setPermissionMode: vi.fn(),
+        pushKeepAlive: vi.fn()
+    }
+    return { session, queue, client }
+}
+
+function findRpcHandler(
+    session: { client: { rpcHandlerManager: { registerHandler: ReturnType<typeof vi.fn> } } },
+    method: string
+): (payload: unknown) => Promise<unknown> {
+    const call = session.client.rpcHandlerManager.registerHandler.mock.calls.find((entry) => entry[0] === method)
+    if (!call) throw new Error(`no handler registered for ${method}`)
+    return call[1] as (payload: unknown) => Promise<unknown>
 }
 
 describe('mcodeRemoteLauncher config sync', () => {
@@ -890,6 +941,115 @@ describe('mcodeRemoteLauncher extension capabilities', () => {
         finish()
         await launched
     })
+
+    it('steers a queued message into the running turn', async () => {
+        // The turn never ends, so the launcher stays inside the prompt.
+        const backend = createBackend({ prompt: vi.fn(() => new Promise(() => {})) });
+        const { session, queue, client } = createSteerSession();
+        queue.push('first', { permissionMode: 'default', model: null });
+
+        void mcodeRemoteLauncher(session as never, {});
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalled();
+        });
+        // The user sends a second message while the agent is working: it waits
+        // in the queue until it is steered.
+        queue.push('steer me', { permissionMode: 'default', model: null }, 'local-1');
+
+        const handler = findRpcHandler(session, RPC_METHODS.SteerQueuedMessage);
+        await expect(handler({ localId: 'local-1' })).resolves.toEqual({ steered: true });
+        expect(backend.sendExtensionRequest).toHaveBeenCalledWith('mcode/session/steer', {
+            sessionId: 'mcode-session-1',
+            text: 'steer me',
+            // The client request id is the agent's idempotency key.
+            clientRequestId: 'local-1'
+        });
+        await vi.waitFor(() => {
+            expect(client.emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true });
+        });
+        // The message left the queue: the normal loop must not deliver it too.
+        expect(queue.peekByLocalId('local-1')).toBeNull();
+        queue.close();
+    });
+
+    it('refuses a steer while no turn is running', async () => {
+        const backend = createBackend();
+        const { session, queue } = createSteerSession();
+
+        void mcodeRemoteLauncher(session as never, {});
+        await vi.waitFor(() => {
+            expect(findRpcHandler(session, RPC_METHODS.SteerQueuedMessage)).toBeDefined();
+        });
+
+        const handler = findRpcHandler(session, RPC_METHODS.SteerQueuedMessage);
+        const result = await handler({ localId: 'local-1' });
+        expect(result).toEqual({ steered: false, error: 'MiniMax Code has no running turn to steer' });
+        expect(backend.sendExtensionRequest).not.toHaveBeenCalledWith('mcode/session/steer', expect.anything());
+        queue.close();
+    });
+
+    it('puts the message back when the agent rejects the steer', async () => {
+        const backend = createBackend({
+            prompt: vi.fn(() => new Promise(() => {})),
+            sendExtensionRequest: vi.fn(async (method: string) => {
+                if (method === 'mcode/session/steer') {
+                    throw new Error('Invalid params: The active ACP prompt Turn changed before steering was admitted.');
+                }
+                if (method === 'mcode/session/goal/get') return { goal: null };
+                if (method === 'mcode/session/delegation/get') return { snapshot: null };
+                throw new Error(`unexpected method ${method}`);
+            })
+        });
+        const { session, queue, client } = createSteerSession();
+        queue.push('first', { permissionMode: 'default', model: null });
+
+        void mcodeRemoteLauncher(session as never, {});
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalled();
+        });
+        queue.push('steer me', { permissionMode: 'default', model: null }, 'local-1');
+
+        const handler = findRpcHandler(session, RPC_METHODS.SteerQueuedMessage);
+        const result = await handler({ localId: 'local-1' });
+        expect(result).toEqual({
+            steered: false,
+            error: 'Invalid params: The active ACP prompt Turn changed before steering was admitted.'
+        });
+        // The row goes back to the queue: the normal loop delivers it later.
+        expect(queue.peekByLocalId('local-1')?.message).toBe('steer me');
+        expect(client.emitMessagesConsumed).not.toHaveBeenCalled();
+        queue.close();
+    });
+
+    it('never calls a steer method the agent did not advertise', async () => {
+        const backend = createBackend({
+            prompt: vi.fn(() => new Promise(() => {})),
+            getInitializeMeta: vi.fn(() => ({
+                'minimax-code/extensions': {
+                    version: 1,
+                    methods: ['mcode/session/goal/get'],
+                    notifications: []
+                }
+            }))
+        });
+        const { session, queue } = createSteerSession();
+        queue.push('first', { permissionMode: 'default', model: null });
+
+        void mcodeRemoteLauncher(session as never, {});
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalled();
+        });
+        queue.push('steer me', { permissionMode: 'default', model: null }, 'local-1');
+
+        const handler = findRpcHandler(session, RPC_METHODS.SteerQueuedMessage);
+        const result = await handler({ localId: 'local-1' });
+        expect(result).toEqual({
+            steered: false,
+            error: 'MiniMax Code did not advertise the steer extension'
+        });
+        expect(backend.sendExtensionRequest).not.toHaveBeenCalledWith('mcode/session/steer', expect.anything());
+        queue.close();
+    });
 
     it('ignores an extension notification the agent did not advertise', async () => {
         // The agent feature-gates its goal extension: a build without goals

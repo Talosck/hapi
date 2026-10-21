@@ -155,10 +155,11 @@ describe('claude auto permission mode', () => {
 })
 
 describe('isSteeringSupportedForFlavor', () => {
-    it('supports codex, cursor and pi', () => {
+    it('supports codex, cursor, pi and mcode', () => {
         expect(isSteeringSupportedForFlavor('codex')).toBe(true)
         expect(isSteeringSupportedForFlavor('cursor')).toBe(true)
         expect(isSteeringSupportedForFlavor('pi')).toBe(true)
+        expect(isSteeringSupportedForFlavor('mcode')).toBe(true)
         expect(isSteeringSupportedForFlavor('claude')).toBe(false)
         expect(isSteeringSupportedForFlavor('opencode')).toBe(false)
         expect(isSteeringSupportedForFlavor(undefined)).toBe(false)
@@ -167,9 +168,11 @@ describe('isSteeringSupportedForFlavor', () => {
 })
 
 describe('isSteeringSupportedForSession', () => {
-    it('supports codex and pi sessions', () => {
+    it('supports codex, pi and mcode sessions', () => {
         expect(isSteeringSupportedForSession({ flavor: 'codex' })).toBe(true)
         expect(isSteeringSupportedForSession({ flavor: 'pi' })).toBe(true)
+        // MiniMax Code steers into the running ACP prompt turn.
+        expect(isSteeringSupportedForSession({ flavor: 'mcode' })).toBe(true)
     })
 
     it('supports Cursor ACP sessions', () => {

@@ -48,6 +48,32 @@ describe('SyncEngine.steerQueuedMessage', () => {
         }
     })
 
+    it('accepts a MiniMax Code session and asks the CLI to steer', async () => {
+        // MiniMax Code steers into the running ACP prompt turn, like Codex.
+        const { store, engine } = createEngine()
+        try {
+            const session = engine.getOrCreateSession(
+                'steer-mcode',
+                { path: '/tmp/project', host: 'localhost', flavor: 'mcode' },
+                { requests: {}, completedRequests: {} },
+                'default'
+            )
+            const message = store.messages.addMessage(session.id, { text: 'hi' }, 'mcode-local')
+            const steered: string[] = []
+            ;(engine as any).rpcGateway.steerQueuedMessage = async (_sessionId: string, localId: string) => {
+                steered.push(localId)
+                return { steered: true }
+            }
+
+            const result = await engine.steerQueuedMessage(session.id, message.id)
+
+            expect(result).toEqual({ status: 'steered', localId: 'mcode-local' })
+            expect(steered).toEqual(['mcode-local'])
+        } finally {
+            engine.stop()
+        }
+    })
+
     it('rejects unsupported flavors without invoking the CLI', async () => {
         const { store, engine } = createEngine()
         try {
@@ -63,7 +89,7 @@ describe('SyncEngine.steerQueuedMessage', () => {
 
             expect(result).toEqual({
                 status: 'failed',
-                error: 'Steering is only supported for Pi, Codex, and Cursor ACP sessions',
+                error: 'Steering is only supported for Pi, Codex, Cursor, and MiniMax Code sessions',
                 localId: null
             })
         } finally {

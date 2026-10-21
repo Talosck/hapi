@@ -44,6 +44,7 @@
     "tools:unpack": "bun run scripts/unpack-tools.ts",
     "verify:mcode-extensions": "bun run scripts/verify-mcode-extensions.ts",
     "verify:mcode-fork": "bun run scripts/verify-mcode-fork.ts",
+    "verify:mcode-steer": "bun run scripts/verify-mcode-steer.ts",
     "update-homebrew-formula": "bun run scripts/update-homebrew-formula.ts",
     "test": "bun run tools:unpack && vitest run",
     "test:integration": "bun run tools:unpack && vitest run --config vitest.integration.config.ts",

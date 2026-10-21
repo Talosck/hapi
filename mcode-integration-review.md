@@ -16,7 +16,7 @@
 |---|---|---|
 | 协议契合度 | ✅ 优秀 | HAPI 发出的 `initialize` 能力声明与 mcode 实际实现逐项吻合；扩展方法名、config option id、模型 id 编码全部对得上 |
 | 对接 Bug | ✅ 未发现 | 12 项重点怀疑全部实测排除（含 2 个初判为 bug 的误报） |
-| 能力覆盖 | ⚠️ 部分接入 | **已接入**：`goal/{get,create,patch,clear}`、`delegation/{get,stop}`（P1）；`session/fork` 整会话 fork（P3）；**仍未接入**：`steer`、`queue/*` |
+| 能力覆盖 | ⚠️ 部分接入 | **已接入**：`goal/{get,create,patch,clear}`、`delegation/{get,stop}`（P1）；`session/fork` 整会话 fork（P3）；`mcode/session/steer` 轮次内注入（P4）；**明确不做**：agent 原生队列、`activate`、`session/resume`（理由见 §9.5） |
 | 可维护性 | ✅ 良好 | 扩展点从 agent 自述的 `initialize` 响应中读取，非硬编码（P0 已落地） |
 | 优化空间 | ⚠️ 中等 | 模型探针进程开销、Connector/App 工具未可视化（P2 未做） |
 
@@ -138,9 +138,9 @@
 |---|---|---|---|
 | **G1** | `mcode/session/goal/get` `create` `patch` `clear` | ✅ **已接入**（P1） | — |
 | **G2** | `mcode/session/delegation/get` `stop` | ✅ **已接入**（P1） | — |
-| **G3** | `mcode/session/steer` | ❌ 未使用 | 无法在 agent 执行中途插入指令 |
-| **G4** | `mcode/session/queue/{list,enqueue,update,delete,steer}` | ❌ 未使用，HAPI 自建客户端队列 | 无原生队列的 steer/delete 语义 |
-| **G5** | `mcode/session/current_session_update`、`queue_update` | ❌ 通知被丢弃 | 丢失 session 切换/队列状态信号 |
+| **G3** | `mcode/session/steer` | ✅ **已接入**（P4）：真·轮次内注入，与 codex 同级 | — |
+| **G4** | `mcode/session/queue/{list,enqueue,update,delete,steer}` | ❌ **明确不做**：与 HAPI 自己的 hub 侧队列构成双份真相 | 放弃 agent 原生队列的编辑/删除语义，HAPI 队列已覆盖 |
+| **G5** | `mcode/session/current_session_update`、`queue_update` | ❌ 不做：`current_session_update` 在"一进程一会话"下恒为回声；`queue_update` 依赖 G4 | — |
 | **G6** | `session/fork`、`session/resume`（`sessionCapabilities` 已声明） | ⚠️ **fork 已接入**（P3，整会话 fork）；`session/resume` 未使用 | mcode 没有 message 级 fork，只能整会话分叉；resume 与 HAPI 现有 `session/load` 路径语义不同（不返回新 session id） |
 | **G7** | Connector / App 工具 | ✅ **已接入**（P2）：Web 端可列出已连接 App 与授权状态 | — |
 | **G8** | `promptCapabilities.image: false` | ✅ **不是限制**（实测） | mcode 不接受 image 内容块，但 HAPI 的附件走 `@path` 文本引用，agent 用自己的 `read`/`bash` 读图——实测能正确识别图片内容 |
@@ -262,6 +262,12 @@ cd cli && bun run verify:mcode-extensions
 
 ```
 cd cli && bun run verify:mcode-fork
+```
+
+`cli/scripts/verify-mcode-steer.ts` —— 走 CLI 自己的 `AcpSdkBackend` 与 launcher 完全相同的扩展调用，对真实 mcode 跑通 P4 全链路（无轮次时拒绝 → 轮次中 steer → agent 当场改口）。
+
+```
+cd cli && bun run verify:mcode-steer
 ```
 
 ---
@@ -541,8 +547,60 @@ Web 端**无需改动**：消息操作区的 fork/rewind 按钮本来就在 `thr
 
 联调脚本 `cli/scripts/verify-mcode-fork.ts` 走的是 CLI 自己的 `AcpSdkBackend` + `McodeConversationHistory`，不是另写一套。
 
-### 9.5 仍未实现（mcode 侧存在，HAPI 未接）
+### 9.5 剩余扩展面的价值判断（逐项实测后决定做/不做）
 
-- `mcode/session/steer`、`mcode/session/queue/*`（插入/重排排队消息）
-- `mcode/session/current_session_update`、`queue_update` 通知
-- `session/resume`（语义与 fork 不同：它没有新 session id，HAPI 现有恢复路径走 `session/load`）
+agent 广播 15 个方法 / 4 个通知。P1 之后还剩 **9 方法 + 2 通知**。逐项实测结论：
+
+| 剩余能力 | 实测行为 | 结论 |
+|---|---|---|
+| `mcode/session/steer` | 运行中的轮次里 steer 返回 `{turnId, mode:"steered"}`，指令当场落进该轮次 | ✅ **已实施（P4）** |
+| `mcode/session/queue/{list,enqueue,update,delete,steer}` + `queue_update` | 全部可用，条目带 content/attachments/modelInfo/createdAt | ❌ **不做**（见下） |
+| `session/activate` / `mcode/session/activate` + `current_session_update` | 可用，返回 `{sessionId}` 并推通知 | ❌ **不做**（见下） |
+| `session/resume` | 可用，但**不返回 sessionId**（进程内重挂） | ❌ **不做**（见下） |
+
+**为什么原生队列不做**：它是**第二个队列**。HAPI 的队列在 hub 侧（uninvoked 消息），web 的排队区 UI、编辑、取消、定时投递全部以它为准；让 mcode 改用 agent 自己的队列，等于在一个跨 flavor 的子系统上制造分叉或双份真相。而且实测它的语义不是通用"等待区"：空闲时 `enqueue` 会直接开一轮（随后 `session/prompt` 被拒：`Session already has an active Turn. Use queue send to deliver the message after it.`），只有排在活跃轮次后面时 `list` 才有内容。
+
+**为什么 activate / current_session_update 不做**：HAPI 是**一个进程一个会话**，进程里永远只有一个 session，"当前会话"恒等于它自己，通知只会回声同样的 id。这是 mcode 自己 TUI 的多会话模型。
+
+**为什么 resume 不做**：HAPI 每次新进程按 id 加载，走 `session/load`（已实测跨进程加载保留历史）；`session/resume` 适配"长驻进程托管多会话"，与 HAPI 的 runner 模型不合。
+
+### 9.6 实施中修正的一处判断
+
+最初把"steer"理解为"把排队消息提前投递"，实测发现 mcode 的 steer 是**真·轮次内注入**（和 codex 同级）：agent 正在数 1~40，被 steer 后当场改口输出 `STEER_ACK`。这比"下一轮才说"强得多，也就让 mcode 值得接——HAPI 的这条产品链路（排队消息上的 Steer 按钮 → `POST /messages/:id/steer` → `SteerQueuedMessage` RPC）本来就为 Pi/Codex/Cursor 而建，mcode 只是第四份实现。
+
+---
+
+## 10. P4 实施记录（steer）
+
+### 10.1 接线
+
+| 层 | 改动 |
+|---|---|
+| `shared/src/modes.ts` | `STEERING_SUPPORTED_FLAVORS` 增加 `mcode`；`isSteeringSupportedForSession` 对 mcode 放行 |
+| `cli/src/mcode/mcodeRemoteLauncher.ts` | 注册 `SteerQueuedMessage` handler：`mcode/session/steer` 注入运行中的轮次；轮次在飞时发布 `agentState.steeringActive` |
+| `hub/src/sync/syncEngine.ts` | 不支持 flavor 的拒绝文案补上 MiniMax Code |
+| Web / iOS / Android | **无需改动**：web 用 `agentState.steeringActive`、native 用 `thinking && active`，都不按 flavor 白名单 gating，hub 侧统一判定 |
+
+### 10.2 语义与失败处理
+
+| 场景 | 行为 |
+|---|---|
+| 轮次在飞 + 消息在队列 | `takeByLocalId` 取走消息 → `mcode/session/steer` → agent 回 `mode:"steered"` → `commitReservation` + `emitMessagesConsumed([localId], {steered:true})` |
+| 没有活跃轮次 | 直接拒绝：`MiniMax Code has no running turn to steer`（不发请求） |
+| agent 拒绝（例如轮次在请求途中结束） | **消息放回队列**（`restoreReservation`），错误透出；正常循环会在轮次结束后投递它 |
+| agent 未广播 `mcode/session/steer` | 拒绝：`MiniMax Code did not advertise the steer extension`——未广播的方法绝不调用（与 P0 同一条规则） |
+| 请求被重试 | 带上 `clientRequestId`（= HAPI 的 localId）作为 agent 的幂等键 → 同一消息不会被注入两次 |
+
+### 10.3 验证
+
+| 检查 | 结果 |
+|---|---|
+| `bun typecheck`（cli/web/hub/relay） | ✅ exit 0 |
+| `bun run test:cli` | ✅ 3286 passed / 0 failed（新增 4 个 steer 用例） |
+| `bun run test:shared` | ✅ 349 passed / 0 failed（steer flavor 闸门断言） |
+| `bun run test:hub` | ✅ 1408 passed / 0 failed（新增 1 个 mcode steer 集成用例） |
+| `bun run test:web` / `test:relay` | ✅ 3438 / 118，0 failed |
+| `bun run gen:fixtures` | ✅ 无漂移（native 契约未受影响） |
+| **真实 mcode 联调**（`cli && bun run verify:mcode-steer`） | ✅ 无轮次时 agent 拒绝（`Steering requires an admitted, active ACP prompt Turn`）→ 轮次中 steer 返回 `{turnId, mode:"steered"}` → **agent 当场改口 `STEER_ACK`** |
+
+联调脚本 `cli/scripts/verify-mcode-steer.ts` 发的是与 launcher **完全相同形状**的调用（含 `clientRequestId` 幂等键）。

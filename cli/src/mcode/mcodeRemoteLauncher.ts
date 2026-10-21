@@ -41,6 +41,7 @@ import { acpModelIdToCliModelId, cliModelIdToAcpModelId } from './utils/modelId'
 import {
     MCODE_METHOD_DELEGATION_GET,
     MCODE_METHOD_GOAL_GET,
+    MCODE_METHOD_STEER,
     MCODE_NOTIFICATION_DELEGATION_UPDATE,
     MCODE_NOTIFICATION_GOAL_UPDATE,
     goalLifecycleSignature,
@@ -107,6 +108,13 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private extensionControl: McodeExtensionControl | null = null;
     /** Drives MiniMax Code's conversation history controls (fork). */
     private conversationHistory: McodeConversationHistory | null = null;
+    /**
+     * Whether a turn is running and can still take a steer.
+     *
+     * MiniMax Code steers into the running ACP prompt turn, so the web may
+     * only offer the Steer button while a turn is actually in flight.
+     */
+    private steeringActive = false;
 
     constructor(session: McodeSession, opts: McodeRemoteLauncherOptions) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -259,6 +267,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         this.registerAcpCommandHandlers(acpSessionId);
         this.registerExtensionControlHandlers(acpSessionId);
         this.registerConversationHistoryHandlers(acpSessionId);
+        this.registerSteerHandler(acpSessionId);
+        // A resumed session may still carry a stale "a turn is running" flag
+        // from the process that died: clear it before anything can steer.
+        this.setSteeringActive(false);
         // The goal notification is a one-way push: a resumed session would
         // otherwise show no goal even though the agent is still running one.
         await this.restoreGoalState(acpSessionId);
@@ -369,6 +381,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 text: batch.message
             }];
 
+            // Publish the steerable flag before the thinking flag: a client
+            // that offers Steer on "thinking" must never be ahead of the
+            // agent's own "a turn is running" state.
+            this.setSteeringActive(true);
             session.onThinkingChange(true);
             // The agent can only be forked at the end of a finished turn, so the
             // fork control has to know that a turn is running.
@@ -390,6 +406,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 this.flushBackgroundTasks();
                 session.onThinkingChange(false);
                 this.conversationHistory?.setBusy(false);
+                this.setSteeringActive(false);
                 this.pendingAskUserCall = null;
                 // Questions outlive the turn: mcode's ask_user tool ends the
                 // turn as soon as the questionnaire is raised, and the answer
@@ -644,6 +661,90 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         void history.probeCapabilities().catch((error) => {
             logger.debug('[mcode-remote] conversation history capability probe failed', error);
         });
+    }
+
+    /**
+     * Publishes whether a turn is running and can still take a steer.
+     *
+     * The web offers the Steer button on a queued message only while this is
+     * true - MiniMax Code steers into the running turn, not into a turn that
+     * has not started yet.
+     */
+    private setSteeringActive(value: boolean): void {
+        this.steeringActive = value;
+        this.session.client.updateAgentState((state) => ({ ...state, steeringActive: value }));
+    }
+
+    /**
+     * Registers the steer RPC.
+     *
+     * MiniMax Code steers a message into the running ACP prompt turn
+     * (`mcode/session/steer`), which is a true mid-turn inject: the agent
+     * sees the message while it is still working. The agent refuses a steer
+     * when no turn is active, so the row goes back to the queue and is
+     * delivered by the normal loop instead.
+     */
+    private registerSteerHandler(sessionId: string): void {
+        this.session.client.rpcHandlerManager.registerHandler(
+            RPC_METHODS.SteerQueuedMessage,
+            async (payload: unknown) => {
+                const localId = isObject(payload) && typeof payload.localId === 'string'
+                    ? payload.localId
+                    : null;
+                if (!localId) {
+                    return { steered: false, error: 'A steer needs a message local id' };
+                }
+                if (!this.steeringActive) {
+                    return { steered: false, error: 'MiniMax Code has no running turn to steer' };
+                }
+                if (!this.extensionControl?.supportsMethod(MCODE_METHOD_STEER)) {
+                    return { steered: false, error: 'MiniMax Code did not advertise the steer extension' };
+                }
+                const backend = this.backend;
+                if (!backend) {
+                    return { steered: false, error: 'MiniMax Code is not connected' };
+                }
+
+                // Take the message out of the queue first: the normal loop must
+                // not deliver it as well if the steer succeeds.
+                const taken = this.session.queue.takeByLocalId(localId);
+                if (!taken) {
+                    return { steered: false, error: 'Message is not queued' };
+                }
+                if (!this.session.queue.beginReservationDispatch(taken)) {
+                    this.session.queue.restoreReservation(taken);
+                    return { steered: false, error: 'Steer was cancelled' };
+                }
+
+                try {
+                    const response = await backend.sendExtensionRequest<Record<string, unknown>>(
+                        'mcode/session/steer',
+                        // The client request id is the agent's idempotency key: a
+                        // retried steer must not inject the message twice.
+                        { sessionId, text: taken.item.message, clientRequestId: localId }
+                    );
+                    const mode = isObject(response) && typeof response.mode === 'string'
+                        ? response.mode
+                        : null;
+                    if (mode !== 'steered') {
+                        // The agent answered, but it did not take the message.
+                        this.session.queue.restoreReservation(taken);
+                        return { steered: false, error: 'MiniMax Code did not accept the steer' };
+                    }
+                    this.session.queue.commitReservation(taken);
+                    this.session.client.emitMessagesConsumed([localId], { steered: true });
+                    return { steered: true };
+                } catch (error) {
+                    // A rejection means the agent did not take the message: the
+                    // row goes back to the queue and the normal loop delivers
+                    // it after the turn.
+                    this.session.queue.restoreReservation(taken);
+                    const message = error instanceof Error ? error.message : String(error);
+                    logger.warn('[mcode-remote] steer rejected', { message });
+                    return { steered: false, error: message };
+                }
+            }
+        );
     }
 
     /**

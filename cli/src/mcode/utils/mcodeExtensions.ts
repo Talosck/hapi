@@ -38,6 +38,7 @@ export const MCODE_METHOD_GOAL_PATCH = 'mcode/session/goal/patch';
 export const MCODE_METHOD_GOAL_CLEAR = 'mcode/session/goal/clear';
 export const MCODE_METHOD_DELEGATION_GET = 'mcode/session/delegation/get';
 export const MCODE_METHOD_DELEGATION_STOP = 'mcode/session/delegation/stop';
+export const MCODE_METHOD_STEER = 'mcode/session/steer';
 
 /**
  * The extension surface the agent advertised.
