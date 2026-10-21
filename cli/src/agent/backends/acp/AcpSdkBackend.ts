@@ -4,6 +4,7 @@ import { asString, isObject } from '@hapi/protocol';
 import { AcpStdioTransport, type AcpStderrError } from './AcpStdioTransport';
 import { AcpMessageHandler, type AcpTextChunkMode } from './AcpMessageHandler';
 import { ACP_SESSION_UPDATE_TYPES } from './constants';
+import { findModelConfigOption, findThinkingEffortConfigOption } from './acpConfigOptions';
 import { thinkingHintFromSessionUpdate } from './shouldBumpThinkingFromSessionUpdate';
 import { logger } from '@/ui/logger';
 import { withRetry } from '@/utils/time';
@@ -602,7 +603,7 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     getThoughtLevelConfigOption(sessionId: string): AcpConfigOptionDescriptor | undefined {
-        return this.sessionConfigOptions.get(sessionId)?.find((option) => option.category === 'thought_level');
+        return findThinkingEffortConfigOption(this.sessionConfigOptions.get(sessionId));
     }
 
     hasAvailableCommand(sessionId: string, command: string): boolean {
@@ -1540,7 +1541,14 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         if (options.length > 0) {
-            this.sessionConfigOptions.set(sessionId, options);
+            // Merge, do not replace: an agent answers a config change with the
+            // options it re-published, not with the full roster. Replacing the
+            // cache with that partial list drops the options the agent left out
+            // (MiniMax Code answers a model switch with `[permissionMode,
+            // model]` and no `thinkingEffort`), so the thinking-effort option
+            // disappears and the next effort switch fails with "MiniMax Code
+            // exposes no thinking-effort option".
+            this.mergeParsedSessionConfigOptions(sessionId, options);
         }
     }
 
@@ -1576,7 +1584,14 @@ export class AcpSdkBackend implements AgentBackend {
      * or the thinking effort the session still runs with.
      */
     private mergeSessionConfigOptions(sessionId: string, raw: unknown): void {
-        const options = this.parseConfigOptions(raw);
+        this.mergeParsedSessionConfigOptions(sessionId, this.parseConfigOptions(raw));
+    }
+
+    /** Merges already parsed config options into the session's cached list. */
+    private mergeParsedSessionConfigOptions(
+        sessionId: string,
+        options: AcpConfigOptionDescriptor[]
+    ): void {
         if (options.length === 0) return;
         const byId = new Map((this.sessionConfigOptions.get(sessionId) ?? []).map((option) => [option.id, option]));
         for (const option of options) {
@@ -1599,16 +1614,15 @@ export class AcpSdkBackend implements AgentBackend {
     } | null {
         if (!Array.isArray(response.configOptions)) return null;
 
-        for (const entry of response.configOptions) {
-            if (!isObject(entry)) continue;
-            if (asString(entry.category) !== 'model' && asString(entry.id) !== 'model') continue;
-            return {
-                currentValue: asString(entry.currentValue),
-                options: Array.isArray(entry.options) ? entry.options : []
-            };
-        }
+        const option = findModelConfigOption(
+            response.configOptions.filter((entry): entry is Record<string, unknown> => isObject(entry))
+        );
+        if (!option) return null;
 
-        return null;
+        return {
+            currentValue: asString(option.currentValue),
+            options: Array.isArray(option.options) ? option.options : []
+        };
     }
 
     private captureSessionModelsMetadata(sessionId: string, response: unknown): void {
@@ -1704,8 +1718,14 @@ export class AcpSdkBackend implements AgentBackend {
             existing?.currentModelId ?? null
         );
 
+        // A response that carries the model option without its option list must
+        // not wipe the catalog the session/new response published: an empty
+        // list would leave the model picker with nothing but "Default".
+        const availableModels = [...byModelId.values()];
         this.sessionModelsMetadata.set(sessionId, {
-            availableModels: [...byModelId.values()],
+            availableModels: availableModels.length > 0
+                ? availableModels
+                : (existing?.availableModels ?? []),
             currentModelId
         });
     }

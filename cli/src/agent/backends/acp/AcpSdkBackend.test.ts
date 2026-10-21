@@ -158,6 +158,58 @@ describe('AcpSdkBackend', () => {
         expect(backend.getThoughtLevelConfigOption('session-1')?.currentValue).toBe('high');
     });
 
+    it('keeps a config option the agent left out of its response', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            captureSessionConfigOptions: (sessionId: string, response: unknown) => void;
+        };
+
+        // session/new publishes the full roster.
+        backendInternal.captureSessionConfigOptions('session-1', {
+            configOptions: [
+                { id: 'permissionMode', category: '_permission', currentValue: 'default', options: [{ value: 'default' }] },
+                { id: 'model', category: 'model', currentValue: 'm:model:v:thinking', options: [{ value: 'm:model:v:thinking' }] },
+                { id: 'thinkingEffort', category: 'thought_level', currentValue: 'max', options: [{ value: 'low' }, { value: 'max' }] }
+            ]
+        });
+
+        // The answer to a config change only carries the options the agent
+        // re-published (MiniMax Code answers a model switch with
+        // `[permissionMode, model]`), so the effort option must survive.
+        backendInternal.captureSessionConfigOptions('session-1', {
+            configOptions: [
+                { id: 'permissionMode', category: '_permission', currentValue: 'default', options: [{ value: 'default' }] },
+                { id: 'model', category: 'model', currentValue: 'm:model:v:', options: [{ value: 'm:model:v:' }] }
+            ]
+        });
+
+        expect(backend.getThoughtLevelConfigOption('session-1')?.currentValue).toBe('max');
+        expect(backend.getConfigOptionByCategory('session-1', 'model')?.currentValue).toBe('m:model:v:');
+    });
+
+    it('keeps the published model catalog when a response carries the model option without its list', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            captureSessionMetadata: (sessionId: string, response: unknown) => void;
+        };
+
+        backendInternal.captureSessionMetadata('session-1', {
+            configOptions: [
+                { id: 'model', category: 'model', currentValue: 'm:model:v:', options: [{ value: 'm:model:v:' }] }
+            ]
+        });
+        expect(backend.getSessionModelsMetadata('session-1')?.availableModels).toHaveLength(1);
+
+        backendInternal.captureSessionMetadata('session-1', {
+            configOptions: [
+                { id: 'model', category: 'model', currentValue: 'm:model:v:thinking' }
+            ]
+        });
+
+        expect(backend.getSessionModelsMetadata('session-1')?.availableModels).toHaveLength(1);
+        expect(backend.getSessionModelsMetadata('session-1')?.currentModelId).toBe('m:model:v:thinking');
+    });
+
     it('refreshes native titles through ACP session/list', async () => {
         const backend = new AcpSdkBackend({ command: 'opencode' });
         const calls: Array<{ method: string; params: unknown; options: unknown }> = [];

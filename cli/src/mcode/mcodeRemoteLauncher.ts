@@ -246,10 +246,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             const requestedModel = batch.mode.model === null
                 ? this.defaultBackendModel
                 : batch.mode.model;
+            let modelSwitched = false;
             if (requestedModel && requestedModel !== this.currentBackendModel) {
                 try {
                     await backend.setModel(acpSessionId, requestedModel, { flavor: 'mcode' });
                     this.currentBackendModel = requestedModel;
+                    modelSwitched = true;
                 } catch (error) {
                     const message = error instanceof Error ? error.message : String(error);
                     logger.warn('[mcode-remote] Inline model switch failed', error);
@@ -264,7 +266,13 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
 
             // A model switch can change the advertised thinking-effort levels.
             // Adopt the agent's current value after the switch, then apply the
-            // user's per-turn choice if it differs.
+            // user's per-turn choice if it differs. The agent re-publishes its
+            // config options right after the switch, so wait for that update
+            // before reading the option: the cached list still belongs to the
+            // previous model otherwise.
+            if (modelSwitched) {
+                await this.backend?.waitForSessionUpdateQueue(500);
+            }
             const effortOptionAfterModel = backend.getThoughtLevelConfigOption(acpSessionId);
             if (effortOptionAfterModel) {
                 this.currentBackendEffort = effortOptionAfterModel.currentValue === 'default'
@@ -680,7 +688,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         const goal = toHapiThreadGoal(update.goal, threadId);
         this.session.sendSessionEvent({ type: 'thread-goal-updated', goal });
 
-        const signature = goalLifecycleSignature(goal);
+        const signature = goalLifecycleSignature(goal, update.goal.goalId);
         if (signature === this.lastGoalLifecycleSignature) {
             return;
         }

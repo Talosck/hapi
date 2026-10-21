@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { asString, isObject } from '@hapi/protocol';
 import type { McodeModelsResponse, McodeModelSummary } from '@hapi/protocol/apiTypes';
 import { AcpStdioTransport } from '@/agent/backends/acp/AcpStdioTransport';
+import { findModelConfigOption, findThinkingEffortConfigOption } from '@/agent/backends/acp/acpConfigOptions';
 import { resolveHapiHomeDir } from '@/configuration';
 import { logger } from '@/ui/logger';
 import packageJson from '../../../package.json';
@@ -22,6 +23,13 @@ interface CacheEntry {
 
 const CACHE_TTL_MS = 5 * 60_000;
 const PROBE_TIMEOUT_MS = 30_000;
+/**
+ * The catalog comes from the provider configuration, not from the workspace:
+ * the probe runs in a fixed directory, so every cwd shares one answer. The
+ * cache is therefore keyed by a constant — keying it by cwd spawned a fresh
+ * `mcode acp` process for every directory the user typed.
+ */
+const PROBE_CACHE_KEY = 'mcode-model-probe';
 const cache = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<ListMcodeModelsForCwdResponse>>();
 
@@ -67,7 +75,10 @@ function normalizeEffortOptions(rawOptions: unknown): Array<{ value: string; nam
 /**
  * MiniMax Code publishes its model catalog as the `model` ACP config option
  * (category `model`), not through `availableModels`. The reasoning effort
- * levels are the `thought_level` config option.
+ * levels are the `thinkingEffort` config option (category `thought_level`).
+ *
+ * The live ACP backend resolves both with the same rules, so the create form
+ * and a running session always show the same catalog.
  */
 function extractModelConfigOption(response: unknown): {
     currentValue: string | null;
@@ -76,16 +87,15 @@ function extractModelConfigOption(response: unknown): {
     if (!isObject(response)) return null;
     if (!Array.isArray(response.configOptions)) return null;
 
-    for (const entry of response.configOptions) {
-        if (!isObject(entry)) continue;
-        if (asString(entry.category) !== 'model') continue;
-        return {
-            currentValue: asString(entry.currentValue),
-            options: Array.isArray(entry.options) ? entry.options : []
-        };
-    }
+    const option = findModelConfigOption(
+        response.configOptions.filter((entry): entry is Record<string, unknown> => isObject(entry))
+    );
+    if (!option) return null;
 
-    return null;
+    return {
+        currentValue: asString(option.currentValue),
+        options: Array.isArray(option.options) ? option.options : []
+    };
 }
 
 function extractEffortConfigOption(response: unknown): {
@@ -95,16 +105,15 @@ function extractEffortConfigOption(response: unknown): {
     if (!isObject(response)) return null;
     if (!Array.isArray(response.configOptions)) return null;
 
-    for (const entry of response.configOptions) {
-        if (!isObject(entry)) continue;
-        if (asString(entry.category) !== 'thought_level' && asString(entry.id) !== 'thinkingEffort') continue;
-        return {
-            currentValue: asString(entry.currentValue),
-            options: Array.isArray(entry.options) ? entry.options : []
-        };
-    }
+    const option = findThinkingEffortConfigOption(
+        response.configOptions.filter((entry): entry is Record<string, unknown> => isObject(entry))
+    );
+    if (!option) return null;
 
-    return null;
+    return {
+        currentValue: asString(option.currentValue),
+        options: Array.isArray(option.options) ? option.options : []
+    };
 }
 
 export function extractMcodeModelsFromResponse(response: unknown): {
@@ -281,12 +290,12 @@ export async function listMcodeModelsForCwd(
         return { success: false, error: 'cwd is required' };
     }
 
-    const cached = cache.get(trimmed);
+    const cached = cache.get(PROBE_CACHE_KEY);
     if (cached && cached.expiresAt > Date.now()) {
         return cached.response;
     }
 
-    const existing = inflight.get(trimmed);
+    const existing = inflight.get(PROBE_CACHE_KEY);
     if (existing) {
         return existing;
     }
@@ -295,7 +304,7 @@ export async function listMcodeModelsForCwd(
         try {
             const response = await runMcodeProbe(trimmed);
             if (response.success) {
-                cache.set(trimmed, {
+                cache.set(PROBE_CACHE_KEY, {
                     expiresAt: Date.now() + CACHE_TTL_MS,
                     response
                 });
@@ -307,11 +316,11 @@ export async function listMcodeModelsForCwd(
                 error: getErrorMessage(error, 'Failed to discover MiniMax Code models')
             } satisfies ListMcodeModelsForCwdResponse;
         } finally {
-            inflight.delete(trimmed);
+            inflight.delete(PROBE_CACHE_KEY);
         }
     })();
 
-    inflight.set(trimmed, promise);
+    inflight.set(PROBE_CACHE_KEY, promise);
     return promise;
 }
 

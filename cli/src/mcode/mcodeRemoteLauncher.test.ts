@@ -85,6 +85,7 @@ function createBackend(overrides: Record<string, unknown> = {}) {
             ]
         })),
         getAvailableCommands: vi.fn(() => []),
+        waitForSessionUpdateQueue: vi.fn(async () => {}),
         prompt: vi.fn(async () => {}),
         cancelPrompt: vi.fn(async () => {}),
         respondToPermission: vi.fn(async () => {}),
@@ -282,6 +283,21 @@ describe('mcodeRemoteLauncher config sync', () => {
 
         await mcodeRemoteLauncher(session as never, {})
 
+        expect(backend.setConfigOption).toHaveBeenCalledWith('mcode-session-1', 'thinkingEffort', 'low')
+    })
+
+    it('applies the per-turn thinking effort after a model switch', async () => {
+        // MiniMax Code answers a model switch with a partial config-option
+        // list, so the thinking-effort option must survive the switch.
+        const backend = createBackend()
+        const session = createSession([
+            { message: 'switch model', mode: { permissionMode: 'default', model: 'm:other', effort: null } },
+            { message: 'think harder', mode: { permissionMode: 'default', model: 'm:other', effort: 'low' } }
+        ])
+
+        await mcodeRemoteLauncher(session as never, { model: 'm:good' })
+
+        expect(backend.setModel).toHaveBeenCalledWith('mcode-session-1', 'm:other', { flavor: 'mcode' })
         expect(backend.setConfigOption).toHaveBeenCalledWith('mcode-session-1', 'thinkingEffort', 'low')
     })
 
