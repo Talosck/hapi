@@ -364,6 +364,42 @@ describe('createMcodeUsageWatcher', () => {
         }
     });
 
+    it('watches the new session when a handoff overlaps the discovery of the old one', async () => {
+        const dataDir = await createTempDir();
+        const first = 'mvs_race_first';
+        const second = 'mvs_race_second';
+        const firstDir = sessionDir(dataDir, first);
+        const secondDir = sessionDir(dataDir, second);
+        await mkdir(firstDir, { recursive: true });
+        await mkdir(secondDir, { recursive: true });
+        const firstPath = join(firstDir, 'messages.jsonl');
+        const secondPath = join(secondDir, 'messages.jsonl');
+        await writeFile(firstPath, `${assistantLine({ messageId: 'first-old' })}\n`);
+        await writeFile(secondPath, `${assistantLine({ messageId: 'second-old' })}\n`);
+
+        const onUsage = vi.fn();
+        const watcher = createMcodeUsageWatcher({ dataDir, onUsage, pollIntervalMs: 10 });
+        try {
+            // The handoff starts while the discovery of the first session is
+            // still running: the watcher has to end up tailing the second
+            // session on its own — nothing else would start a new discovery.
+            await Promise.all([watcher.attach(first), watcher.attach(second)]);
+
+            await appendFile(secondPath, `${assistantLine({ messageId: 'second-new' })}\n`);
+            await vi.waitFor(() => {
+                expect(onUsage).toHaveBeenCalledTimes(1);
+            }, { timeout: 2_000 });
+            expect(onUsage.mock.calls[0]?.[0]).toMatchObject({ messageId: 'second-new' });
+
+            // The journal of the session we left is not watched any more.
+            await appendFile(firstPath, `${assistantLine({ messageId: 'first-new' })}\n`);
+            await new Promise((resolve) => setTimeout(resolve, 60));
+            expect(onUsage).toHaveBeenCalledTimes(1);
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
     it('reports a transcript that cannot be located', async () => {
         const dataDir = await createTempDir();
         const onUsage = vi.fn();

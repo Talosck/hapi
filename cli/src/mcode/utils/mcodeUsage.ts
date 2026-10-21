@@ -524,6 +524,10 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
 
             const path = join(dir, 'messages.jsonl');
             const stats = await fileStats(path);
+            // A mode handoff may attach the watcher to another native session
+            // while this read was in flight: the journal of the session we are
+            // leaving must not be watched for the new one.
+            if (stopped || targetGeneration !== generation) return;
             if (!stats) {
                 // The journal appears with the first prompt; keep waiting even
                 // if the user leaves the session idle for a long time.
@@ -579,6 +583,14 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
         // for the session that is being left behind.
         if (messagesPath) {
             await flush();
+        }
+
+        // A discovery for the session we are leaving may still be running: it
+        // would set the journal path of the OLD session after the state was
+        // reset, and the new session would never be watched (its usage would
+        // be missing for the rest of the session). Wait for it to settle.
+        if (discoveryPromise) {
+            await discoveryPromise.catch(() => undefined);
         }
 
         clearPollTimer();
