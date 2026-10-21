@@ -788,11 +788,15 @@ export class SessionCache {
             this.store.sessions.setSessionActive(session.id, false, now, session.namespace)
             session.thinking = false
             this.pendingThinkingUntilBySessionId.delete(session.id)
+            // The CLI is gone, so nothing will report the background tasks it
+            // was running any more. Keeping the count would show a session
+            // that still has work in flight forever.
+            session.backgroundTaskCount = 0
             expired.push(session.id)
             this.publisher.emit({
                 type: 'session-updated',
                 sessionId: session.id,
-                data: { active: false } satisfies SessionPatch
+                data: { active: false, backgroundTaskCount: 0 } satisfies SessionPatch
             })
         }
 
