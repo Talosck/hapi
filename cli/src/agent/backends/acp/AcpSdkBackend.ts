@@ -886,6 +886,21 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     /**
+     * Closes the ACP session.
+     *
+     * `session/close` releases the attachment state the agent keeps for a
+     * connected session. The session itself stays in the agent's data
+     * directory, so a later run can pick it up again with `session/load`.
+     */
+    async closeSession(sessionId: string): Promise<void> {
+        if (!this.transport) {
+            return;
+        }
+
+        await this.transport.sendRequest('session/close', { sessionId });
+    }
+
+    /**
      * Soft-inject a follow-up `session/prompt` while another prompt is in flight.
      *
      * Used for Cursor mid-turn steer (GUI "Send" / next-opportune soft send).

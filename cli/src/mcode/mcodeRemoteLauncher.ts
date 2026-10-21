@@ -427,6 +427,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         registerSlashCommandHandlers(this.session.client.rpcHandlerManager, this.session.path);
 
         if (this.backend) {
+            // `session/close` releases the attachment state the agent keeps for
+            // a connected session. The session itself stays in the agent's
+            // data directory, so a later run can load it again.
+            if (this.acpSessionId) {
+                try {
+                    await this.backend.closeSession(this.acpSessionId);
+                } catch (error) {
+                    logger.debug('[mcode-remote] Failed to close the MiniMax Code session', error);
+                }
+            }
             await this.backend.disconnect();
             this.backend = null;
         }

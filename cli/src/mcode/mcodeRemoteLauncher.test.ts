@@ -105,6 +105,7 @@ function createBackend(overrides: Record<string, unknown> = {}) {
         waitForSessionUpdateQueue: vi.fn(async () => {}),
         prompt: vi.fn(async () => {}),
         cancelPrompt: vi.fn(async () => {}),
+        closeSession: vi.fn(async () => {}),
         respondToPermission: vi.fn(async () => {}),
         onStderrError: vi.fn(),
         setSessionInfoUpdateListener: vi.fn(),
@@ -906,5 +907,30 @@ describe('mcodeRemoteLauncher local handoff', () => {
         // The goal and the delegation tree belong to the remote session.
         expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'thread-goal-cleared' })
         expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'subagent-snapshot', members: [] })
+    })
+
+    it('closes the ACP session before the backend goes away', async () => {
+        // `session/close` releases the attachment state the agent keeps for a
+        // connected session; the session itself stays in its data directory.
+        const backend = createBackend()
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(backend.closeSession).toHaveBeenCalledWith('mcode-session-1')
+        expect(backend.disconnect).toHaveBeenCalled()
+    })
+
+    it('still disconnects when closing the session fails', async () => {
+        const backend = createBackend({
+            closeSession: vi.fn(async () => {
+                throw new Error('Method not found')
+            })
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(backend.disconnect).toHaveBeenCalled()
     })
 })
