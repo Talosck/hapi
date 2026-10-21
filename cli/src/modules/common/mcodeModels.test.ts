@@ -75,6 +75,21 @@ describe('extractMcodeModelsFromResponse', () => {
         expect(currentEffort).toBeNull();
     });
 
+    it('falls back to the model list nested under models', () => {
+        // The live ACP backend accepts the nested shape, so the probe has to
+        // as well — otherwise the create form and a running session show
+        // different catalogs for the same agent.
+        const { availableModels, currentModelId } = extractMcodeModelsFromResponse({
+            models: {
+                availableModels: [{ modelId: 'm:minimax:MiniMax-M3:v:', name: 'M3' }],
+                currentModelId: 'm:minimax:MiniMax-M3:v:'
+            }
+        });
+
+        expect(currentModelId).toBe('m:minimax:MiniMax-M3:v:');
+        expect(availableModels).toEqual([{ modelId: 'm:minimax:MiniMax-M3:v:', name: 'M3' }]);
+    });
+
     it('returns an empty catalog for an unexpected response', () => {
         expect(extractMcodeModelsFromResponse(null)).toEqual({
             availableModels: [],

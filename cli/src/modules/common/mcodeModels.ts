@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { asString, isObject } from '@hapi/protocol';
 import type { McodeModelsResponse, McodeModelSummary } from '@hapi/protocol/apiTypes';
 import { AcpStdioTransport } from '@/agent/backends/acp/AcpStdioTransport';
-import { findModelConfigOption, findThinkingEffortConfigOption } from '@/agent/backends/acp/acpConfigOptions';
+import { extractModelCatalog, findThinkingEffortConfigOption } from '@/agent/backends/acp/acpConfigOptions';
 import { resolveHapiHomeDir } from '@/configuration';
 import { logger } from '@/ui/logger';
 import packageJson from '../../../package.json';
@@ -73,31 +73,12 @@ function normalizeEffortOptions(rawOptions: unknown): Array<{ value: string; nam
 }
 
 /**
- * MiniMax Code publishes its model catalog as the `model` ACP config option
- * (category `model`), not through `availableModels`. The reasoning effort
- * levels are the `thinkingEffort` config option (category `thought_level`).
+ * MiniMax Code publishes its reasoning effort levels as the `thinkingEffort`
+ * ACP config option (category `thought_level`).
  *
  * The live ACP backend resolves both with the same rules, so the create form
  * and a running session always show the same catalog.
  */
-function extractModelConfigOption(response: unknown): {
-    currentValue: string | null;
-    options: unknown[];
-} | null {
-    if (!isObject(response)) return null;
-    if (!Array.isArray(response.configOptions)) return null;
-
-    const option = findModelConfigOption(
-        response.configOptions.filter((entry): entry is Record<string, unknown> => isObject(entry))
-    );
-    if (!option) return null;
-
-    return {
-        currentValue: asString(option.currentValue),
-        options: Array.isArray(option.options) ? option.options : []
-    };
-}
-
 function extractEffortConfigOption(response: unknown): {
     currentValue: string | null;
     options: unknown[];
@@ -126,14 +107,8 @@ export function extractMcodeModelsFromResponse(response: unknown): {
         return { availableModels: [], currentModelId: null, effortOptions: [], currentEffort: null };
     }
 
-    const configModelOption = extractModelConfigOption(response);
     const configEffortOption = extractEffortConfigOption(response);
-    const rawModels = Array.isArray(response.availableModels)
-        ? response.availableModels
-        : configModelOption?.options ?? null;
-    const rawCurrent = typeof response.currentModelId === 'string'
-        ? response.currentModelId
-        : configModelOption?.currentValue ?? null;
+    const { availableModels: rawModels, currentModelId: rawCurrent } = extractModelCatalog(response);
 
     const currentEffort = configEffortOption?.currentValue ?? null;
     return {

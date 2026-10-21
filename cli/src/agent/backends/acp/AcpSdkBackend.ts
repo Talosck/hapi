@@ -4,7 +4,7 @@ import { asString, isObject } from '@hapi/protocol';
 import { AcpStdioTransport, type AcpStderrError } from './AcpStdioTransport';
 import { AcpMessageHandler, type AcpTextChunkMode } from './AcpMessageHandler';
 import { ACP_SESSION_UPDATE_TYPES } from './constants';
-import { findModelConfigOption, findThinkingEffortConfigOption } from './acpConfigOptions';
+import { ACP_MODEL_CONFIG_ID, extractModelCatalog, findModelConfigOption, findThinkingEffortConfigOption } from './acpConfigOptions';
 import { thinkingHintFromSessionUpdate } from './shouldBumpThinkingFromSessionUpdate';
 import { logger } from '@/ui/logger';
 import { withRetry } from '@/utils/time';
@@ -548,12 +548,18 @@ export class AcpSdkBackend implements AgentBackend {
             // `configOptions` including thought_level for the new model.
             //
             // MiniMax Code does not implement `session/set_model` at all — its
-            // model picker is the `model` config option, and the option id is
-            // fixed, so the same call applies there.
+            // model picker is the `model` config option.
+            //
+            // The picker is matched by id *or* category when it is read, so it
+            // is written to the id the agent actually published: a build that
+            // publishes it under another id would otherwise show the catalog
+            // fine and then reject every switch.
+            const modelOption = findModelConfigOption(this.sessionConfigOptions.get(sessionId));
+            const configId = modelOption?.id ?? ACP_MODEL_CONFIG_ID;
             try {
                 configOptionResponse = await this.transport.sendRequest('session/set_config_option', {
                     sessionId,
-                    configId: 'model',
+                    configId,
                     value: modelId
                 });
                 usedConfigOption = true;
@@ -1661,43 +1667,14 @@ export class AcpSdkBackend implements AgentBackend {
      * expose model metadata (e.g. current Gemini ACP build) simply leave the
      * cache untouched.
      */
-    private extractModelConfigOption(response: Record<string, unknown>): {
-        currentValue: string | null;
-        options: unknown[];
-    } | null {
-        if (!Array.isArray(response.configOptions)) return null;
-
-        const option = findModelConfigOption(
-            response.configOptions.filter((entry): entry is Record<string, unknown> => isObject(entry))
-        );
-        if (!option) return null;
-
-        return {
-            currentValue: asString(option.currentValue),
-            options: Array.isArray(option.options) ? option.options : []
-        };
-    }
-
     private captureSessionModelsMetadata(sessionId: string, response: unknown): void {
         if (!isObject(response)) return;
 
-        const directList = response.availableModels;
-        const directCurrent = response.currentModelId;
-        const nested = isObject(response.models) ? response.models : null;
-        const nestedList = nested?.availableModels;
-        const nestedCurrent = nested?.currentModelId;
-
-        const configModelOption = this.extractModelConfigOption(response);
-        const rawModels = Array.isArray(directList)
-            ? directList
-            : Array.isArray(nestedList)
-                ? nestedList
-                : configModelOption?.options ?? null;
-        const rawCurrent = typeof directCurrent === 'string'
-            ? directCurrent
-            : typeof nestedCurrent === 'string'
-                ? nestedCurrent
-                : configModelOption?.currentValue ?? null;
+        const {
+            availableModels: rawModels,
+            currentModelId: rawCurrent,
+            configModelOptions
+        } = extractModelCatalog(response);
 
         if (rawModels === null && rawCurrent === null) {
             return;
@@ -1756,8 +1733,8 @@ export class AcpSdkBackend implements AgentBackend {
 
         // Cursor often lists one wire id per family in `models` but every variant in
         // `configOptions` category=model — merge so metadata matches Zed-style pickers.
-        if (configModelOption) {
-            for (const entry of configModelOption.options) {
+        if (configModelOptions) {
+            for (const entry of configModelOptions) {
                 if (!isObject(entry)) continue;
                 const modelId = asString(entry.value) ?? asString(entry.modelId);
                 if (!modelId) continue;

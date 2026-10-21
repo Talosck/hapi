@@ -688,6 +688,65 @@ describe('AcpSdkBackend', () => {
         expect(backend.getThoughtLevelConfigOption('s1')).toBeUndefined();
     });
 
+    it('writes the model switch to the option id the agent published', async () => {
+        // The model picker is matched by id *or* category when it is read, so
+        // a build that publishes it under another id must be written to that
+        // id — otherwise the catalog reads fine and every switch is rejected.
+        const backend = new AcpSdkBackend({ command: 'mcode' });
+        const calls: Array<{ method: string; params: unknown }> = [];
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: (method: string, params: unknown) => Promise<unknown>; close: () => Promise<void> } | null;
+        };
+        backendInternal.transport = {
+            sendRequest: async (method, params) => {
+                calls.push({ method, params });
+                if (method === 'session/new') {
+                    return {
+                        sessionId: 's1',
+                        configOptions: [{
+                            id: 'modelPicker',
+                            category: 'model',
+                            currentValue: 'm:minimax:MiniMax-M3:v:thinking',
+                            options: [{ value: 'm:minimax:MiniMax-M3:v:thinking' }]
+                        }]
+                    };
+                }
+                return { configOptions: [] };
+            },
+            close: async () => {}
+        };
+
+        await backend.newSession({ cwd: '/tmp/x', mcpServers: [] });
+        await backend.setModel('s1', 'm:minimax:MiniMax-M3:u', { flavor: 'mcode' });
+
+        expect(calls.at(-1)).toEqual({
+            method: 'session/set_config_option',
+            params: { sessionId: 's1', configId: 'modelPicker', value: 'm:minimax:MiniMax-M3:u' }
+        });
+    });
+
+    it('falls back to the model option id when the agent published no model option', async () => {
+        const backend = new AcpSdkBackend({ command: 'mcode' });
+        const calls: Array<{ method: string; params: unknown }> = [];
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: (method: string, params: unknown) => Promise<unknown>; close: () => Promise<void> } | null;
+        };
+        backendInternal.transport = {
+            sendRequest: async (method, params) => {
+                calls.push({ method, params });
+                return null;
+            },
+            close: async () => {}
+        };
+
+        await backend.setModel('s1', 'm:minimax:MiniMax-M3:u', { flavor: 'mcode' });
+
+        expect(calls.at(-1)).toEqual({
+            method: 'session/set_config_option',
+            params: { sessionId: 's1', configId: 'model', value: 'm:minimax:MiniMax-M3:u' }
+        });
+    });
+
     it('rethrows non method-not-found errors from opencode set_config_option without falling back', async () => {
         const backend = new AcpSdkBackend({ command: 'opencode' });
         const backendInternal = backend as unknown as {
