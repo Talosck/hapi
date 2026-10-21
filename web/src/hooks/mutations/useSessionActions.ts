@@ -77,6 +77,13 @@ export function useSessionActions(
         await queryClient.invalidateQueries({ queryKey: ['machine-cursor-models'] })
     }
 
+    const invalidateMcodeModels = async () => {
+        if (!sessionId || agentFlavor !== 'mcode') return
+        // A model switch changes the thinking-effort levels the agent
+        // advertises, so the catalog the session serves is stale without this.
+        await queryClient.invalidateQueries({ queryKey: queryKeys.sessionMcodeModels(sessionId) })
+    }
+
     const abortMutation = useMutation({
         mutationFn: async () => {
             if (!api || !sessionId) {
@@ -182,6 +189,7 @@ export function useSessionActions(
         onSuccess: async () => {
             await invalidateSession()
             await invalidateCursorModels()
+            await invalidateMcodeModels()
         },
     })
 

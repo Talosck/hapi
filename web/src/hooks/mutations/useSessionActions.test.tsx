@@ -196,4 +196,31 @@ describe('useSessionActions - setModel', () => {
         await waitFor(() => expect(result.current.isPending).toBe(false))
         expect(invalidate).toHaveBeenCalledWith({ queryKey: ['session', 'session-A'] })
     })
+
+    it('invalidates the MiniMax Code catalog after a model switch', async () => {
+        // A model switch changes the thinking-effort levels the agent
+        // advertises, so the cached catalog would keep serving the old ones.
+        const queryClient = new QueryClient({
+            defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+        })
+        const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+        const api = {
+            setModel: vi.fn(async () => {}),
+        } as unknown as ApiClient
+        const wrapper = ({ children }: { children: ReactNode }) => (
+            <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+        )
+        const { result } = renderHook(
+            () => useSessionActions(api, 'session-A', 'mcode'),
+            { wrapper },
+        )
+
+        await act(async () => {
+            await result.current.setModel('m:minimax:MiniMax-M3:v:thinking')
+        })
+
+        await waitFor(() => {
+            expect(invalidate).toHaveBeenCalledWith({ queryKey: ['session-mcode-models', 'session-A'] })
+        })
+    })
 })
