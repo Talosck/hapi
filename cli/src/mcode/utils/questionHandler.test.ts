@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentState } from '@/api/types';
+import type { AgentBackend } from '@/agent/types';
+import { AcpPermissionHandler } from '@/modules/common/permission/AcpPermissionHandler';
 import {
     buildMcodeQuestionInput,
     McodeQuestionHandler,
@@ -331,6 +333,68 @@ describe('McodeQuestionHandler', () => {
         await expect(elicit({ mode: 'form', requestedSchema: null })).resolves.toEqual({
             action: 'decline'
         });
+    });
+
+    it('stays answerable when the turn ends and tool approvals are canceled', async () => {
+        // mcode ends the turn as soon as the questionnaire is raised, so the
+        // launcher cancels the turn-scoped tool approvals right after. The
+        // question shares the session's request map with them and has to
+        // survive that sweep, otherwise the card is already dead by the time
+        // the user sees it and no answer can be submitted.
+        let state: AgentState = { requests: {}, completedRequests: {} };
+        const client = {
+            rpcHandlerManager: { registerHandler: vi.fn() },
+            updateAgentState(handler: (current: AgentState) => AgentState) {
+                state = handler(state);
+            }
+        };
+
+        let elicitationHandler: ((params: unknown) => Promise<unknown>) | null = null;
+        const backend = {
+            registerExtensionRequestHandler(
+                method: string,
+                handler: (params: unknown) => Promise<unknown>
+            ) {
+                if (method === 'elicitation/create') {
+                    elicitationHandler = handler;
+                }
+            }
+        };
+
+        const submitAnswer = vi.fn<(text: string) => void>();
+        const questionHandler = new McodeQuestionHandler(
+            client,
+            backend,
+            () => choiceHint,
+            { submitAnswer }
+        );
+
+        const permissionHandler = new AcpPermissionHandler(
+            client as never,
+            {
+                onPermissionRequest: vi.fn(),
+                respondToPermission: vi.fn(async () => {})
+            } as unknown as AgentBackend,
+            () => 'default',
+            { handleMissingResponse: (response) => questionHandler.handleResponse(response) }
+        );
+
+        const resultPromise = elicitationHandler!(choiceRequest) as Promise<Record<string, unknown>>;
+
+        // The turn ends here: the launcher cancels the turn-scoped approvals.
+        await permissionHandler.cancelAll('Prompt finished');
+
+        expect(state.requests?.['call_function_1']).toBeDefined();
+        expect(state.completedRequests?.['call_function_1']).toBeUndefined();
+
+        await expect(questionHandler.handleResponse({
+            id: 'call_function_1',
+            approved: true,
+            answers: { '0': ['Alpha'] }
+        })).resolves.toBe(true);
+
+        await expect(resultPromise).resolves.toEqual({ action: 'decline' });
+        expect(submitAnswer).toHaveBeenCalledWith('Q: Which option do you prefer?\nA: Alpha');
     });
 });
 

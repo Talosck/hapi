@@ -147,6 +147,17 @@ export class AcpPermissionHandler extends BasePermissionHandler<AcpPermissionRes
     }
 
     async cancelAll(reason: string): Promise<void> {
+        // Only the requests this handler registered may be canceled. The
+        // session's request map is shared: another subsystem can publish its
+        // own request there (MiniMax Code's ask_user questionnaire does), and
+        // those requests are not turn-scoped — the agent ends its turn right
+        // after raising them, so canceling them here would kill a card the
+        // user has not answered yet.
+        const ownedIds = new Set([
+            ...this.pendingRequests.keys(),
+            ...this.pendingBackendRequests.keys()
+        ])
+
         const pending = Array.from(this.pendingBackendRequests.values())
         this.pendingBackendRequests.clear()
         for (const request of pending) {
@@ -155,7 +166,8 @@ export class AcpPermissionHandler extends BasePermissionHandler<AcpPermissionRes
         this.cancelPendingRequests({
             completedReason: reason,
             rejectMessage: reason,
-            decision: 'abort'
+            decision: 'abort',
+            filter: (_toolName, id) => ownedIds.has(id)
         })
     }
 }

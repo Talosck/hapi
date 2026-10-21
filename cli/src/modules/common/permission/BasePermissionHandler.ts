@@ -131,13 +131,13 @@ export type CancelPendingRequestOptions = {
     rejectMessage: string;
     decision?: PermissionCompletion['decision'];
     /**
-     * When set, only pending requests whose toolName satisfies the predicate
-     * are canceled; every other pending request (and its agentState entry) is
-     * left untouched. Omitting it cancels everything — the original,
-     * unscoped behavior every existing caller (session-teardown cancelAll)
-     * relies on.
+     * When set, only pending requests the predicate accepts are canceled;
+     * every other pending request (and its agentState entry) is left
+     * untouched. The predicate receives the request's tool name and its id.
+     * Omitting it cancels everything — the original, unscoped behavior every
+     * existing caller (session-teardown cancelAll) relies on.
      */
-    filter?: (toolName: string) => boolean;
+    filter?: (toolName: string, id: string) => boolean;
 };
 
 export abstract class BasePermissionHandler<TResponse extends { id: string }, TResult> {
@@ -224,7 +224,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
         const { filter } = options;
 
         for (const [id, pending] of this.pendingRequests.entries()) {
-            if (filter && !filter(pending.toolName)) continue;
+            if (filter && !filter(pending.toolName, id)) continue;
             pending.reject(new Error(options.rejectMessage));
             this.pendingRequests.delete(id);
         }
@@ -235,7 +235,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
             const nextRequests: typeof pendingRequests = {};
 
             for (const [id, request] of Object.entries(pendingRequests)) {
-                if (filter && !filter(request.tool)) {
+                if (filter && !filter(request.tool, id)) {
                     nextRequests[id] = request;
                     continue;
                 }
