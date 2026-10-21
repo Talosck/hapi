@@ -286,6 +286,29 @@ describe('mcodeRemoteLauncher config sync', () => {
         expect(backend.setConfigOption).toHaveBeenCalledWith('mcode-session-1', 'thinkingEffort', 'low')
     })
 
+    it('resolves a model the user named the CLI way to the published id', async () => {
+        // The user may name a model the way the MiniMax CLI does
+        // (`provider/model#variant`); the agent only accepts its own wire id.
+        const backend = createBackend({
+            getSessionModelsMetadata: vi.fn(() => ({
+                currentModelId: 'm:minimax:MiniMax-M3:v:thinking',
+                availableModels: [
+                    { modelId: 'm:minimax:MiniMax-M3:v:thinking' },
+                    { modelId: 'm:minimax:MiniMax-M3:v:' }
+                ]
+            }))
+        })
+        const session = createSession()
+
+        await mcodeRemoteLauncher(session as never, { model: 'minimax/MiniMax-M3#thinking' })
+
+        expect(backend.setModel).toHaveBeenCalledWith(
+            'mcode-session-1',
+            'm:minimax:MiniMax-M3:v:thinking',
+            { flavor: 'mcode' }
+        )
+    })
+
     it('applies the per-turn thinking effort after a model switch', async () => {
         // MiniMax Code answers a model switch with a partial config-option
         // list, so the thinking-effort option must survive the switch.

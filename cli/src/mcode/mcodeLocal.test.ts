@@ -21,8 +21,19 @@ describe('buildMcodeLocalArgs', () => {
         })).toEqual(['--session', 'mvs_abc', '--model', 'minimax/MiniMax-M3']);
     });
 
-    it('drops a model id the CLI would reject instead of passing it on', () => {
+    it('passes a model the user named the CLI way on unchanged', () => {
+        // The MiniMax CLI itself takes `provider/model[#variant]`, so a model
+        // the user named that way is what the TUI expects.
         expect(buildMcodeLocalArgs({ model: 'minimax/MiniMax-M3' }))
+            .toEqual(['--model', 'minimax/MiniMax-M3']);
+        expect(buildMcodeLocalArgs({ model: 'minimax/MiniMax-M3#thinking' }))
+            .toEqual(['--model', 'minimax/MiniMax-M3#thinking']);
+    });
+
+    it('drops a model id the CLI would reject instead of passing it on', () => {
+        expect(buildMcodeLocalArgs({ model: 'not a model id' }))
+            .toEqual([]);
+        expect(buildMcodeLocalArgs({ model: 'gpt-5.4' }))
             .toEqual([]);
     });
 });

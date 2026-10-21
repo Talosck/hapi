@@ -16,6 +16,17 @@ describe('getSessionModelLabel', () => {
         })
     })
 
+    it('renders a MiniMax Code wire model id as a readable label', () => {
+        expect(getSessionModelLabel({ model: 'm:minimax:MiniMax-M3.1-Flash:v:thinking' })).toEqual({
+            key: 'session.item.model',
+            value: 'MiniMax-M3.1-Flash · thinking'
+        })
+        expect(getSessionModelLabel({ model: 'm:minimax:MiniMax-M3.1-Flash:v:' })).toEqual({
+            key: 'session.item.model',
+            value: 'MiniMax-M3.1-Flash'
+        })
+    })
+
     it('returns null when no model is available', () => {
         expect(getSessionModelLabel({})).toBeNull()
     })

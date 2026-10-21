@@ -1,4 +1,4 @@
-import { getAgyModelLabel, getClaudeModelLabel } from '@hapi/protocol'
+import { formatMcodeModelLabel, getAgyModelLabel, getClaudeModelLabel } from '@hapi/protocol'
 
 type SessionModelSource = {
     model?: string | null
@@ -10,7 +10,7 @@ export type SessionModelLabel = {
 }
 
 function getModelLabel(model: string): string | null {
-    return getAgyModelLabel(model) ?? getClaudeModelLabel(model)
+    return getAgyModelLabel(model) ?? getClaudeModelLabel(model) ?? formatMcodeModelLabel(model)
 }
 
 export function getSessionModelLabel(session: SessionModelSource): SessionModelLabel | null {

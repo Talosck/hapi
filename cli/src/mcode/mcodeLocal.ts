@@ -1,7 +1,7 @@
 import { logger } from '@/ui/logger';
 import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard';
 import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
-import { acpModelIdToCliModelId } from './utils/modelId';
+import { acpModelIdToCliModelId, isCliModelId } from './utils/modelId';
 
 export type McodeLocalOptions = {
     path: string;
@@ -19,10 +19,12 @@ export function buildMcodeLocalArgs(opts: { sessionId?: string | null; model?: s
         args.push('--session', opts.sessionId);
     }
 
-    // The TUI only accepts `provider/model[#variant]`, so the ACP wire id has
-    // to be translated first. An unrecognised id is dropped rather than
-    // passed on — the CLI rejects unknown `--model` values outright.
-    const cliModel = acpModelIdToCliModelId(opts.model);
+    // The TUI only accepts `provider/model[#variant]`, so an ACP wire id has
+    // to be translated first. A model the user named the CLI way is already
+    // in that form and is passed on. An unrecognised id is dropped rather
+    // than passed on — the CLI rejects unknown `--model` values outright.
+    const cliModel = acpModelIdToCliModelId(opts.model)
+        ?? (isCliModelId(opts.model) ? opts.model!.trim() : null);
     if (cliModel) {
         args.push('--model', cliModel);
     }

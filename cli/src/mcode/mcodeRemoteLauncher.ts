@@ -28,6 +28,7 @@ import {
 } from './utils/questionHandler';
 import { BackgroundTaskAggregator } from './utils/backgroundTaskAggregator';
 import { normalizeMcodeToolCall } from './utils/toolCallNormalizer';
+import { acpModelIdToCliModelId, cliModelIdToAcpModelId } from './utils/modelId';
 import {
     MCODE_NOTIFICATION_DELEGATION_UPDATE,
     MCODE_NOTIFICATION_GOAL_UPDATE,
@@ -257,9 +258,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 : batch.mode.model;
             let modelSwitched = false;
             if (requestedModel && requestedModel !== this.currentBackendModel) {
+                const resolvedModel = this.resolveModelId(acpSessionId, requestedModel);
                 try {
-                    await backend.setModel(acpSessionId, requestedModel, { flavor: 'mcode' });
-                    this.currentBackendModel = requestedModel;
+                    await backend.setModel(acpSessionId, resolvedModel, { flavor: 'mcode' });
+                    this.currentBackendModel = resolvedModel;
                     modelSwitched = true;
                 } catch (error) {
                     const message = error instanceof Error ? error.message : String(error);
@@ -556,9 +558,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             return catalogModel;
         }
 
+        const requestedModel = this.resolveModelId(sessionId, model);
         try {
-            await this.backend.setModel(sessionId, model, { flavor: 'mcode' });
-            return model;
+            await this.backend.setModel(sessionId, requestedModel, { flavor: 'mcode' });
+            return requestedModel;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             const detail = message.replace(/\.+$/, '');
@@ -569,6 +572,28 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             });
             return catalogModel;
         }
+    }
+
+    /**
+     * Resolves a requested model to the id the agent publishes.
+     *
+     * The catalog carries the agent's wire ids (`m:provider:model:v:variant`),
+     * while a user may name a model the way the MiniMax CLI does
+     * (`provider/model#variant`). The catalog wins: the CLI form is matched
+     * against the published models, and only a model the agent does not
+     * publish is converted syntactically — so the agent rejects it with its
+     * own message instead of the client guessing an id.
+     */
+    private resolveModelId(sessionId: string, requested: string): string {
+        const catalog = this.backend?.getSessionModelsMetadata(sessionId)?.availableModels ?? [];
+        if (catalog.some((model) => model.modelId === requested)) {
+            return requested;
+        }
+        const byCliForm = catalog.find((model) => acpModelIdToCliModelId(model.modelId) === requested);
+        if (byCliForm) {
+            return byCliForm.modelId;
+        }
+        return cliModelIdToAcpModelId(requested) ?? requested;
     }
 
     private handleAgentMessage(message: AgentMessage): void {
