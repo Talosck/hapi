@@ -433,6 +433,12 @@ describe('createMcodeUsageWatcher', () => {
         const secondPath = join(secondDir, 'messages.jsonl');
         await writeFile(firstPath, `${assistantLine({ messageId: 'first-old' })}\n`);
         await writeFile(secondPath, `${assistantLine({ messageId: 'second-old' })}\n`);
+        // Both journals predate the attach, so the watcher resumes from their
+        // tail. Without the backdating the comparison would depend on the
+        // millisecond the attach happened to land in.
+        const writtenAt = new Date(Date.now() - 60_000);
+        await utimes(firstPath, writtenAt, writtenAt);
+        await utimes(secondPath, writtenAt, writtenAt);
 
         const onUsage = vi.fn();
         const watcher = createMcodeUsageWatcher({ dataDir, onUsage, pollIntervalMs: 10 });
