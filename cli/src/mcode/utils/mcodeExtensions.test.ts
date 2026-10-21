@@ -167,6 +167,20 @@ describe('parseMcodeGoalUpdate', () => {
         expect(parseMcodeGoalUpdate({ sessionId: 'session-1', goal: { goalId: 'goal-1' } })).toBeNull();
         expect(parseMcodeGoalUpdate({ sessionId: 'session-1', goal: goal({ status: 'weird' as never }) })).toBeNull();
     });
+
+    it('rejects a payload without a goal field instead of clearing the goal', () => {
+        // A payload this code does not understand must not erase the goal the
+        // user is watching: only an explicit `goal: null` clears it.
+        expect(parseMcodeGoalUpdate({ sessionId: 'session-1' })).toBeNull();
+    });
+
+    it('accepts the hyphenated status spelling', () => {
+        const update = parseMcodeGoalUpdate({
+            sessionId: 'session-1',
+            goal: goal({ status: 'budget-limited' as never })
+        });
+        expect(update).toMatchObject({ kind: 'goal', goal: { status: 'budget_limited' } });
+    });
 });
 
 describe('toHapiThreadGoal', () => {
@@ -203,5 +217,14 @@ describe('goalLifecycleSignature', () => {
         expect(goalLifecycleSignature({ ...base, status: 'complete' })).not.toBe(goalLifecycleSignature(base));
         expect(goalLifecycleSignature({ ...base, objective: 'Other' })).not.toBe(goalLifecycleSignature(base));
         expect(goalLifecycleSignature({ ...base, tokenBudget: 1 })).not.toBe(goalLifecycleSignature(base));
+    });
+
+    it('changes with the goal id', () => {
+        const base = toHapiThreadGoal(goal(), 'session-1');
+
+        // Two goals with the same objective, status and budget are still two
+        // goals: the second one has to be announced in the chat.
+        expect(goalLifecycleSignature(base, 'goal-1')).not.toBe(goalLifecycleSignature(base, 'goal-2'));
+        expect(goalLifecycleSignature(base, 'goal-1')).toBe(goalLifecycleSignature(base, 'goal-1'));
     });
 });

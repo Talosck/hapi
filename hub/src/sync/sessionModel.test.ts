@@ -255,6 +255,30 @@ describe('session model', () => {
         expect(survivors).toHaveLength(1)
     })
 
+    it('deduplicates mcode sessions that share an mcodeSessionId (resume correlation)', async () => {
+        const store = new Store(':memory:')
+        const events: SyncEvent[] = []
+        const cache = new SessionCache(store, createPublisher(events))
+
+        const oldSession = cache.getOrCreateSession(
+            'mcode-dup-old',
+            { path: '/tmp/project', host: 'localhost', flavor: 'mcode', mcodeSessionId: 'mvs_abc123' },
+            null,
+            'default'
+        )
+        const newSession = cache.getOrCreateSession(
+            'mcode-dup-new',
+            { path: '/tmp/project', host: 'localhost', flavor: 'mcode', mcodeSessionId: 'mvs_abc123' },
+            null,
+            'default'
+        )
+
+        await cache.deduplicateByAgentSessionId(newSession.id)
+
+        const survivors = [oldSession.id, newSession.id].filter((id) => cache.getSession(id) != null)
+        expect(survivors).toHaveLength(1)
+    })
+
     it('preserves service tier from old session when merging into resumed session', async () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []

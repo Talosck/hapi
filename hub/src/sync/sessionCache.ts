@@ -1653,8 +1653,8 @@ export class SessionCache {
 
     private extractAgentSessionId(
         metadata: NonNullable<Session['metadata']>
-    ): { field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'grokSessionId' | 'cursorSessionId' | 'piSessionId' | 'agySessionId' | 'copilotSessionId'; value: string; dedupeKey: string; machineId?: string } | null {
-        const scoped = (field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'grokSessionId' | 'cursorSessionId' | 'piSessionId' | 'agySessionId' | 'copilotSessionId', value: string) => ({
+    ): { field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'grokSessionId' | 'cursorSessionId' | 'piSessionId' | 'agySessionId' | 'copilotSessionId' | 'mcodeSessionId'; value: string; dedupeKey: string; machineId?: string } | null {
+        const scoped = (field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'grokSessionId' | 'cursorSessionId' | 'piSessionId' | 'agySessionId' | 'copilotSessionId' | 'mcodeSessionId', value: string) => ({
             field,
             value,
             dedupeKey: field === 'piSessionId' ? `${field}:${metadata.machineId ?? 'unscoped'}:${value}` : `${field}:${value}`,
@@ -1669,6 +1669,10 @@ export class SessionCache {
         if (metadata.piSessionId) return scoped('piSessionId', metadata.piSessionId)
         if (metadata.agySessionId) return scoped('agySessionId', metadata.agySessionId)
         if (metadata.copilotSessionId) return scoped('copilotSessionId', metadata.copilotSessionId)
+        // MiniMax Code: two HAPI sessions over one native conversation (a
+        // resume of a session the web still lists) must collapse into one,
+        // like every other flavor's native session id.
+        if (metadata.mcodeSessionId) return scoped('mcodeSessionId', metadata.mcodeSessionId)
         return null
     }
 

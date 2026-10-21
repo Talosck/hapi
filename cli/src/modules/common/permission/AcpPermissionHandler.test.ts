@@ -49,6 +49,76 @@ describe('AcpPermissionHandler missing-response hook', () => {
     });
 });
 
+describe('AcpPermissionHandler decision mapping', () => {
+    function createHandler(options: PermissionRequest['options']) {
+        let state: AgentState = { requests: {}, completedRequests: {} };
+        let onPermissionRequest: ((request: PermissionRequest) => void) | null = null;
+        let permissionRpc: ((response: AcpPermissionResponseMessage) => Promise<void>) | null = null;
+
+        const client = {
+            rpcHandlerManager: {
+                registerHandler(method: string, handler: (response: AcpPermissionResponseMessage) => Promise<void>) {
+                    if (method === RPC_METHODS.Permission) {
+                        permissionRpc = handler;
+                    }
+                }
+            },
+            updateAgentState(handler: (current: AgentState) => AgentState) {
+                state = handler(state);
+            }
+        };
+
+        const backend = {
+            onPermissionRequest: vi.fn((handler: (request: PermissionRequest) => void) => {
+                onPermissionRequest = handler;
+            }),
+            respondToPermission: vi.fn(async () => {})
+        } as unknown as AgentBackend;
+
+        new AcpPermissionHandler(client as never, backend, () => 'default');
+        onPermissionRequest!({
+            id: 'acp-request-1',
+            sessionId: 'acp-session-1',
+            toolCallId: 'call-1',
+            title: 'Bash',
+            options
+        });
+
+        return { client, backend, respond: (response: AcpPermissionResponseMessage) => permissionRpc!(response) };
+    }
+
+    it('never resolves a denial to an allow option', async () => {
+        // An agent that publishes no reject option must not make "deny" pick
+        // the first (allow) option: the tool would run after the user said no.
+        const { respond, backend } = createHandler([
+            { optionId: 'opt-allow-once', kind: 'allow_once', name: 'Allow' }
+        ]);
+
+        await respond({ id: 'acp-request-1', approved: false, decision: 'denied' });
+
+        expect(backend.respondToPermission).toHaveBeenCalledWith(
+            'acp-session-1',
+            expect.anything(),
+            { outcome: 'cancelled' }
+        );
+    });
+
+    it('resolves a denial to the reject option when the agent publishes one', async () => {
+        const { respond, backend } = createHandler([
+            { optionId: 'opt-allow-once', kind: 'allow_once', name: 'Allow' },
+            { optionId: 'opt-reject-once', kind: 'reject_once', name: 'Reject' }
+        ]);
+
+        await respond({ id: 'acp-request-1', approved: false, decision: 'denied' });
+
+        expect(backend.respondToPermission).toHaveBeenCalledWith(
+            'acp-session-1',
+            expect.anything(),
+            { outcome: 'selected', optionId: 'opt-reject-once' }
+        );
+    });
+});
+
 describe('AcpPermissionHandler cancelAll', () => {
     it('cancels only the requests it registered', async () => {
         let state: AgentState = { requests: {}, completedRequests: {} };

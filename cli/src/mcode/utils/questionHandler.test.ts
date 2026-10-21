@@ -265,6 +265,60 @@ describe('McodeQuestionHandler', () => {
         expect(submitAnswer).toHaveBeenCalledWith('Q: Why?\nA: because the tests failed');
     });
 
+    it('keeps a free-text answer when the form has no Other field', async () => {
+        // The web always offers an "Other" row. When the agent's form has no
+        // `__other` property the typed text has no place in the form content,
+        // but the user still answered: the answer must reach the agent
+        // instead of being reported as "No answers were provided".
+        const hint: McodeAskUserCallHint = {
+            id: 'call_function_4',
+            steps: [{
+                id: 'pick',
+                header: 'Pick',
+                question: 'Which option do you prefer?',
+                description: null,
+                options: [
+                    { id: 'alpha', label: 'Alpha', description: null },
+                    { id: 'beta', label: 'Beta', description: null }
+                ],
+                multiSelect: false
+            }]
+        };
+        const { questionHandler, getState, elicit, submitAnswer } = createHarness(hint);
+        const resultPromise = elicit({
+            mode: 'form',
+            sessionId: 'acp-session-1',
+            message: 'Which option do you prefer?',
+            requestedSchema: {
+                type: 'object',
+                properties: {
+                    pick: {
+                        type: 'string',
+                        title: 'Which option do you prefer?',
+                        oneOf: [
+                            { const: 'alpha', title: 'Alpha' },
+                            { const: 'beta', title: 'Beta' }
+                        ]
+                    }
+                }
+            }
+        });
+
+        await questionHandler.handleResponse({
+            id: 'call_function_4',
+            approved: true,
+            answers: { '0': ['because the API is rate limited'] }
+        });
+
+        await expect(resultPromise).resolves.toEqual({ action: 'decline' });
+        expect(submitAnswer).toHaveBeenCalledWith(
+            'Q: Which option do you prefer?\nA: because the API is rate limited'
+        );
+        expect(getState().completedRequests?.['call_function_4']).toMatchObject({
+            status: 'approved'
+        });
+    });
+
     it('declines when no answers are provided', async () => {
         const { questionHandler, elicit, getState, submitAnswer } = createHarness(choiceHint);
         const resultPromise = elicit(choiceRequest);

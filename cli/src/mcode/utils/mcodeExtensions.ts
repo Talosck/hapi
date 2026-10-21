@@ -129,7 +129,7 @@ export function normalizeDelegationStatus(value: unknown): McodeDelegationStatus
 }
 
 function normalizeGoalStatus(value: unknown): McodeGoalStatus | null {
-    const raw = readString(value)?.trim().toLowerCase();
+    const raw = readString(value)?.trim().toLowerCase().replaceAll('-', '_');
     if (!raw) return null;
     if (raw === 'active' || raw === 'paused' || raw === 'blocked' || raw === 'complete'
         || raw === 'budget_limited' || raw === 'usage_limited') {
@@ -240,11 +240,16 @@ export function toSubagentSnapshotMembers(snapshot: McodeDelegationSnapshot): Su
 /**
  * Parses a `mcode/session/goal_update` payload. A cleared goal arrives as
  * `{ goal: null, goalId }`.
+ *
+ * A payload without a `goal` field is malformed, not a cleared goal: treating
+ * it as "cleared" would erase the goal the user is watching because of a
+ * payload this code does not understand.
  */
 export function parseMcodeGoalUpdate(params: unknown): McodeGoalUpdate | null {
     if (!isObject(params)) return null;
+    if (!('goal' in params)) return null;
     const goal = params.goal;
-    if (goal === null || goal === undefined) {
+    if (goal === null) {
         return { kind: 'cleared', goalId: readString(params.goalId) ?? null };
     }
     if (!isObject(goal)) return null;
@@ -304,7 +309,11 @@ export function toHapiThreadGoal(goal: McodeGoal, threadId: string): ThreadGoal 
  * A signature of the goal's lifecycle: the fields that decide whether a new
  * goal card belongs in the chat. Token accounting updates do not change it,
  * so a running goal produces one card instead of one per accounting update.
+ *
+ * The goal id is part of the signature: two goals with the same objective,
+ * status and budget are still two goals, and the second one has to be
+ * announced.
  */
-export function goalLifecycleSignature(goal: ThreadGoal): string {
-    return [goal.objective, goal.status, goal.tokenBudget ?? 'unlimited'].join('|');
+export function goalLifecycleSignature(goal: ThreadGoal, goalId?: string | null): string {
+    return [goalId ?? '', goal.objective, goal.status, goal.tokenBudget ?? 'unlimited'].join('|');
 }

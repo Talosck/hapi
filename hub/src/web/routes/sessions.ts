@@ -712,6 +712,12 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             if (flavor === 'grok') {
                 return c.json({ error: 'Model selection can only be changed for remote Grok sessions' }, 409)
             }
+            if (flavor === 'mcode') {
+                // The local MiniMax Code TUI owns the model: the launcher only
+                // passes --model when it spawns the TUI, so a model change
+                // recorded here would never reach the agent.
+                return c.json({ error: 'Model selection can only be changed for remote MiniMax Code sessions' }, 409)
+            }
         }
 
         try {
@@ -782,6 +788,10 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
         if (flavor === 'grok' && sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
             return c.json({ error: 'Effort can only be changed for remote Grok sessions' }, 409)
+        }
+        if (flavor === 'mcode' && sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
+            // The local MiniMax Code TUI owns the thinking effort as well.
+            return c.json({ error: 'Effort can only be changed for remote MiniMax Code sessions' }, 409)
         }
 
         try {

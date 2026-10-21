@@ -2218,7 +2218,16 @@ function SessionChatInner(props: SessionChatProps) {
                                             ? (props.session.active && !controlledByUser
                                                 ? handleModelChange
                                                 : undefined)
-                                        : handleModelChange
+                                            : agentFlavor === 'mcode'
+                                                // The local MiniMax Code TUI owns
+                                                // the model: the launcher only
+                                                // passes --model when it spawns
+                                                // the TUI, so a change recorded
+                                                // here would never reach the agent.
+                                                ? (props.session.active && !controlledByUser && !mcodeModelsState.error
+                                                    ? handleModelChange
+                                                    : undefined)
+                                                : handleModelChange
                         }
                         onModelEffortChange={
                             agentFlavor === 'cursor'

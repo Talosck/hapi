@@ -28,12 +28,24 @@ export type AcpPermissionHandlerOptions = {
     handleMissingResponse?: (response: AcpPermissionResponseMessage) => Promise<boolean>
 }
 
+const ALLOW_OPTION_KINDS = ['allow_always', 'allow_once'];
+const REJECT_OPTION_KINDS = ['reject_once', 'reject_always'];
+
 function pickOptionId(request: PermissionRequest, preferredKinds: string[]): string | null {
     for (const kind of preferredKinds) {
         const match = request.options.find((option) => option.kind === kind)
         if (match) return match.optionId
     }
-    return request.options[0]?.optionId ?? null
+    return null
+}
+
+/**
+ * The option an approval falls back to when the agent published no allow
+ * option of its own. A reject option is never a candidate: answering "the
+ * user picked the reject option" for an approval would deny the tool.
+ */
+function pickFallbackAllowOptionId(request: PermissionRequest): string | null {
+    return request.options.find((option) => !REJECT_OPTION_KINDS.includes(option.kind))?.optionId ?? null
 }
 
 function mapDecisionToOutcome(
@@ -42,14 +54,17 @@ function mapDecisionToOutcome(
 ): PermissionResponse {
     if (decision === 'abort') return { outcome: 'cancelled' }
     if (decision === 'approved_for_session') {
-        const optionId = pickOptionId(request, ['allow_always', 'allow_once'])
+        const optionId = pickOptionId(request, ALLOW_OPTION_KINDS) ?? pickFallbackAllowOptionId(request)
         return optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' }
     }
     if (decision === 'approved') {
-        const optionId = pickOptionId(request, ['allow_once', 'allow_always'])
+        const optionId = pickOptionId(request, ['allow_once', 'allow_always']) ?? pickFallbackAllowOptionId(request)
         return optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' }
     }
-    const optionId = pickOptionId(request, ['reject_once', 'reject_always'])
+    // A denial must never resolve to an allow option: the tool would run
+    // after the user said no. Without a reject option the request is
+    // cancelled, which the agent reads as "not granted".
+    const optionId = pickOptionId(request, REJECT_OPTION_KINDS)
     return optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' }
 }
 

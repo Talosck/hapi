@@ -136,12 +136,17 @@ export class McodeQuestionHandler {
             return true;
         }
 
-        const content = buildElicitationContent(pending.specs, response.answers);
-        const hasAnswer = Object.keys(content).length > 0;
-        const hasRequiredAnswer = pending.specs.every((spec) => (
+        // The answer is judged by what the user actually typed, not by the
+        // content the ACP form would have carried: a free-text "Other" answer
+        // has no place in a schema without an `__other` property, and judging
+        // it by the form silently dropped what the user wrote.
+        const answered = answeredStepKeys(response.answers);
+        const hasAnswer = answered.size > 0;
+        const hasRequiredAnswer = pending.specs.every((spec, index) => (
             !spec.required
-            || content[spec.id] !== undefined
-            || (spec.otherFieldId !== null && content[spec.otherFieldId] !== undefined)
+            || answered.has(spec.id)
+            || answered.has(String(index))
+            || (spec.otherFieldId !== null && answered.has(spec.otherFieldId))
         ));
 
         if (!hasAnswer || !hasRequiredAnswer) {
@@ -498,62 +503,23 @@ function normalizeAnswers(
     return flat;
 }
 
-function buildElicitationContent(
-    specs: McodeQuestionSpec[],
+/**
+ * The keys the user actually answered: a step id, a step index, or the id of
+ * a step's free-text field. An entry counts as answered when it holds a
+ * non-empty value.
+ */
+function answeredStepKeys(
     answers: AcpPermissionResponseMessage['answers']
-): Record<string, unknown> {
+): Set<string> {
+    const answered = new Set<string>();
     const flat = normalizeAnswers(answers);
-    const content: Record<string, unknown> = {};
-    if (!flat) return content;
-
-    specs.forEach((spec, index) => {
-        const raw = flat[spec.id] ?? flat[String(index)] ?? [];
-        const selectedIds: string[] = [];
-        const otherTexts: string[] = [];
-
-        for (const value of raw) {
-            const trimmed = value.trim();
-            if (!trimmed) continue;
-            const option = spec.options.find((candidate) => (
-                candidate.id === value
-                || candidate.label === value
-                || candidate.label === trimmed
-            ));
-            if (option) {
-                selectedIds.push(option.id);
-            } else {
-                otherTexts.push(trimmed);
-            }
+    if (!flat) return answered;
+    for (const [key, values] of Object.entries(flat)) {
+        if (values.some((value) => value.trim().length > 0)) {
+            answered.add(key);
         }
-
-        const otherText = otherTexts.join('\n').trim();
-
-        if (spec.multiSelect) {
-            if (selectedIds.length > 0) {
-                content[spec.id] = selectedIds;
-            }
-            if (otherText) {
-                if (spec.otherFieldId) {
-                    content[spec.otherFieldId] = otherText;
-                } else if (spec.options.length === 0) {
-                    content[spec.id] = otherText;
-                }
-            }
-            return;
-        }
-
-        // mcode treats the dynamic "Other" field as authoritative for
-        // single-select steps, so only one of the two keys is sent.
-        if (otherText && spec.otherFieldId) {
-            content[spec.otherFieldId] = otherText;
-        } else if (selectedIds[0]) {
-            content[spec.id] = selectedIds[0];
-        } else if (otherText && spec.options.length === 0) {
-            content[spec.id] = otherText;
-        }
-    });
-
-    return content;
+    }
+    return answered;
 }
 
 /** Flat `{ index: [labels] }` shape used by the question card's answered view. */
