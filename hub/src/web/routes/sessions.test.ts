@@ -1150,6 +1150,51 @@ describe('sessions routes', () => {
         ])
     })
 
+    it('rejects MiniMax Code permission mode changes for local sessions', async () => {
+        // The local TUI owns the permission policy, so a change recorded here
+        // would never reach the agent.
+        const session = createSession({
+            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'mcode' },
+            agentState: {
+                controlledByUser: true,
+                requests: {},
+                completedRequests: {}
+            }
+        })
+        const { app, applySessionConfigCalls } = createApp(session)
+
+        const response = await app.request('/api/sessions/session-1/permission-mode', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ mode: 'bypassPermissions' })
+        })
+
+        expect(response.status).toBe(409)
+        expect(await response.json()).toEqual({
+            error: 'Permission mode can only be changed for remote MiniMax Code sessions'
+        })
+        expect(applySessionConfigCalls).toEqual([])
+    })
+
+    it('applies MiniMax Code permission mode changes for remote sessions', async () => {
+        const session = createSession({
+            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'mcode' }
+        })
+        const { app, applySessionConfigCalls } = createApp(session)
+
+        const response = await app.request('/api/sessions/session-1/permission-mode', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ mode: 'bypassPermissions' })
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ ok: true })
+        expect(applySessionConfigCalls).toEqual([
+            ['session-1', { permissionMode: 'bypassPermissions' }]
+        ])
+    })
+
     it('applies permission mode changes for inactive sessions', async () => {
         const session = createSession({
             active: false,

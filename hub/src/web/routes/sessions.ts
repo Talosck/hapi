@@ -603,6 +603,12 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         if (flavor === 'opencode' && mode === 'plan' && sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
             return c.json({ error: 'OpenCode plan mode is only supported for remote sessions' }, 409)
         }
+        if (flavor === 'mcode' && sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
+            // The local MiniMax Code TUI owns the permission policy: the
+            // launcher only passes the model when it spawns the TUI, so a
+            // permission mode recorded here would never reach the agent.
+            return c.json({ error: 'Permission mode can only be changed for remote MiniMax Code sessions' }, 409)
+        }
 
         try {
             await engine.applySessionConfig(sessionResult.sessionId, { permissionMode: mode })
