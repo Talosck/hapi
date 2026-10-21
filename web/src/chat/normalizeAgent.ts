@@ -46,6 +46,14 @@ function normalizeAgentEvent(value: unknown): AgentEvent | null {
                 : {})
         } as AgentEvent
     }
+    if (value.type === 'plan-removed') {
+        // The event names the plan card to drop. Without an id there is
+        // nothing to remove, so the event is dropped instead of removing an
+        // arbitrary plan.
+        const planId = asString(value.planId ?? value.plan_id)
+        if (!planId) return null
+        return { type: 'plan-removed', planId }
+    }
     return value as AgentEvent
 }
 
@@ -719,7 +727,14 @@ function mapAgyToolCall(
 }
 
 export function isSkippableAgentContent(content: unknown): boolean {
-    if (!isObject(content) || content.type !== 'output') return false
+    if (!isObject(content) || typeof content.type !== 'string') return false
+    if (content.type === 'event') {
+        // An event the web cannot render (a plan removal without a plan id, a
+        // goal with an unknown status) is dropped here: the raw-JSON stringify
+        // fallback in normalize.ts would show it as a blob of JSON in the chat.
+        return normalizeAgentEvent(content.data) === null
+    }
+    if (content.type !== 'output') return false
     const data = isObject(content.data) ? content.data : null
     if (!data) return false
     if (Boolean(data.isMeta) || Boolean(data.isCompactSummary)) return true

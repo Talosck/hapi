@@ -63,6 +63,9 @@ export type AgentEvent =
     // members are the session's subagents; the snapshot is session state, not
     // a timeline entry.
     | { type: 'subagent-snapshot'; members: SubagentSnapshotMember[] }
+    // The agent withdrew a plan it had published: the plan card keyed by this
+    // id is dropped from the transcript.
+    | { type: 'plan-removed'; planId: string }
     | { type: 'abort-restore'; text: string }
     | ({ type: string } & Record<string, unknown>)
 

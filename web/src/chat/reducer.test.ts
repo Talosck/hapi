@@ -126,6 +126,81 @@ describe('reduceChatBlocks', () => {
         }))
     })
 
+    it('drops the plan card the agent withdrew', () => {
+        const planDocument = decryptedMessage('plan-doc', {
+            role: 'agent',
+            content: {
+                type: 'codex',
+                data: {
+                    type: 'plan-document',
+                    planId: 'plan-1',
+                    format: 'markdown',
+                    content: '# Plan\n\n1. Do it'
+                }
+            }
+        }, 1)
+        const planRemoved = decryptedMessage('plan-removed', {
+            role: 'agent',
+            content: {
+                id: 'event-1',
+                type: 'event',
+                data: { type: 'plan-removed', planId: 'plan-1' }
+            }
+        }, 2)
+
+        const withPlan = [planDocument]
+            .map(message => normalizeDecryptedMessage(message))
+            .filter((message): message is NormalizedMessage => message !== null)
+        expect(reduceChatBlocks(withPlan, null).blocks).toContainEqual(expect.objectContaining({
+            kind: 'tool-call',
+            id: 'plan-document:plan-1'
+        }))
+
+        const messages = [planDocument, planRemoved]
+            .map(message => normalizeDecryptedMessage(message))
+            .filter((message): message is NormalizedMessage => message !== null)
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.blocks).not.toContainEqual(expect.objectContaining({
+            kind: 'tool-call',
+            id: 'plan-document:plan-1'
+        }))
+    })
+
+    it('keeps a plan card the agent did not withdraw', () => {
+        const messages = [
+            decryptedMessage('plan-doc', {
+                role: 'agent',
+                content: {
+                    type: 'codex',
+                    data: {
+                        type: 'plan-document',
+                        planId: 'plan-1',
+                        format: 'markdown',
+                        content: '# Plan\n\n1. Do it'
+                    }
+                }
+            }, 1),
+            decryptedMessage('other-plan-removed', {
+                role: 'agent',
+                content: {
+                    id: 'event-2',
+                    type: 'event',
+                    data: { type: 'plan-removed', planId: 'plan-2' }
+                }
+            }, 2)
+        ].map(message => normalizeDecryptedMessage(message))
+            .filter((message): message is NormalizedMessage => message !== null)
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.blocks).toContainEqual(expect.objectContaining({
+            kind: 'tool-call',
+            id: 'plan-document:plan-1'
+        }))
+    })
+
     it('ignores child agent usage when calculating parent latest usage', () => {
         const messages: NormalizedMessage[] = [
             {

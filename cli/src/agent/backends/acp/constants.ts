@@ -5,6 +5,7 @@ export const ACP_SESSION_UPDATE_TYPES = {
     toolCallUpdate: 'tool_call_update',
     plan: 'plan',
     planUpdate: 'plan_update',
+    planRemoved: 'plan_removed',
     usageUpdate: 'usage_update',
     sessionInfoUpdate: 'session_info_update',
     currentModeUpdate: 'current_mode_update',

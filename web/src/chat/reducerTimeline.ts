@@ -384,6 +384,21 @@ export function reduceTimeline(
         }
     }
 
+    /**
+     * Drops a plan card from the timeline. The agent withdrew the plan, so
+     * the card must not stay in the transcript.
+     */
+    const removePlanDocumentBlock = (toolId: string): void => {
+        const index = blocks.findIndex((candidate) => (
+            candidate.kind === 'tool-call' && candidate.tool.id === toolId
+        ))
+        if (index === -1) return
+        const [removed] = blocks.splice(index, 1)
+        if (removed.kind === 'tool-call') {
+            toolBlocksById.delete(removed.tool.id)
+        }
+    }
+
     const removeAgentRunBlock = (cardId: string): void => {
         const block = agentRunBlocksByCardId.get(cardId)
         if (!block) return
@@ -541,6 +556,16 @@ export function reduceTimeline(
             // abort-restore is a side-effect signal for the web composer,
             // not a visible chat event. Skip it in the timeline.
             if (msg.content.type === 'abort-restore') {
+                continue
+            }
+            // The agent withdrew a plan (MiniMax Code removes the plan it
+            // attached to a questionnaire once the questionnaire is answered).
+            // The plan card is keyed by the plan id, so it can be dropped.
+            if (msg.content.type === 'plan-removed') {
+                const planId = getEventString(msg.content as Record<string, unknown>, 'planId')
+                if (planId) {
+                    removePlanDocumentBlock(`plan-document:${planId}`)
+                }
                 continue
             }
             if (msg.content.type === 'turn-summary') {

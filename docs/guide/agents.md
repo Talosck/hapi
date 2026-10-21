@@ -447,8 +447,9 @@ same conversation.
 - MiniMax Code does not stream the tool calls of a delegated subagent over
   ACP, so the delegation tree shows the subagents and their state but not the
   steps they ran.
-- MiniMax Code never emits the ACP `plan_removed` update, so a plan document
-  stays in the transcript after the review is answered.
+- MiniMax Code withdraws the ACP plan it attached to a questionnaire once the
+  questionnaire is answered; HAPI follows the `plan_removed` update and drops
+  the plan card from the transcript.
 - Signing in must be completed outside the HAPI web UI.
 
 ## DeepSeek Harness

@@ -192,7 +192,7 @@ const MATERIALIZATION_RETRY_MAX_MS = 30_000
  * (delegation snapshot, thread goal) the newest one is the only one that
  * matters.
  */
-const LOSSLESS_SESSION_EVENT_TYPES = new Set(['message', 'error', 'compact-summary'])
+const LOSSLESS_SESSION_EVENT_TYPES = new Set(['message', 'error', 'compact-summary', 'plan-removed'])
 
 function isTransientMaterializationError(error: unknown): boolean {
     if (!axios.isAxiosError(error)) {
@@ -1208,6 +1208,12 @@ export class ApiSessionClient extends EventEmitter {
     } | {
         type: 'thread-goal-cleared'
         threadId?: string
+    } | {
+        // The agent withdrew a plan it had published (MiniMax Code removes
+        // the plan it attached to a questionnaire once it is answered). The
+        // web drops the matching plan card.
+        type: 'plan-removed'
+        planId: string
     }, id?: string): void {
         const content = {
             role: 'agent',

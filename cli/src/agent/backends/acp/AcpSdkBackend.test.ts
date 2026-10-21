@@ -130,6 +130,32 @@ describe('AcpSdkBackend', () => {
         expect(updates).toEqual([]);
     });
 
+    it('forwards a withdrawn plan to the session state listener', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const updates: unknown[] = [];
+        backend.setSessionStateListener((update) => updates.push(update));
+
+        const backendInternal = backend as unknown as {
+            handleSessionUpdate: (params: unknown) => void;
+        };
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.planRemoved,
+                planId: 'plan-1'
+            }
+        });
+        // A removal without a plan id names no plan: it must not remove one.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: { sessionUpdate: ACP_SESSION_UPDATE_TYPES.planRemoved }
+        });
+
+        expect(updates).toEqual([
+            { kind: 'plan-removed', sessionId: 'session-1', planId: 'plan-1' }
+        ]);
+    });
+
     it('refreshes the cached config options from a config option update', () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         const backendInternal = backend as unknown as {

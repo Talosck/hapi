@@ -60,7 +60,12 @@ export type AcpSessionStateUpdate =
     /** The agent switched its ACP session mode (`default` / `plan`, …). */
     | { kind: 'mode'; sessionId: string | null; modeId: string }
     /** The agent re-published its config options (model, thinking effort, …). */
-    | { kind: 'config-options'; sessionId: string | null };
+    | { kind: 'config-options'; sessionId: string | null }
+    /**
+     * The agent withdrew a plan it had published. MiniMax Code emits this
+     * once the plan it attached to a questionnaire has been answered.
+     */
+    | { kind: 'plan-removed'; sessionId: string | null; planId: string };
 
 /** One command advertised by the agent over ACP (`available_commands`). */
 export type AcpAvailableCommand = {
@@ -1127,6 +1132,17 @@ export class AcpSdkBackend implements AgentBackend {
             const modeId = asString(update.currentModeId);
             if (!modeId) return;
             this.sessionStateListener?.({ kind: 'mode', sessionId, modeId });
+            return;
+        }
+
+        if (update.sessionUpdate === ACP_SESSION_UPDATE_TYPES.planRemoved) {
+            // The agent withdrew a plan it published before (MiniMax Code
+            // removes the plan it attached to a questionnaire once the
+            // questionnaire is answered). The plan card has to disappear with
+            // it, otherwise the transcript keeps a plan nobody is working on.
+            const planId = asString(update.planId);
+            if (!planId) return;
+            this.sessionStateListener?.({ kind: 'plan-removed', sessionId, planId });
         }
     }
 

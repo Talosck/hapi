@@ -1264,6 +1264,35 @@ describe('normalizeDecryptedMessage', () => {
         expect(normalizeDecryptedMessage(message)).toBeNull()
     })
 
+    it('normalizes a withdrawn plan as a plan-removed event', () => {
+        const message = makeMessage({
+            role: 'agent',
+            content: {
+                id: 'event-1',
+                type: 'event',
+                data: { type: 'plan-removed', planId: 'plan-1' }
+            }
+        })
+
+        expect(normalizeDecryptedMessage(message)).toMatchObject({
+            role: 'event',
+            content: { type: 'plan-removed', planId: 'plan-1' }
+        })
+    })
+
+    it('drops a withdrawn plan without a plan id', () => {
+        const message = makeMessage({
+            role: 'agent',
+            content: {
+                id: 'event-2',
+                type: 'event',
+                data: { type: 'plan-removed' }
+            }
+        })
+
+        expect(normalizeDecryptedMessage(message)).toBeNull()
+    })
+
     it('normalizes Codex token_count as usage data for context display', () => {
         const message = makeMessage({
             role: 'agent',
