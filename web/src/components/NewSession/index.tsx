@@ -60,7 +60,7 @@ import { EffortField } from './EffortField'
 import { shouldEnableOpencodeModelDiscovery } from './opencodeModelsGate'
 import { buildGrokEffortOptions, buildGrokModelOptions, shouldEnableGrokModelDiscovery } from './grokModels'
 import { buildKimiModelOptions, shouldEnableKimiModelDiscovery } from './grokModels'
-import { buildMcodeModelOptions, shouldEnableMcodeModelDiscovery } from './mcodeModels'
+import { buildMcodeModelOptions, shouldEnableMcodeModelDiscovery, shouldResetMcodeModel } from './mcodeModels'
 import { groupModelsByProvider } from '@/components/AssistantChat/piModelGroups'
 import { isThinkingLevelSupported } from '@/components/AssistantChat/piThinkingLevelOptions'
 import {
@@ -992,14 +992,14 @@ export function NewSession(props: {
         model
     ])
     useEffect(() => {
-        if (
-            agent === 'mcode'
-            && deferredDirectoryExists === true
-            && !mcodeModelsState.isLoading
-            && !mcodeModelsState.error
-            && model !== 'auto'
-            && !mcodeModelsState.availableModels.some((candidate) => candidate.modelId === model)
-        ) {
+        if (shouldResetMcodeModel({
+            agent,
+            cwdExists: deferredDirectoryExists,
+            isLoading: mcodeModelsState.isLoading,
+            error: mcodeModelsState.error,
+            availableModels: mcodeModelsState.availableModels,
+            model
+        })) {
             setModel('auto')
         }
     }, [

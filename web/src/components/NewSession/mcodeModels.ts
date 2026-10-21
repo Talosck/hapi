@@ -14,6 +14,31 @@ export function shouldEnableMcodeModelDiscovery(args: {
 }
 
 /**
+ * Whether a MiniMax Code model selection has to fall back to the default.
+ *
+ * A model the agent does not publish cannot be selected, so the form falls
+ * back to "Default". The catalog has to be known first: an empty catalog
+ * means the agent published no model at all, not that the selection is
+ * wrong.
+ */
+export function shouldResetMcodeModel(args: {
+    agent: AgentType
+    cwdExists: boolean | undefined
+    isLoading: boolean
+    error: string | null
+    availableModels: McodeModelSummary[]
+    model: string
+}): boolean {
+    return args.agent === 'mcode'
+        && args.cwdExists === true
+        && !args.isLoading
+        && !args.error
+        && args.availableModels.length > 0
+        && args.model !== 'auto'
+        && !args.availableModels.some((candidate) => candidate.modelId === args.model)
+}
+
+/**
  * MiniMax Code options for the create-session selector: Default plus one
  * entry per discovered model. `value` is the agent's ACP wire model id
  * (`m:...:u` or `m:...:v:<variant>`), which is what

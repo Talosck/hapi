@@ -1,8 +1,50 @@
 import { describe, expect, it } from 'vitest'
 import {
     buildMcodeModelOptions,
-    shouldEnableMcodeModelDiscovery
+    shouldEnableMcodeModelDiscovery,
+    shouldResetMcodeModel
 } from './mcodeModels'
+
+describe('MiniMax Code model reset', () => {
+    const base = {
+        agent: 'mcode' as const,
+        cwdExists: true as boolean | undefined,
+        isLoading: false,
+        error: null as string | null,
+        availableModels: [{ modelId: 'm:minimax:MiniMax-M3:v:', name: 'M3' }],
+        model: 'm:minimax:MiniMax-M3:u'
+    }
+
+    it('resets a model the agent does not publish', () => {
+        expect(shouldResetMcodeModel(base)).toBe(true)
+    })
+
+    it('keeps a model the agent publishes', () => {
+        expect(shouldResetMcodeModel({ ...base, model: 'm:minimax:MiniMax-M3:v:' })).toBe(false)
+    })
+
+    it('keeps the default selection', () => {
+        expect(shouldResetMcodeModel({ ...base, model: 'auto' })).toBe(false)
+    })
+
+    it('keeps the selection while the catalog is still loading', () => {
+        expect(shouldResetMcodeModel({ ...base, isLoading: true })).toBe(false)
+    })
+
+    it('keeps the selection when the catalog failed to load', () => {
+        expect(shouldResetMcodeModel({ ...base, error: 'boom' })).toBe(false)
+    })
+
+    it('keeps the selection when the agent published no model at all', () => {
+        // An empty catalog means the agent has no model picker, not that the
+        // selection is wrong — the effort reset keeps the same guard.
+        expect(shouldResetMcodeModel({ ...base, availableModels: [] })).toBe(false)
+    })
+
+    it('ignores other agents', () => {
+        expect(shouldResetMcodeModel({ ...base, agent: 'claude' })).toBe(false)
+    })
+})
 
 describe('MiniMax Code Create-session options', () => {
     it('enables model discovery only for an existing cwd on the target machine', () => {
