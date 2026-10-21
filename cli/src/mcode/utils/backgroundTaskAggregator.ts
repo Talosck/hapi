@@ -69,6 +69,12 @@ type TrackedTask = {
     polled: boolean;
     /** True once the launch result was forwarded and the card is completed. */
     launchResultForwarded: boolean;
+    /**
+     * True once the task was counted as completed. The hub counter and the
+     * card must agree, so a task that was already released (or already
+     * finished) is never counted or completed a second time.
+     */
+    completed: boolean;
 };
 
 type ParsedTaskResult = {
@@ -248,6 +254,9 @@ export class BackgroundTaskAggregator {
             task.launchResultForwarded = true;
             // We can no longer observe this task, so release both the card and
             // the hub counter instead of leaving a permanently "running" entry.
+            // The task stays tracked: a later turn may still poll it, and that
+            // poll must not count a second completion.
+            task.completed = true;
             this.completedCount += 1;
             forwarded.push(held);
         }
@@ -268,6 +277,10 @@ export class BackgroundTaskAggregator {
         const forwarded: AgentMessage[] = [];
 
         for (const task of this.tasks.values()) {
+            // A task that was already released has a complete card and was
+            // already counted; completing it again would both duplicate the
+            // card and push the hub counter below zero.
+            if (task.completed) continue;
             forwarded.push({
                 type: 'tool_result',
                 id: task.callId,
@@ -277,6 +290,7 @@ export class BackgroundTaskAggregator {
                 },
                 status: 'completed'
             });
+            task.completed = true;
             this.completedCount += 1;
         }
 
@@ -312,6 +326,14 @@ export class BackgroundTaskAggregator {
         if (BACKGROUND_LAUNCH_TOOLS.has(call.name)) {
             const parsed = parseTaskResult(message.output);
             if (isBackgroundLaunch(parsed) && parsed.taskId) {
+                const existing = this.tasks.get(parsed.taskId);
+                if (existing) {
+                    // The same task id was launched twice. Tracking it again
+                    // would orphan the first card (its held result would never
+                    // be released) and count a second start, so the duplicate
+                    // launch is forwarded as a plain result instead.
+                    return [message];
+                }
                 this.tasks.set(parsed.taskId, {
                     taskId: parsed.taskId,
                     callId: message.id,
@@ -319,7 +341,8 @@ export class BackgroundTaskAggregator {
                     input: call.input,
                     status: parsed.status,
                     polled: false,
-                    launchResultForwarded: false
+                    launchResultForwarded: false,
+                    completed: false
                 });
                 this.startedCount += 1;
                 this.heldLaunchResults.set(message.id, message);
@@ -373,7 +396,13 @@ export class BackgroundTaskAggregator {
         if (terminal) {
             this.tasks.delete(task.taskId);
             this.heldLaunchResults.delete(task.callId);
-            this.completedCount += 1;
+            // A task that was already released (its card was completed at the
+            // end of an earlier turn) must not be counted a second time: the
+            // hub counter would drop below zero and hide a running task.
+            if (!task.completed) {
+                task.completed = true;
+                this.completedCount += 1;
+            }
         }
 
         return [update];

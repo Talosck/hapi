@@ -57,11 +57,20 @@ describe('findMcodeSessionDirFromIndex', () => {
     it('resolves the dated directory from the runtime index', async () => {
         const dataDir = await createTempDir();
         const relativeDir = '2026/10/20/09-20-41-291-session_bXZzX2E5';
+        await mkdir(join(dataDir, 'v2', 'sessions', relativeDir), { recursive: true });
         const readRelativeDir = vi.fn(async () => relativeDir);
 
         await expect(findMcodeSessionDirFromIndex('mvs_1', dataDir, readRelativeDir))
             .resolves.toBe(join(dataDir, 'v2', 'sessions', relativeDir));
         expect(readRelativeDir).toHaveBeenCalledWith('mvs_1', dataDir);
+    });
+
+    it('ignores an index entry that points at a directory that no longer exists', async () => {
+        const dataDir = await createTempDir();
+        const readRelativeDir = vi.fn(async () => '2026/10/20/09-20-41-291-session_gone');
+
+        await expect(findMcodeSessionDirFromIndex('mvs_1', dataDir, readRelativeDir))
+            .resolves.toBeNull();
     });
 
     it('reports a missing index entry as not found', async () => {
@@ -123,12 +132,24 @@ describe('findMcodeSessionDir', () => {
         const dataDir = await createTempDir();
         const treeDay = { year: '2026', month: '10', day: '20' };
         const treeDir = await createSessionDir(dataDir, treeDay, 'mvs_target');
+        const indexedRelativeDir = '2025/01/02/03-04-05-006-session_x';
+        await mkdir(join(dataDir, 'v2', 'sessions', indexedRelativeDir), { recursive: true });
 
-        const readRelativeDir = async () => '2025/01/02/03-04-05-006-session_x';
+        const readRelativeDir = async () => indexedRelativeDir;
         await expect(findMcodeSessionDir('mvs_target', dataDir, readRelativeDir)).resolves.toBe(
-            join(dataDir, 'v2', 'sessions', '2025/01/02/03-04-05-006-session_x')
+            join(dataDir, 'v2', 'sessions', indexedRelativeDir)
         );
         await expect(findMcodeSessionDir('mvs_target', dataDir, readRelativeDir)).resolves.not.toBe(treeDir);
+    });
+
+    it('falls back to the dated tree when the index entry is stale', async () => {
+        const dataDir = await createTempDir();
+        const day = { year: '2026', month: '10', day: '20' };
+        const expected = await createSessionDir(dataDir, day, 'mvs_target');
+
+        // The index still points at a directory mcode removed.
+        const readRelativeDir = async () => '2025/01/02/03-04-05-006-session_gone';
+        await expect(findMcodeSessionDir('mvs_target', dataDir, readRelativeDir)).resolves.toBe(expected);
     });
 
     it('falls back to the dated tree when the index has no entry', async () => {
@@ -181,11 +202,13 @@ describe('createMcodeSessionDirResolver', () => {
 
     it('uses the runtime index when it has an entry', async () => {
         const dataDir = await createTempDir();
-        const readRelativeDir = vi.fn(async () => '2026/10/20/09-20-41-291-session_x');
+        const relativeDir = '2026/10/20/09-20-41-291-session_x';
+        await mkdir(join(dataDir, 'v2', 'sessions', relativeDir), { recursive: true });
+        const readRelativeDir = vi.fn(async () => relativeDir);
         const resolver = createMcodeSessionDirResolver({ dataDir, readRelativeDir });
 
         await expect(resolver.resolve('mvs_target')).resolves.toBe(
-            join(dataDir, 'v2', 'sessions', '2026/10/20/09-20-41-291-session_x')
+            join(dataDir, 'v2', 'sessions', relativeDir)
         );
         expect(readRelativeDir).toHaveBeenCalledTimes(1);
     });

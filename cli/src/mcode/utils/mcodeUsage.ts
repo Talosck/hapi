@@ -33,6 +33,14 @@ export type McodeUsageRecord = {
 export type McodeUsageReadResult = {
     records: McodeUsageRecord[];
     nextOffset: number;
+    /**
+     * True when the read covered the file up to its current end. A read that
+     * stops at a half-written trailing line has not seen the tail yet, so the
+     * caller must not treat the file as fully consumed.
+     */
+    reachedEnd: boolean;
+    /** True when the journal was replaced and read again from the start. */
+    replaced: boolean;
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -46,6 +54,14 @@ const MAX_SESSION_DIR_LOOKUPS = 120;
  * this point — the report only says that usage is not being recorded yet.
  */
 const MAX_JOURNAL_WAIT_ATTEMPTS = 120;
+/**
+ * Slack applied when comparing a transcript timestamp against the attach
+ * time. The transcript may store whole seconds, so a record written right
+ * after the attach can carry a timestamp up to a second below it.
+ */
+const TIMESTAMP_TOLERANCE_MS = 1000;
+/** How many billed message ids are remembered for de-duplication. */
+const MAX_BILLED_MESSAGE_IDS = 1024;
 
 function asRecord(value: unknown): JsonRecord | null {
     return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -148,16 +164,22 @@ export async function readMcodeUsageSince(
     try {
         size = (await stat(filePath)).size;
     } catch {
-        return { records: [], nextOffset: offset };
+        return { records: [], nextOffset: offset, reachedEnd: false, replaced: false };
     }
 
+    let replaced = false;
     if (size < offset) {
-        // The journal is append-only for a live session; a shrink means it was
-        // replaced. Skip to the new end instead of replaying the whole file.
-        logger.debug(`[mcode-usage] Journal shrank (${size} < ${offset}); skipping to end`);
-        return { records: [], nextOffset: size };
+        // The journal is append-only for a live session, so a smaller file
+        // means it was replaced. Read it again from the start: the records it
+        // holds are still the session's usage, and the caller de-duplicates
+        // the ones it already billed.
+        logger.debug(`[mcode-usage] Journal shrank (${size} < ${offset}); re-reading from the start`);
+        offset = 0;
+        replaced = true;
     }
-    if (size === offset) return { records: [], nextOffset: offset };
+    if (size === offset) {
+        return { records: [], nextOffset: offset, reachedEnd: true, replaced };
+    }
 
     const handle = await open(filePath, 'r');
     try {
@@ -165,7 +187,10 @@ export async function readMcodeUsageSince(
         const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
         const text = buffer.subarray(0, bytesRead).toString('utf8');
         const lastNewline = text.lastIndexOf('\n');
-        if (lastNewline === -1) return { records: [], nextOffset: offset };
+        if (lastNewline === -1) {
+            // A single half-written line: nothing is complete yet.
+            return { records: [], nextOffset: offset, reachedEnd: false, replaced };
+        }
 
         const complete = text.slice(0, lastNewline + 1);
         const records: McodeUsageRecord[] = [];
@@ -174,9 +199,14 @@ export async function readMcodeUsageSince(
             const record = parseMcodeUsageLine(line);
             if (record) records.push(record);
         }
+        const nextOffset = offset + Buffer.byteLength(complete, 'utf8');
         return {
             records,
-            nextOffset: offset + Buffer.byteLength(complete, 'utf8')
+            nextOffset,
+            // The file was read to its end only when the complete lines cover
+            // it. A trailing partial line means the tail is still unread.
+            reachedEnd: nextOffset >= size,
+            replaced
         };
     } finally {
         await handle.close();
@@ -203,15 +233,21 @@ export type McodeUsageContext = {
 };
 
 /**
- * Converts a transcript usage record into the generic agent envelope. The
- * context fields come from the latest ACP `usage_update`; without them the
- * web context bar would fall back to this call's prompt size.
+ * Converts a transcript usage record into the generic agent envelope.
+ *
+ * The context size comes from the transcript record itself: the total is the
+ * context the model call occupied (the uncached prompt plus the cached prefix
+ * plus the response). MiniMax Code publishes its own context size over ACP
+ * only at the end of a turn, so that value is stale while the agent is
+ * working — and it can be smaller than the cached prefix, which made the
+ * status bar report more cached tokens than used ones.
  */
 export function buildMcodeUsageMessage(
     record: McodeUsageRecord,
     model: string | null | undefined,
     context: McodeUsageContext | null
 ): CodexMessage | null {
+    const contextTokens = Math.max(record.totalTokens, context?.contextTokens ?? 0);
     return convertAgentMessage({
         type: 'usage',
         inputTokens: record.inputTokens,
@@ -219,7 +255,7 @@ export function buildMcodeUsageMessage(
         totalTokens: record.totalTokens,
         cacheReadTokens: record.cacheReadTokens,
         cacheCreationTokens: record.cacheWriteTokens,
-        ...(context?.contextTokens !== undefined ? { contextTokens: context.contextTokens } : {}),
+        contextTokens,
         ...(context?.contextWindow !== undefined ? { contextWindow: context.contextWindow } : {})
     }, model);
 }
@@ -284,6 +320,12 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
     let discoveryPromise: Promise<void> | null = null;
     let stopped = false;
     const reportedWarnings = new Set<string>();
+    /**
+     * Message ids that were already billed. A journal that is rewritten (the
+     * agent replaced it) is read again from the start, and the records it
+     * still holds must not be billed twice.
+     */
+    const billedMessageIds = new Set<string>();
 
     /** Logs a warning once, for problems that do not need the user's attention. */
     const warnOnce = (message: string): void => {
@@ -315,6 +357,31 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
         }
     };
 
+    /**
+     * Identity of a usage record for de-duplication. The message id is
+     * stable for one model call; a record without one falls back to the
+     * fields that identify the call.
+     */
+    const billedKeyOf = (record: McodeUsageRecord): string => (
+        record.messageId !== 'unknown'
+            ? record.messageId
+            : `${record.turnId ?? ''}:${record.timestampMs ?? ''}:${record.totalTokens}`
+    );
+
+    const isAlreadyBilled = (record: McodeUsageRecord): boolean => (
+        billedMessageIds.has(billedKeyOf(record))
+    );
+
+    const rememberBilled = (record: McodeUsageRecord): void => {
+        const key = billedKeyOf(record);
+        billedMessageIds.add(key);
+        while (billedMessageIds.size > MAX_BILLED_MESSAGE_IDS) {
+            const oldest = billedMessageIds.values().next().value;
+            if (oldest === undefined) break;
+            billedMessageIds.delete(oldest);
+        }
+    };
+
     const clearDiscoveryTimer = (): void => {
         if (discoveryTimer) {
             clearTimeout(discoveryTimer);
@@ -341,24 +408,24 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
             // A mode handoff may attach the watcher to another native session
             // while this read was in flight; never bill the old one.
             if (stopped || targetGeneration !== generation) return;
-            if (result.nextOffset < startOffset) {
-                // The journal is append-only for a live session, so a smaller
-                // file means it was replaced. The replacement is not replayed
-                // (that would bill the same call twice), so the usage it holds
-                // is lost.
+            if (result.replaced) {
                 warnUserOnce(
                     'The MiniMax Code transcript was rewritten while it was being read;'
-                    + ' some token usage for this session is missing.'
+                    + ' its usage is read again from the start.'
                 );
             }
             offset = result.nextOffset;
-            if (timestampFloor !== null && result.nextOffset > startOffset) {
-                // The catch-up read covered the file's current tail; later
-                // appends are unambiguously new.
+            if (timestampFloor !== null && result.reachedEnd) {
+                // The catch-up read covered the file's current end, so every
+                // later append is unambiguously new. A read that stopped at a
+                // half-written line has not seen the tail yet: dropping the
+                // floor then would bill a record that was written before the
+                // attach (the hub already stores it from the previous session).
                 minTimestampMs = null;
             }
             for (const record of result.records) {
                 if (stopped || targetGeneration !== generation) return;
+                if (isAlreadyBilled(record)) continue;
                 if (timestampFloor !== null) {
                     if (record.timestampMs === null) {
                         // The floor keeps pre-HAPI history out of the dashboard.
@@ -371,8 +438,13 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
                         );
                         continue;
                     }
-                    if (record.timestampMs < timestampFloor) continue;
+                    // The transcript may store whole seconds, so a record
+                    // written right after the attach can carry a timestamp up
+                    // to a second below the attach time. One second of
+                    // tolerance keeps that first turn from being dropped.
+                    if (record.timestampMs < timestampFloor - TIMESTAMP_TOLERANCE_MS) continue;
                 }
+                rememberBilled(record);
                 try {
                     options.onUsage(record);
                 } catch (error) {
@@ -492,6 +564,12 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
     const attach = async (nextSessionId: string): Promise<void> => {
         if (stopped) return;
         if (sessionId === nextSessionId) {
+            // The same native session (a local → remote handoff re-attaches
+            // the session the TUI already created): bill what it wrote before
+            // the handoff instead of dropping the tail.
+            if (messagesPath) {
+                await flush();
+            }
             await discover();
             return;
         }

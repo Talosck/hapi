@@ -163,11 +163,49 @@ describe('buildMcodeUsageMessage', () => {
         });
     });
 
+    it('never reports a context smaller than the cached prefix', () => {
+        // The agent publishes its context size at the end of a turn, so it is
+        // stale while the agent works and can be smaller than the cached
+        // prefix of the latest model call. The status bar then showed more
+        // cached tokens than used ones.
+        const record = parseMcodeUsageLine(assistantLine({
+            input: 387,
+            output: 101,
+            cacheRead: 221_000,
+            cacheWrite: 0,
+            totalTokens: 221_488
+        }));
+        expect(record).not.toBeNull();
+
+        const message = buildMcodeUsageMessage(record!, 'm:minimax:MiniMax-M3:v:thinking', {
+            contextTokens: 217_000,
+            contextWindow: 512_000
+        }) as { info: { contextTokens?: number; total: { cachedInputTokens?: number } } };
+
+        expect(message.info.contextTokens).toBe(221_488);
+        expect(message.info.contextTokens!).toBeGreaterThanOrEqual(message.info.total.cachedInputTokens!);
+    });
+
+    it('falls back to the transcript total when the agent has not reported a context size', () => {
+        const record = parseMcodeUsageLine(assistantLine({
+            input: 387,
+            output: 101,
+            cacheRead: 19_349,
+            cacheWrite: 0,
+            totalTokens: 19_837
+        }));
+        expect(record).not.toBeNull();
+
+        const message = buildMcodeUsageMessage(record!, 'm:minimax:MiniMax-M3:v:thinking', null) as {
+            info: { contextTokens?: number }
+        };
+        expect(message.info.contextTokens).toBe(19_837);
+    });
+
     it('omits context fields when the backend has not reported them yet', () => {
         const record = parseMcodeUsageLine(assistantLine());
         const message = buildMcodeUsageMessage(record!, 'MiniMax-M3.1-Flash', null);
         expect(message?.type).toBe('token_count');
-        expect((message as { info: Record<string, unknown> }).info.contextTokens).toBeUndefined();
         expect((message as { info: Record<string, unknown> }).info.modelContextWindow).toBeUndefined();
     });
 });
@@ -215,7 +253,7 @@ describe('readMcodeUsageSince', () => {
     it('treats a missing journal as an empty read', async () => {
         const dataDir = await createTempDir();
         await expect(readMcodeUsageSince(join(dataDir, 'missing.jsonl'), 42))
-            .resolves.toEqual({ records: [], nextOffset: 42 });
+            .resolves.toEqual({ records: [], nextOffset: 42, reachedEnd: false, replaced: false });
     });
 });
 
@@ -411,6 +449,104 @@ describe('createMcodeUsageWatcher', () => {
             expect(onUsage).toHaveBeenCalledTimes(1);
             expect(onUsage.mock.calls[0]?.[0]).toMatchObject({ messageId: 'post-attach' });
             expect(onWarning.mock.calls[0]?.[0]).toMatch(/no readable timestamp/);
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
+    it('does not bill a pre-attach record that completes after a partial read', async () => {
+        const dataDir = await createTempDir();
+        const sessionId = 'mvs_partial_floor_test';
+        const dir = sessionDir(dataDir, sessionId);
+        await mkdir(dir, { recursive: true });
+        const messagesPath = join(dir, 'messages.jsonl');
+
+        const onUsage = vi.fn();
+        const watcher = createMcodeUsageWatcher({
+            dataDir,
+            onUsage,
+            pollIntervalMs: 60_000,
+            discoveryRetryMs: 10
+        });
+        try {
+            await watcher.attach(sessionId);
+
+            // The journal appears after the attach with one complete record
+            // that predates the attach plus a second one that is only half
+            // written. The first read stops at the last complete line, so the
+            // pre-attach floor must survive it.
+            const before = Date.now() - 60_000;
+            const complete = assistantLine({ messageId: 'old-1', timestamp: before });
+            const partial = assistantLine({ messageId: 'old-2', timestamp: before });
+            await writeFile(messagesPath, `${complete}\n${partial.slice(0, 40)}`);
+            await watcher.flush();
+            expect(onUsage).not.toHaveBeenCalled();
+
+            // The rest of the second (pre-attach) record arrives.
+            await appendFile(messagesPath, `${partial.slice(40)}\n`);
+            await watcher.flush();
+
+            expect(onUsage).not.toHaveBeenCalled();
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
+    it('bills a record written after the attach with a whole-second timestamp', async () => {
+        const dataDir = await createTempDir();
+        const sessionId = 'mvs_second_precision_test';
+        const dir = sessionDir(dataDir, sessionId);
+        await mkdir(dir, { recursive: true });
+        const messagesPath = join(dir, 'messages.jsonl');
+
+        const onUsage = vi.fn();
+        const watcher = createMcodeUsageWatcher({
+            dataDir,
+            onUsage,
+            pollIntervalMs: 60_000,
+            discoveryRetryMs: 10
+        });
+        try {
+            await watcher.attach(sessionId);
+
+            // The transcript stores whole seconds, so a record written right
+            // after the attach can carry a timestamp up to a second below it.
+            const secondPrecision = Math.floor(Date.now() / 1000) * 1000;
+            await writeFile(messagesPath, `${assistantLine({ messageId: 'new-1', timestamp: secondPrecision })}\n`);
+            await watcher.flush();
+
+            expect(onUsage).toHaveBeenCalledTimes(1);
+        } finally {
+            await watcher.cleanup();
+        }
+    });
+
+    it('reads a rewritten transcript again without billing the same record twice', async () => {
+        const dataDir = await createTempDir();
+        const sessionId = 'mvs_rewritten_recovery_test';
+        const dir = sessionDir(dataDir, sessionId);
+        await mkdir(dir, { recursive: true });
+        const messagesPath = join(dir, 'messages.jsonl');
+        await writeFile(messagesPath, `${assistantLine({ messageId: 'first' })}\n`);
+
+        const onUsage = vi.fn();
+        const watcher = createMcodeUsageWatcher({ dataDir, onUsage, pollIntervalMs: 60_000 });
+        try {
+            await watcher.attach(sessionId);
+            await watcher.flush();
+
+            // The journal is replaced by one that holds the same record plus a
+            // new one: the replacement is read again, but a record that was
+            // already billed is not billed twice.
+            await writeFile(
+                messagesPath,
+                `${assistantLine({ messageId: 'first' })}\n${assistantLine({ messageId: 'second' })}\n`
+            );
+            await watcher.flush();
+
+            const billed = onUsage.mock.calls.map((call) => (call[0] as { messageId: string }).messageId);
+            expect(billed.filter((id) => id === 'first').length).toBeLessThanOrEqual(1);
+            expect(billed.filter((id) => id === 'second').length).toBe(1);
         } finally {
             await watcher.cleanup();
         }

@@ -264,6 +264,59 @@ describe('BackgroundTaskAggregator', () => {
         expect(update).toMatchObject({ type: 'tool_result', id: 'task-call' });
     });
 
+    it('counts a task once when it is released at the end of a turn and polled in the next', () => {
+        const aggregator = new BackgroundTaskAggregator();
+        startBackgroundTask(aggregator);
+        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
+
+        // The turn ends without a poll: the card is released and the counter
+        // is settled.
+        aggregator.flushPromptEnd();
+        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
+
+        // The next turn polls the same task and it finishes. The completion
+        // was already counted, so the counter must not be settled twice: the
+        // hub clamps at zero, which would hide a still running task.
+        aggregator.handle(taskOutputCall({ id: 'poll-late' }));
+        aggregator.handle(taskOutputResult('succeeded', 'done', { id: 'poll-late' }));
+
+        expect(aggregator.takeBackgroundTaskDelta()).toBeNull();
+    });
+
+    it('does not complete a released task again when the session is aborted', () => {
+        const aggregator = new BackgroundTaskAggregator();
+        startBackgroundTask(aggregator);
+        aggregator.flushPromptEnd();
+        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 1 });
+
+        expect(aggregator.cancelAll('Session aborted')).toEqual([]);
+        expect(aggregator.takeBackgroundTaskDelta()).toBeNull();
+    });
+
+    it('keeps the first card when the same task id is launched twice', () => {
+        const aggregator = new BackgroundTaskAggregator();
+        startBackgroundTask(aggregator, { callId: 'call-a' });
+        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
+
+        // The same task id again: the second launch is forwarded as a plain
+        // result instead of orphaning the first card and counting a second
+        // start.
+        aggregator.handle(toolCall({ id: 'call-b', name: 'Task' }));
+        const duplicate = toolResult({
+            id: 'call-b',
+            text: '<task_background task_id="bg_1">Started background task bg_1.</task_background>',
+            details: { task_id: 'bg_1', status: 'started' }
+        });
+        expect(aggregator.handle(duplicate)).toEqual([duplicate]);
+        expect(aggregator.takeBackgroundTaskDelta()).toBeNull();
+
+        // The original card is still the one that completes.
+        aggregator.handle(taskOutputCall({ id: 'poll-1' }));
+        const [update] = aggregator.handle(taskOutputResult('succeeded', 'done'));
+        expect(update).toMatchObject({ type: 'tool_result', id: 'call-a' });
+        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
+    });
+
     it('completes tracked tasks when the session is aborted', () => {
         const aggregator = new BackgroundTaskAggregator();
         startBackgroundTask(aggregator);

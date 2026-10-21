@@ -1,4 +1,4 @@
-import { readdir } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { logger } from '@/ui/logger';
@@ -60,6 +60,16 @@ async function listDirectories(path: string): Promise<string[]> {
         return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
     } catch {
         return [];
+    }
+}
+
+/** True when the path exists and is a directory. */
+async function isExistingDirectory(path: string): Promise<boolean> {
+    try {
+        const stats = await stat(path);
+        return stats.isDirectory();
+    } catch {
+        return false;
     }
 }
 
@@ -199,6 +209,11 @@ export type McodeSessionIndexReader = (
  * Looks the session directory up in mcode's runtime index. The index is the
  * fast path: it answers a session id with one query instead of walking the
  * whole dated directory tree.
+ *
+ * A row that points at a directory that no longer exists (mcode moved or
+ * compacted the session, or the row is stale) is treated as "no entry": the
+ * dated tree is the fallback, and a watcher that trusted the stale path would
+ * never find the transcript again.
  */
 export async function findMcodeSessionDirFromIndex(
     sessionId: string,
@@ -213,7 +228,13 @@ export async function findMcodeSessionDirFromIndex(
         return null;
     }
     if (!relativeDir) return null;
-    return join(dataDir, ...SESSIONS_ROOT_RELATIVE_PATH, relativeDir);
+
+    const sessionDir = join(dataDir, ...SESSIONS_ROOT_RELATIVE_PATH, relativeDir);
+    if (await isExistingDirectory(sessionDir)) {
+        return sessionDir;
+    }
+    logger.debug(`[mcode-session] Runtime index points at a missing directory: ${sessionDir}`);
+    return null;
 }
 
 /**
