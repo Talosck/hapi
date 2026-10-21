@@ -10,6 +10,7 @@ import { registerGrokModelHandlers } from './handlers/grokModels'
 import { registerCopilotModelHandlers } from './handlers/copilotModels'
 import { registerKimiModelHandlers } from './handlers/kimiModels'
 import { registerMcodeModelHandlers } from './handlers/mcodeModels'
+import { registerMcodeAppHandlers } from './handlers/mcodeApps'
 import { registerDirectoryHandlers } from './handlers/directories'
 import { registerDifftasticHandlers } from './handlers/difftastic'
 import { registerFileHandlers } from './handlers/files'
@@ -31,6 +32,7 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
     registerCopilotModelHandlers(rpcHandlerManager)
     registerKimiModelHandlers(rpcHandlerManager)
     registerMcodeModelHandlers(rpcHandlerManager)
+    registerMcodeAppHandlers(rpcHandlerManager)
     registerFileHandlers(rpcHandlerManager, workingDirectory)
     registerDirectoryHandlers(rpcHandlerManager, workingDirectory)
     registerRipgrepHandlers(rpcHandlerManager, workingDirectory)

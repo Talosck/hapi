@@ -44,6 +44,7 @@ import type {
     GrokModelsResponse,
     KimiModelsResponse,
     McodeModelsResponse,
+    McodeAppsResponse,
     McodeGoalResponse,
     McodeGoalClearResponse,
     McodeDelegationStopResponse,
@@ -981,6 +982,18 @@ export class ApiClient {
     async getMachineMcodeModelsForCwd(machineId: string, cwd: string): Promise<McodeModelsResponse> {
         return await this.request<McodeModelsResponse>(
             `/api/machines/${encodeURIComponent(machineId)}/mcode-models?cwd=${encodeURIComponent(cwd)}`
+        )
+    }
+
+    /**
+     * Lists the apps connected to the machine's MiniMax Code installation.
+     *
+     * The connector tools are not part of the ACP surface, so this is the
+     * only way a client learns what the agent can reach.
+     */
+    async getMachineMcodeApps(machineId: string): Promise<McodeAppsResponse> {
+        return await this.request<McodeAppsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/mcode-apps`
         )
     }
 

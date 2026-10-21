@@ -47,6 +47,8 @@ export const RPC_METHODS = {
     ListKimiModels: 'listKimiModels',
     ListMcodeModelsForCwd: 'listMcodeModelsForCwd',
     ListMcodeModels: 'listMcodeModels',
+    /** List the apps connected to the machine's MiniMax Code installation. */
+    ListMcodeApps: 'listMcodeApps',
     /** Create MiniMax Code's autonomous goal for the session. */
     McodeCreateGoal: 'mcode-create-goal',
     /** Patch the goal's objective, status or token budget. */

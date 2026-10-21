@@ -115,6 +115,7 @@ import { useGrokModels } from '@/hooks/queries/useGrokModels'
 import { useCopilotModels } from '@/hooks/queries/useCopilotModels'
 import { useKimiModelsForSession } from '@/hooks/queries/useKimiModelsForSession'
 import { useMcodeModelsForSession } from '@/hooks/queries/useMcodeModelsForSession'
+import { useMcodeApps } from '@/hooks/queries/useMcodeApps'
 import { buildKimiSessionModelOptions } from '@/components/NewSession/grokModels'
 import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
 import { usePiModels } from '@/hooks/queries/usePiModels'
@@ -1483,6 +1484,32 @@ function SessionChatInner(props: SessionChatProps) {
         () => reconcileChatBlocks(reduced.blocks, blocksByIdRef.current),
         [reduced.blocks]
     )
+    /**
+     * The apps the agent can reach.
+     *
+     * MiniMax Code's connector tools are not part of the ACP surface, so the
+     * only way the web learns about them is asking the machine directly.
+     */
+    const mcodeApps = useMcodeApps({
+        api: props.api,
+        machineId: props.session.metadata?.machineId,
+        enabled: props.session.metadata?.flavor === 'mcode'
+    })
+
+    // Only an MiniMax Code session has apps to report, and only a machine
+    // that answered has a list to show.
+    const mcodeAppsState = useMemo(() => {
+        if (props.session.metadata?.flavor !== 'mcode') return null
+        if (mcodeApps.isLoading) return null
+        return { apps: mcodeApps.apps, auth: mcodeApps.auth, error: mcodeApps.error }
+    }, [
+        props.session.metadata?.flavor,
+        mcodeApps.isLoading,
+        mcodeApps.apps,
+        mcodeApps.auth,
+        mcodeApps.error
+    ])
+
     const sessionStatus = useMemo(
         () => buildSessionStatusData({
             goal: reduced.latestGoal,
@@ -1492,8 +1519,11 @@ function SessionChatInner(props: SessionChatProps) {
             backgroundTaskCount: props.session.backgroundTaskCount,
             // The MiniMax Code goal controls live in this panel, so it has to
             // render even when the session has no status to show yet —
-            // otherwise there is no way to create the first goal.
+            // otherwise there is no way to create the first goal. The same
+            // holds for the connected apps, which are the only visible trace
+            // of the agent's connector tools.
             alwaysVisible: props.session.metadata?.capabilities?.mcodeExtensions?.goalCreate === true
+                || (mcodeAppsState?.apps.length ?? 0) > 0
         }),
         [
             reduced.latestGoal,
@@ -1501,7 +1531,8 @@ function SessionChatInner(props: SessionChatProps) {
             props.session.backgroundTaskCount,
             reconciled.blocks,
             normalizedMessages,
-            props.session.metadata?.capabilities?.mcodeExtensions?.goalCreate
+            props.session.metadata?.capabilities?.mcodeExtensions?.goalCreate,
+            mcodeAppsState?.apps.length
         ]
     )
 
@@ -1521,6 +1552,7 @@ function SessionChatInner(props: SessionChatProps) {
             capabilities
         }
     }, [props.api, props.session.id, props.session.metadata?.capabilities?.mcodeExtensions])
+
     const hasRunningChildAgent = useMemo(
         () => hasAbortableAgentRun(reduced.blocks),
         [reduced.blocks]
@@ -1974,6 +2006,7 @@ function SessionChatInner(props: SessionChatProps) {
                 <SessionStatusPanel
                     data={sessionStatus}
                     goalControls={mcodeGoalControls}
+                    apps={mcodeAppsState}
                 />
             ) : null}
 

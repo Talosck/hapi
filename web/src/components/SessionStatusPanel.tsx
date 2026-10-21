@@ -4,7 +4,7 @@ import type { SessionStatusData, SessionStatusSubagent } from '@/chat/sessionSta
 import { ChecklistList } from '@/components/ToolCard/checklist'
 import { useTranslation } from '@/lib/use-translation'
 import type { ApiClient } from '@/api/client'
-import type { McodeExtensionCapabilities, ThreadGoal } from '@hapi/protocol'
+import type { McodeConnectorApp, McodeConnectorAuth, McodeExtensionCapabilities, ThreadGoal } from '@hapi/protocol'
 
 function Section(props: { title: string; children: ReactNode }) {
     return (
@@ -214,9 +214,53 @@ function GoalControls(props: {
     )
 }
 
+/**
+ * The apps the agent can reach.
+ *
+ * MiniMax Code's connector tools are not part of the ACP surface - the agent
+ * calls them through the `mcode-tools` CLI - so this list is the only place
+ * a user learns which apps are wired up.
+ */
+function ConnectedApps(props: {
+    apps: McodeConnectorApp[]
+    auth: McodeConnectorAuth | null
+    error: string | null
+}) {
+    const { t } = useTranslation()
+
+    if (props.error) {
+        return (
+            <div className="text-xs text-[var(--app-hint)]">{t('session.status.apps.unavailable')}</div>
+        )
+    }
+    if (props.apps.length === 0) {
+        return (
+            <div className="text-xs text-[var(--app-hint)]">{t('session.status.apps.none')}</div>
+        )
+    }
+
+    return (
+        <div className="flex flex-col gap-1">
+            {props.apps.map((app) => (
+                <div key={app.provider} className="flex min-w-0 items-baseline gap-1.5">
+                    <span className="min-w-0 break-words text-sm text-[var(--app-fg)]">{app.provider}</span>
+                    <span className="ml-auto shrink-0 text-xs text-[var(--app-hint)]">
+                        {t('session.status.apps.toolCount', { count: app.toolCount })}
+                    </span>
+                </div>
+            ))}
+        </div>
+    )
+}
+
 export function SessionStatusPanel(props: {
     data: SessionStatusData
     goalControls?: McodeGoalControls | null
+    apps?: {
+        apps: McodeConnectorApp[]
+        auth: McodeConnectorAuth | null
+        error: string | null
+    } | null
 }) {
     const { data } = props
     const { t } = useTranslation()
@@ -346,6 +390,16 @@ export function SessionStatusPanel(props: {
                                     ) : null}
                                 </div>
                             ) : null}
+                        </Section>
+                    ) : null}
+
+                    {props.apps ? (
+                        <Section title={t('session.status.apps')}>
+                            <ConnectedApps
+                                apps={props.apps.apps}
+                                auth={props.apps.auth}
+                                error={props.apps.error}
+                            />
                         </Section>
                     ) : null}
 

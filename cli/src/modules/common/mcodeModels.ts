@@ -21,7 +21,13 @@ interface CacheEntry {
     response: ListMcodeModelsForCwdResponse;
 }
 
-const CACHE_TTL_MS = 5 * 60_000;
+/**
+ * The model catalog comes from the provider configuration, which changes
+ * rarely - but a probe costs a full `mcode acp` process spawn (several
+ * seconds). A short TTL therefore paid that spawn again every few minutes
+ * for an answer that had not changed.
+ */
+const CACHE_TTL_MS = 30 * 60_000;
 const PROBE_TIMEOUT_MS = 30_000;
 /**
  * The catalog comes from the provider configuration, not from the workspace:
@@ -41,6 +47,12 @@ const inflight = new Map<string, Promise<ListMcodeModelsForCwdResponse>>();
  */
 const PROBE_DIR_NAME = 'mcode-model-probe';
 const PROBE_SESSION_FILE = 'session.json';
+/**
+ * The probe answer is kept on disk next to the probe session so a runner
+ * restart does not pay for another spawn before the first session is even
+ * created.
+ */
+const PROBE_CACHE_FILE = 'models.json';
 let cachedProbeSessionId: string | null | undefined;
 let probeSessionRead: Promise<string | null> | null = null;
 
@@ -125,6 +137,42 @@ function getProbeDir(): string {
 
 function getProbeSessionFile(): string {
     return join(getProbeDir(), PROBE_SESSION_FILE);
+}
+
+function getProbeCacheFile(): string {
+    return join(getProbeDir(), PROBE_CACHE_FILE);
+}
+
+/**
+ * Reads the persisted probe answer.
+ *
+ * A corrupt or unreadable file is treated as "no cache": the probe simply
+ * runs again.
+ */
+async function readDiskCache(): Promise<CacheEntry | null> {
+    try {
+        const parsed: unknown = JSON.parse(await readFile(getProbeCacheFile(), 'utf8'));
+        if (!isObject(parsed)) return null;
+        const expiresAt = typeof parsed.expiresAt === 'number' ? parsed.expiresAt : null;
+        const response = parsed.response;
+        if (expiresAt === null || !isObject(response)) return null;
+        return { expiresAt, response: response as ListMcodeModelsForCwdResponse };
+    } catch {
+        return null;
+    }
+}
+
+async function writeDiskCache(entry: CacheEntry): Promise<void> {
+    try {
+        await mkdir(getProbeDir(), { recursive: true, mode: 0o700 });
+        const file = getProbeCacheFile();
+        const temp = `${file}.${process.pid}.tmp`;
+        await writeFile(temp, JSON.stringify(entry), { mode: 0o600 });
+        await rename(temp, file);
+    } catch (error) {
+        // The in-memory cache still serves this process.
+        logger.debug('Failed to persist the MiniMax Code model probe cache:', error);
+    }
 }
 
 async function readProbeSessionId(): Promise<string | null> {
@@ -254,8 +302,9 @@ async function runMcodeProbe(_cwd: string): Promise<ListMcodeModelsForCwdRespons
  *
  * The agent's model catalog comes from provider configuration rather than the
  * workspace, so every cwd shares one reusable probe session under HAPI's home
- * directory. Results are cached per cwd for five minutes; concurrent requests
- * for the same cwd are coalesced through a single-flight promise.
+ * directory. Results are cached for half an hour - in memory and on disk, so a
+ * runner restart does not pay for another probe either; concurrent requests
+ * are coalesced through a single-flight promise.
  */
 export async function listMcodeModelsForCwd(
     cwd: string
@@ -277,12 +326,22 @@ export async function listMcodeModelsForCwd(
 
     const promise = (async () => {
         try {
+            // A runner restart starts with an empty in-memory cache; the
+            // persisted answer avoids another process spawn for it.
+            const persisted = await readDiskCache();
+            if (persisted && persisted.expiresAt > Date.now()) {
+                cache.set(PROBE_CACHE_KEY, persisted);
+                return persisted.response;
+            }
+
             const response = await runMcodeProbe(trimmed);
             if (response.success) {
-                cache.set(PROBE_CACHE_KEY, {
+                const entry: CacheEntry = {
                     expiresAt: Date.now() + CACHE_TTL_MS,
                     response
-                });
+                };
+                cache.set(PROBE_CACHE_KEY, entry);
+                await writeDiskCache(entry);
             }
             return response;
         } catch (error) {
@@ -305,4 +364,7 @@ export function _resetMcodeModelsCacheForTests(): void {
     inflight.clear();
     cachedProbeSessionId = undefined;
     probeSessionRead = null;
+    // The persisted answer survives an in-memory reset, so a test that wants
+    // a cold probe has to drop it too.
+    void rm(getProbeCacheFile(), { force: true }).catch(() => undefined);
 }

@@ -15,6 +15,7 @@ import { useGrokModelsForCwd } from '@/hooks/queries/useGrokModelsForCwd'
 import { useCopilotModelsForCwd } from '@/hooks/queries/useCopilotModelsForCwd'
 import { useKimiModelsForCwd } from '@/hooks/queries/useKimiModelsForCwd'
 import { useMcodeModelsForCwd } from '@/hooks/queries/useMcodeModelsForCwd'
+import { useMcodeApps } from '@/hooks/queries/useMcodeApps'
 import { usePiModelsForMachine } from '@/hooks/queries/usePiModelsForMachine'
 import { useAgentAvailability } from '@/hooks/queries/useAgentAvailability'
 import { useSessions } from '@/hooks/queries/useSessions'
@@ -668,6 +669,18 @@ export function NewSession(props: {
             cwd: deferredDirectory,
             cwdExists: deferredDirectoryExists,
         })
+    })
+    /**
+     * The apps the agent can reach.
+     *
+     * The connector tools are not part of the ACP surface, so this is the
+     * only way a user learns which apps are wired up before they ask the
+     * agent to use one.
+     */
+    const mcodeAppsState = useMcodeApps({
+        api: props.api,
+        machineId,
+        enabled: agent === 'mcode' && Boolean(machineId)
     })
     const mcodeModelOptions = useMemo(
         () => buildMcodeModelOptions(mcodeModelsState.availableModels),
@@ -2044,6 +2057,13 @@ export function NewSession(props: {
                     />
                 )
             )}
+            {agent === 'mcode' && mcodeAppsState.apps.length > 0 ? (
+                <div className="px-3 pb-3 text-xs text-[var(--app-hint)]">
+                    {t('newSession.apps.connected', {
+                        apps: mcodeAppsState.apps.map((app) => app.provider).join(', ')
+                    })}
+                </div>
+            ) : null}
             {showPiLaunchConfig ? (
                 <EffortField
                     agent={agent}

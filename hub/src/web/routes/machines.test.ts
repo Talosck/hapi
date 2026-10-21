@@ -28,6 +28,68 @@ function createMachine(overrides?: Partial<Machine>): Machine {
     }
 }
 
+describe('mcode apps route', () => {
+    function createMachineApp(engine: Partial<SyncEngine>) {
+        const machine = createMachine()
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+        app.route('/api', createMachinesRoutes(() => ({
+            getMachine: () => machine,
+            ...engine
+        }) as SyncEngine))
+        return app
+    }
+
+    it('lists the apps connected to the machine', async () => {
+        const calls: string[] = []
+        const app = createMachineApp({
+            listMcodeApps: (async (machineId: string) => {
+                calls.push(machineId)
+                return {
+                    success: true,
+                    apps: [{ provider: 'matrix', toolCount: 13, tools: [] }],
+                    auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+                }
+            }) as SyncEngine['listMcodeApps']
+        })
+
+        const res = await app.request('/api/machines/machine-1/mcode-apps')
+
+        expect(res.status).toBe(200)
+        expect((await res.json() as { apps: unknown[] }).apps).toEqual([
+            { provider: 'matrix', toolCount: 13, tools: [] }
+        ])
+        expect(calls).toEqual(['machine-1'])
+    })
+
+    it('reports a failure instead of an empty list', async () => {
+        const app = createMachineApp({
+            listMcodeApps: (async () => ({
+                success: false,
+                apps: [],
+                error: 'spawn mcode-tools ENOENT'
+            })) as SyncEngine['listMcodeApps']
+        })
+
+        const res = await app.request('/api/machines/machine-1/mcode-apps')
+
+        expect(res.status).toBe(200)
+        const body = await res.json() as { success: boolean; error: string }
+        expect(body.success).toBe(false)
+        expect(body.error).toContain('ENOENT')
+    })
+
+    it('returns 404 for an unknown machine', async () => {
+        const app = createMachineApp({
+            getMachine: (() => undefined) as SyncEngine['getMachine']
+        })
+
+        const res = await app.request('/api/machines/nope/mcode-apps')
+
+        expect(res.status).toBe(404)
+    })
+})
+
 describe('machines routes', () => {
     it('blocks spawn and availability inspection when the runner needs an upgrade', async () => {
         const machine = createMachine({

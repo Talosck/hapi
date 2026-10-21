@@ -966,6 +966,37 @@ export const McodeGoalCreateRequestSchema = z.object({
 
 export type McodeGoalCreateRequest = z.infer<typeof McodeGoalCreateRequestSchema>
 
+/** One tool of a connected MiniMax Code app. */
+export type McodeConnectorTool = {
+    /** The agent's tool name, e.g. `connector__matrix__generate_image`. */
+    toolName: string
+    /** The app the tool belongs to, e.g. `matrix`. */
+    provider: string
+    description: string
+}
+
+/** One app connected to a MiniMax Code installation. */
+export type McodeConnectorApp = {
+    provider: string
+    toolCount: number
+    tools: McodeConnectorTool[]
+}
+
+/** The authentication state of the MiniMax Code connector broker. */
+export type McodeConnectorAuth = {
+    /** `authenticated`, `unauthenticated`, … - the agent's own spelling. */
+    status: string
+    authMode: string | null
+    scope: string | null
+    expiresAt: number | null
+}
+
+export type McodeAppsResponse = {
+    success: boolean
+    apps?: McodeConnectorApp[]
+    auth?: McodeConnectorAuth
+    error?: string
+}
 /** The body of a "patch the MiniMax Code goal" request. */
 export const McodeGoalPatchRequestSchema = z.object({
     status: z.enum([

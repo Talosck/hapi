@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
     mcodeModelsLoading: false,
     mcodeModelsError: null as string | null,
     mcodeEffortOptions: [] as Array<{ value: string; name?: string }>,
+    mcodeApps: [] as Array<{ provider: string; toolCount: number; tools: unknown[] }>,
     opencodeModels: [] as Array<{ modelId: string; name?: string }>,
     opencodeCurrentModelId: null as string | null,
     opencodeModelsLoading: false,
@@ -188,6 +189,14 @@ vi.mock('@/hooks/queries/useMcodeModelsForCwd', () => ({
         error: mocks.mcodeModelsError
     })
 }))
+vi.mock('@/hooks/queries/useMcodeApps', () => ({
+    useMcodeApps: () => ({
+        apps: mocks.mcodeApps,
+        auth: null,
+        isLoading: false,
+        error: null
+    })
+}))
 vi.mock('@/hooks/queries/usePiModelsForMachine', () => ({
     usePiModelsForMachine: () => ({
         availableModels: mocks.piModels,
@@ -341,6 +350,7 @@ describe('NewSession launch preferences', () => {
         mocks.mcodeModelsLoading = false
         mocks.mcodeModelsError = null
         mocks.mcodeEffortOptions = []
+        mocks.mcodeApps = []
         mocks.opencodeModels = [{ modelId: 'provider/current', name: 'Current' }]
         mocks.opencodeCurrentModelId = 'provider/current'
         mocks.opencodeModelsLoading = false
@@ -599,6 +609,50 @@ describe('NewSession launch preferences', () => {
         await waitFor(() => {
             expect(screen.getByTestId('mcode-efforts')).toHaveTextContent('Low,Max')
         })
+    })
+
+    it('shows the apps the MiniMax Code agent can reach', async () => {
+        // The connector tools are not part of the ACP surface, so this is the
+        // only place a user learns which apps are wired up before they ask
+        // the agent to use one.
+        mocks.mcodeApps = [{ provider: 'matrix', toolCount: 13, tools: [] }]
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory={'C:\\repo'}
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByDisplayValue('mcode'))
+
+        await waitFor(() => {
+            expect(screen.getByText(/newSession\.apps\.connected/)).toBeInTheDocument()
+        })
+    })
+
+    it('shows no apps hint when nothing is connected', async () => {
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory={'C:\\repo'}
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByDisplayValue('mcode'))
+
+        await waitFor(() => {
+            expect(screen.getByTestId('model-options')).toBeInTheDocument()
+        })
+        expect(screen.queryByText(/newSession\.apps\.connected/)).not.toBeInTheDocument()
     })
 
     it('shows the MiniMax Code model discovery error instead of a silently disabled picker', async () => {

@@ -393,6 +393,26 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
     })
 
+    app.get('/machines/:id/mcode-apps', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not connected' }, 503)
+        }
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) return machine
+
+        try {
+            return c.json(await engine.listMcodeApps(machineId))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list the MiniMax Code apps'
+            }, 500)
+        }
+    })
+
     app.get('/machines/:id/mcode-models', async (c) => {
         const engine = getSyncEngine()
         if (!engine) {

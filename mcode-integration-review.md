@@ -5,7 +5,8 @@
 **结论**：集成质量高，未发现硬性对接 Bug；主要问题是 **能力缺口**（mcode 提供但 HAPI 未接入的扩展方法）与 **若干可优化点**。
 
 > **实施状态（2026-10-21）**：本报告的 **P0** 与 **P1** 已实现并验证，详见 [§7 实施记录](#7-实施记录)。
-> **P2**（Connector/App 可视化、模型探针开销）未实施，仍为建议。
+> **P2**（Connector/App 可视化、模型探针开销）**也已实现**，见 [§8 P2 实施记录](#8-p2-实施记录)。
+> P3（会话 fork）与"图片输入提示"未做——后者经实测证明是**错的建议**（见 §8.3）。
 
 ---
 
@@ -142,7 +143,7 @@
 | **G5** | `mcode/session/current_session_update`、`queue_update` | ❌ 通知被丢弃 | 丢失 session 切换/队列状态信号 |
 | **G6** | `session/fork`、`session/resume`（`sessionCapabilities` 已声明） | ❌ 未使用 | 无法 fork 会话 |
 | **G7** | Connector / App 工具 | ⚠️ 会话内可用（经 Bash），但 Web 端**完全不可见** | 用户无法发现可用 App、无 App 选择器、无资产上传入口 |
-| **G8** | `promptCapabilities.image: false` | ⚠️ HAPI 附件按文本 `@path` 注入 | 行为正确，但 UI 未提示"图片不可用" |
+| **G8** | `promptCapabilities.image: false` | ✅ **不是限制**（实测） | mcode 不接受 image 内容块，但 HAPI 的附件走 `@path` 文本引用，agent 用自己的 `read`/`bash` 读图——实测能正确识别图片内容 |
 
 ---
 
@@ -226,7 +227,7 @@ HAPI 此前：
 ### ⚠️ P2 — 协议健壮性
 
 - ✅ 扩展通知名改为动态订阅（见 P0，已完成）
-- ❌ `promptCapabilities.image: false` 可在 Web 端提示"mcode 不支持图片输入"，避免用户上传后被静默忽略
+- ✅ **`promptCapabilities.image: false` 不是用户限制**（实测推翻）：mcode 不接受 ACP 的 image 内容块，但 HAPI 的附件是以 `@path` 文本引用注入的，agent 会用自己的 `read`/`bash` 去读图。实测上传一张纯红 PNG，agent 用 python 解出 `[(255, 0, 0), 1024]` 并答"Red"。**原先建议的"提示用户 mcode 不支持图片"是错的，会误导用户**——不做。
 
 ### ❌ P3 — 会话 fork
 
@@ -337,3 +338,93 @@ P1 goal/get after clear:   {"success":true,"goal":null}
 3. **`tokenBudget: null` 有歧义**——`null` 既可能是"不限额"，也可能是"没传"。读参时区分 `null` 与 `undefined`，避免把"未设置预算"误当成"不限额"发出去。
 4. **目标创建会立即开跑**——`goal/create` 不是待审批请求，agent 立刻开始执行。Web 端在表单里显式提示，避免用户误以为是"保存一条待办"。
 5. **空会话面板不渲染**——会话状态面板在没有目标/任务/子 agent 时返回 `null`，于是"设定目标"按钮永远不出现，用户无法创建第一个目标。改为：agent 广告了 `goal/create` 时面板强制可见（`buildSessionStatusData({ alwaysVisible })`）。
+
+---
+
+## 8. P2 实施记录
+
+### 8.1 Connector / App 可视化
+
+**问题**：mcode 的整套 App 生态（Lark / Matrix / 邮件等）在 HAPI Web 端完全不可见。会话里**能用**（agent 自己通过 Bash + `mcode-tools-master` skill 调用），但用户不知道存在。
+
+**为什么不能走协议**：Connector 工具**既不在 ACP 表面、也不在 MCP 表面**——agent 只能通过 `mcode-tools` CLI + skill 触达。所以外部客户端无法从协议侧观测到它们。
+
+**做法**：CLI 直接问 `mcode-tools` 要清单。
+
+| 改动 | 位置 |
+|---|---|
+| 解析 `mcode-tools` 二进制：取 `mcode` 的**同级**（自定义 `HAPI_MCODE_PATH` 指向的那个安装，才共享同一份 auth lease），否则退回 PATH | `cli/src/mcode/utils/mcodeConnectorTools.ts` — `resolveMcodeToolsCommand()` |
+| 调 `mcode-tools connector tools` + `mcode-tools auth status`，按 provider 归组 | 同上 — `listMcodeConnectorApps()` |
+| 机器级 RPC | `shared/src/rpcMethods.ts` — `ListMcodeApps` |
+| Hub 路由 | `hub/src/web/routes/machines.ts` — `GET /api/machines/:id/mcode-apps` |
+| Web 查询 + 面板区块 | `web/src/hooks/queries/useMcodeApps.ts`、`web/src/components/SessionStatusPanel.tsx` |
+
+**两个刻意的设计**：
+
+1. **"没有 App" 和 "没查到 App" 必须区分**。CLI 读不到清单时返回 `error` 而不是空列表——否则用户会以为没连 App，而真相是 HAPI 没查到。
+2. **`mcode-tools` 的路径跟随 `mcode`**。`HAPI_MCODE_PATH` 指向特定安装时，那个安装自带的 `mcode-tools` 才是共享同一份 oauth lease 的那个；用 PATH 上别的会读到不同的 auth 状态。
+
+**读一次要两个进程 spawn**（`auth status` + `connector tools`），所以 CLI 侧加了 5 分钟缓存：
+
+- **失败不缓存**——读不到就该下次再试，不能把"查不到"缓存成"没有"。
+- **auth lease 过期就不给缓存**——租约没了说明连接状态可能变了，缓存的清单不再可信。
+
+实测（真实 mcode 0.5.9 + 真实 `mcode-tools`）：
+
+```
+resolved command: mcode-tools
+auth: {"status":"authenticated","authMode":"shared-broker","scope":"agent.default","expiresAt":1792606404164}
+apps:
+  - email_workbench_credentials (2 tools)
+  - matrix (13 tools)
+```
+
+**Web 端两个落点**：
+
+| 位置 | 作用 |
+|---|---|
+| **新建会话页**（模型选择器下方） | 用户决定要 agent 做什么的时候，先看到能触达哪些 App |
+| **会话状态面板**（"已连接的应用"区块） | 会话运行中的上下文 |
+
+### 8.2 模型探针开销
+
+**实测数字**：`mcode provider list --json` 3.56s；完整 ACP 探针 5.17s（含 bun 启动）。**进程启动本身就是成本**，换命令省不下来——所以杠杆只有缓存。
+
+**做法**：
+
+| 改动 | 说明 |
+|---|---|
+| TTL 5 分钟 → **30 分钟** | 模型目录来自 provider 配置，几乎不变；原来每 5 分钟就要付一次进程启动 |
+| 结果**落盘**到 HAPI home（`mcode-model-probe/models.json`） | runner 重启后第一次建会话也不用再付一次探针 |
+| 原子写（临时文件 + rename） | 与已有的 probe session 文件同一套写法 |
+
+**没有做的**：报告原先建议"探针走 `session/new` 而非 `session/load`"——**这条是错的**。mcode 没有 ACP delete，每次 `session/new` 都会在它的数据目录里永久留下一个会话；复用 `session/load` 正是为了避免会话堆积。已从建议中移除。
+
+### 8.3 "图片输入提示"——实测推翻，不做
+
+报告原先建议："`promptCapabilities.image: false` → Web 端提示用户 mcode 不支持图片"。
+
+**实测证明这条是错的**：
+
+```
+TOOL >> read      → "Read image file [image/png]"
+TOOL >> bash      → "[((255, 0, 0), 1024)]"
+ANSWER: Red
+```
+
+`promptCapabilities.image: false` 的含义是 agent **不接受 ACP 的 image 内容块**。但 HAPI 的附件是以 `@path` **文本引用**注入的，agent 会用自己的 `read` / `bash` 去读图——实测上传一张纯红 PNG，agent 用 python 解出像素并答对。
+
+所以这条提示会**误导**用户说 agent 看不了图。**不做。** 这是"先量再改"的另一个例子：能力位读错了方向就会变成假限制。
+
+### 8.4 P2 验证
+
+| 检查 | 结果 |
+|---|---|
+| `bun typecheck`（cli/web/hub/relay） | ✅ exit 0 |
+| `bun run test:cli` | ✅ **3267 passed / 0 failed**（新增 21 个：16 connector + 5 探针缓存），280 文件 |
+| `bun run test:web` | ✅ **3434 passed / 0 failed**（新增 2 个新建会话页用例），310 文件 |
+| `bun run test:hub` | ✅ **1404 passed / 0 failed**（新增 3 个路由用例） |
+| `bun run test:shared` | ✅ 349 passed / 0 failed（未受影响） |
+| `bun run test:relay` | ✅ 118 passed / 0 failed（未受影响） |
+| **真实 `mcode-tools` 联调** | ✅ 2 个 provider / 15 个工具，auth 状态正确读取 |
+| **真实图片能力实测** | ✅ 纯红 PNG 经 `@path` → agent 解出 `(255,0,0)` 并答对，推翻"不支持图片"的建议 |

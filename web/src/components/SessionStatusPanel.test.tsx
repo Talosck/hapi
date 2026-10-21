@@ -184,4 +184,62 @@ describe('SessionStatusPanel', () => {
         )
         expect(screen.queryByText('Stop subagents')).not.toBeInTheDocument()
     })
+
+    /**
+     * The connector tools are not part of the ACP surface, so this list is
+     * the only trace of the apps the agent can reach.
+     */
+    it('lists the connected apps', () => {
+        renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                apps={{
+                    apps: [{
+                        provider: 'matrix',
+                        toolCount: 13,
+                        tools: []
+                    }],
+                    auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null },
+                    error: null
+                }}
+            />
+        )
+        expect(screen.getByText('Connected apps')).toBeInTheDocument()
+        expect(screen.getByText('matrix')).toBeInTheDocument()
+        expect(screen.getByText('13 tools')).toBeInTheDocument()
+    })
+
+    it('says so when no apps are connected', () => {
+        renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                apps={{
+                    apps: [],
+                    auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null },
+                    error: null
+                }}
+            />
+        )
+        expect(screen.getByText('No apps connected')).toBeInTheDocument()
+    })
+
+    it('does not claim there are no apps when the list could not be read', () => {
+        renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                apps={{
+                    apps: [],
+                    auth: null,
+                    error: 'spawn mcode-tools ENOENT'
+                }}
+            />
+        )
+        expect(screen.getByText('The connected apps could not be read')).toBeInTheDocument()
+        expect(screen.queryByText('No apps connected')).not.toBeInTheDocument()
+    })
+
+    it('shows no apps section for a session without one', () => {
+        renderWithProviders(<SessionStatusPanel data={emptyStatus} />)
+        expect(screen.queryByText('Connected apps')).not.toBeInTheDocument()
+    })
 })

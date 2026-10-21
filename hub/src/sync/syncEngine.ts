@@ -12,7 +12,7 @@ import {
     cliBinaryUpdatedOnDisk,
     isMachineCapabilitySkewed,
 } from '@hapi/protocol/runnerCapabilities'
-import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, McodeDelegationStopResponse, McodeGoalClearResponse, McodeGoalResponse, QueuedStateResponse, RewindConversationErrorCode, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, McodeAppsResponse, McodeDelegationStopResponse, McodeGoalClearResponse, McodeGoalResponse, QueuedStateResponse, RewindConversationErrorCode, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
 import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { ImplementCodexPlanResult } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
@@ -4377,6 +4377,11 @@ export class SyncEngine {
 
     async listMcodeModelsForCwd(machineId: string, cwd: string): Promise<RpcListMcodeModelsResponse> {
         return await this.rpcGateway.listMcodeModelsForCwd(machineId, cwd)
+    }
+
+    /** Lists the apps connected to the machine's MiniMax Code installation. */
+    async listMcodeApps(machineId: string): Promise<McodeAppsResponse> {
+        return await this.rpcGateway.listMcodeApps(machineId)
     }
 
     async listMcodeModelsForSession(sessionId: string): Promise<RpcListMcodeModelsResponse> {
