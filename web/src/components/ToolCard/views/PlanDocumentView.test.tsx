@@ -41,11 +41,17 @@ describe('PlanDocumentView', () => {
         cleanup()
     })
 
-    it('renders a markdown plan as markdown', () => {
+    it('renders a markdown plan as markdown', async () => {
         const { container } = renderPlan({ plan: '# Plan\n\nShip the feature', format: 'markdown' })
 
         expect(container.querySelector('h1')?.textContent).toBe('Plan')
         expect(container.textContent).toContain('Ship the feature')
+
+        // The markdown path pulls in the syntax highlighter, whose grammars
+        // load in the background. Let those imports settle before the file
+        // ends: a worker that is torn down mid-import can die, and the next
+        // file it picks up is then lost with it.
+        await new Promise((resolve) => setTimeout(resolve, 200))
     })
 
     it('renders a file plan as a path reference', () => {
