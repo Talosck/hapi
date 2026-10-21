@@ -210,11 +210,9 @@ function orderByTree(members: readonly SubagentSnapshotMember[]): SubagentSnapsh
 }
 
 /** The subagents a delegation snapshot describes, in tree order. */
-export function subagentsFromSnapshot(
-    messages: readonly NormalizedMessage[]
+function snapshotSubagents(
+    members: readonly SubagentSnapshotMember[]
 ): SessionStatusSubagent[] {
-    const members = latestSubagentSnapshot(messages)
-    if (!members) return []
     return orderByTree(members)
         .map((member): SessionStatusSubagent | null => {
             const state = SNAPSHOT_SUBAGENT_STATES[member.status]
@@ -230,6 +228,77 @@ export function subagentsFromSnapshot(
             }
         })
         .filter((subagent): subagent is SessionStatusSubagent => subagent !== null)
+}
+
+/** The subagents a delegation snapshot describes, in tree order. */
+export function subagentsFromSnapshot(
+    messages: readonly NormalizedMessage[]
+): SessionStatusSubagent[] {
+    const members = latestSubagentSnapshot(messages)
+    if (!members) return []
+    return snapshotSubagents(members)
+}
+
+/**
+ * How much of the title identifies an agent across both sources.
+ *
+ * The delegation snapshot carries the agent's full task description while
+ * the tool block truncates it to 100 characters, so the two only agree on
+ * a prefix.
+ */
+const SUBAGENT_TITLE_KEY_LENGTH = 60
+
+/**
+ * The key that tells the delegation snapshot and the tool block apart when
+ * they describe the same agent.
+ *
+ * The snapshot knows the agent by its session id and the tool block by the
+ * ACP call id, and the two id spaces do not overlap. The task title is the
+ * one field both carry: the agent reports the same description in its
+ * delegation tree and in the tool call that spawned it.
+ */
+function subagentIdentityKey(title: string | null | undefined): string {
+    return (title ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase()
+        .slice(0, SUBAGENT_TITLE_KEY_LENGTH)
+}
+
+/**
+ * Merges the two views of the same agents.
+ *
+ * The delegation snapshot is the agent's own tree — session id, parent,
+ * depth, start and end — and the tool block is the chat-side card of the
+ * same call. Adding both lists every running agent twice, so the snapshot
+ * wins and a tool block only contributes an agent the snapshot never
+ * mentioned.
+ *
+ * One snapshot member accounts for at most one tool block, so two agents
+ * that happen to share a task description are still counted twice.
+ */
+function mergeSubagents(
+    snapshot: readonly SubagentSnapshotMember[] | null,
+    snapshotSubagents: readonly SessionStatusSubagent[],
+    toolSubagents: readonly SessionStatusSubagent[]
+): SessionStatusSubagent[] {
+    if (!snapshot) return [...toolSubagents]
+
+    const unmatched = new Map<string, number>()
+    for (const member of snapshot) {
+        const key = subagentIdentityKey(member.title)
+        unmatched.set(key, (unmatched.get(key) ?? 0) + 1)
+    }
+
+    const extra = toolSubagents.filter((tool) => {
+        const key = subagentIdentityKey(tool.title)
+        const remaining = unmatched.get(key) ?? 0
+        if (remaining === 0) return true
+        unmatched.set(key, remaining - 1)
+        return false
+    })
+
+    return [...snapshotSubagents, ...extra]
 }
 
 export function buildSessionStatusData(args: {
@@ -252,16 +321,18 @@ export function buildSessionStatusData(args: {
     const possibleTerminalCommands = undiscoveredTerminalCount > 0
         ? detectedTerminals.uncertain.map((terminal) => terminal.command)
         : []
-    const snapshotSubagents = subagentsFromSnapshot(args.messages)
+    const snapshot = latestSubagentSnapshot(args.messages)
+    const toolSubagents = tools
+        .map(subagentFromBlock)
+        .filter((subagent): subagent is SessionStatusSubagent => subagent !== null)
     const data: SessionStatusData = {
         goal: args.goal ?? null,
         tasks: args.tasks ? [...args.tasks] : [],
-        subagents: [
-            ...snapshotSubagents,
-            ...tools
-                .map(subagentFromBlock)
-                .filter((subagent): subagent is SessionStatusSubagent => subagent !== null)
-        ],
+        subagents: mergeSubagents(
+            snapshot,
+            snapshot ? snapshotSubagents(snapshot) : [],
+            toolSubagents
+        ),
         terminals,
         undiscoveredTerminalCount,
         possibleTerminalCommands

@@ -266,3 +266,98 @@ describe('delegation snapshots', () => {
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks: [], messages })).toBeNull()
     })
 })
+
+describe('subagent counting', () => {
+    function snapshotMember(overrides: Partial<{
+        id: string
+        title: string
+        status: string
+    }>): Record<string, unknown> {
+        return {
+            id: overrides.id ?? 'mvs-child-1',
+            parentId: 'session-1',
+            title: overrides.title ?? 'Audit the web side',
+            detail: 'explore',
+            status: overrides.status ?? 'running',
+            startedAt: 5,
+            endedAt: null,
+            depth: 0
+        }
+    }
+
+    function taskBlock(id: string, description: string): ToolCallBlock {
+        return toolBlock({
+            id: `block-${id}`,
+            name: 'Task',
+            tool: { id, state: 'running', input: { description } }
+        })
+    }
+
+    it('counts a subagent once when the snapshot and the tool block describe it', () => {
+        const messages = [delegationSnapshot([
+            snapshotMember({ id: 'mvs-child-1', title: 'Audit the web side' }),
+            snapshotMember({ id: 'mvs-child-2', title: 'Audit the utils' })
+        ])]
+        const blocks = [
+            taskBlock('call-1', 'Audit the web side'),
+            taskBlock('call-2', 'Audit the utils')
+        ]
+
+        const data = buildSessionStatusData({ goal: null, tasks: [], blocks, messages })
+
+        expect(data?.subagents.map((subagent) => subagent.id)).toEqual(['mvs-child-1', 'mvs-child-2'])
+    })
+
+    it('keeps a tool block for an agent the snapshot does not mention', () => {
+        const messages = [delegationSnapshot([snapshotMember({ id: 'mvs-child-1', title: 'Audit the web side' })])]
+        const blocks = [
+            taskBlock('call-1', 'Audit the web side'),
+            taskBlock('call-2', 'Audit something else')
+        ]
+
+        const data = buildSessionStatusData({ goal: null, tasks: [], blocks, messages })
+
+        expect(data?.subagents.map((subagent) => subagent.id)).toEqual(['mvs-child-1', 'call-2'])
+    })
+
+    it('drops the tool block of a subagent the snapshot already finished', () => {
+        const messages = [delegationSnapshot([
+            snapshotMember({ id: 'mvs-child-1', title: 'Audit the web side', status: 'completed' })
+        ])]
+        const blocks = [taskBlock('call-1', 'Audit the web side')]
+
+        const data = buildSessionStatusData({ goal: null, tasks: [], blocks, messages })
+
+        expect(data?.subagents ?? []).toEqual([])
+    })
+
+    it('counts two agents that share a task description twice', () => {
+        const messages = [delegationSnapshot([
+            snapshotMember({ id: 'mvs-child-1', title: 'Same title' }),
+            snapshotMember({ id: 'mvs-child-2', title: 'Same title' })
+        ])]
+        const blocks = [taskBlock('call-1', 'Same title')]
+
+        const data = buildSessionStatusData({ goal: null, tasks: [], blocks, messages })
+
+        expect(data?.subagents.map((subagent) => subagent.id)).toEqual(['mvs-child-1', 'mvs-child-2'])
+    })
+
+    it('matches a task description the tool block had to truncate', () => {
+        const description = `Audit the web side ${'x'.repeat(120)}`
+        const messages = [delegationSnapshot([snapshotMember({ id: 'mvs-child-1', title: description })])]
+        const blocks = [taskBlock('call-1', description)]
+
+        const data = buildSessionStatusData({ goal: null, tasks: [], blocks, messages })
+
+        expect(data?.subagents.map((subagent) => subagent.id)).toEqual(['mvs-child-1'])
+    })
+
+    it('lists tool block subagents when the session reports no delegation snapshot', () => {
+        const blocks = [taskBlock('call-1', 'Inspect the API')]
+
+        const data = buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [] })
+
+        expect(data?.subagents.map((subagent) => subagent.id)).toEqual(['call-1'])
+    })
+})
