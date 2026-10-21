@@ -14,6 +14,14 @@ export type AskUserQuestionQuestion = {
     question: string
     options: AskUserQuestionOption[]
     multiSelect: boolean
+    /**
+     * False when the question may be left unanswered.
+     *
+     * The agent decides this (an ACP form property that is not in the
+     * schema's `required` list is optional). A payload without the flag is
+     * treated as required, which is the safe default.
+     */
+    required: boolean
 }
 
 export type AskUserQuestionQuestionInfo = {
@@ -40,6 +48,7 @@ export function parseAskUserQuestionInput(input: unknown): { questions: AskUserQ
         const question = typeof raw.question === 'string' ? raw.question.trim() : ''
         const header = typeof raw.header === 'string' ? raw.header.trim() : ''
         const multiSelect = typeof raw.multiSelect === 'boolean' ? raw.multiSelect : false
+        const required = typeof raw.required === 'boolean' ? raw.required : true
 
         const rawOptions = Array.isArray(raw.options) ? raw.options : []
         const options: AskUserQuestionOption[] = []
@@ -57,7 +66,8 @@ export function parseAskUserQuestionInput(input: unknown): { questions: AskUserQ
             header: header.length > 0 ? header : null,
             question,
             options,
-            multiSelect
+            multiSelect,
+            required
         })
     }
 

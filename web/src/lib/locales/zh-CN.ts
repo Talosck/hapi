@@ -601,6 +601,7 @@ export default {
   'tool.askUserQuestion.fallback': 'AskUserQuestion 格式不正确。请输入您的答案：',
   'tool.askUserQuestion.placeholder': '输入您的答案…',
   'tool.askUserQuestion.otherPlaceholder': '或输入您自己的答案…',
+  'tool.askUserQuestion.optional': '可选 —— 此题可以跳过',
   'tool.requestUserInput.textPlaceholder': '输入您的答案…',
   'tool.requestUserInput.noteLabel': '补充说明（可选）',
   'tool.requestUserInput.notePlaceholder': '添加备注…',

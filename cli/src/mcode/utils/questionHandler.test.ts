@@ -268,8 +268,53 @@ describe('McodeQuestionHandler', () => {
         expect(submitAnswer).toHaveBeenCalledWith('Q: Why?\nA: because the tests failed');
     });
 
-    it('keeps a free-text answer when the form has no Other field', async () => {
-        // The web always offers an "Other" row. When the agent's form has no
+    it('marks the questions the agent requires in the question card', async () => {
+        // The ACP form schema lists the properties the agent insists on. A
+        // question that is not listed may be skipped by the user, so the card
+        // has to say so.
+        const { getState, elicit } = createHarness(choiceHint);
+        void elicit({
+            ...choiceRequest,
+            requestedSchema: {
+                ...choiceRequest.requestedSchema,
+                required: ['option_choice']
+            }
+        });
+
+        const request = getState().requests?.['call_function_1'];
+        expect(request?.arguments).toMatchObject({
+            questions: [{ required: true }]
+        });
+    });
+
+    it('marks a question the agent does not require as optional', async () => {
+        const { getState, elicit } = createHarness(choiceHint);
+        void elicit(choiceRequest);
+
+        const request = getState().requests?.['call_function_1'];
+        expect(request?.arguments).toMatchObject({
+            questions: [{ required: false }]
+        });
+    });
+
+    it('renders an answer that was submitted under the form field id', async () => {
+        // A client that fills the ACP form answers under the property id — the
+        // "Other" field for a free-text answer. The answer is the same answer
+        // and must reach the agent instead of "No answer was provided".
+        const { questionHandler, elicit, submitAnswer } = createHarness(choiceHint);
+        const resultPromise = elicit(choiceRequest);
+
+        await questionHandler.handleResponse({
+            id: 'call_function_1',
+            approved: true,
+            answers: { option_choice__other: ['My own answer'] }
+        });
+
+        await expect(resultPromise).resolves.toEqual({ action: 'decline' });
+        expect(submitAnswer).toHaveBeenCalledWith('Q: Which option do you prefer?\nA: My own answer');
+    });
+
+    it('keeps a free-text answer when the form has no Other field', async () => {        // The web always offers an "Other" row. When the agent's form has no
         // `__other` property the typed text has no place in the form content,
         // but the user still answered: the answer must reach the agent
         // instead of being reported as "No answers were provided".
@@ -489,7 +534,10 @@ describe('mcode ask_user tool-call parsing', () => {
                     { label: 'Alpha', description: null },
                     { label: 'Beta', description: null }
                 ],
-                multiSelect: false
+                multiSelect: false,
+                // The tool call carries no required information: every question
+                // counts as required until the elicitation says otherwise.
+                required: true
             }]
         });
     });

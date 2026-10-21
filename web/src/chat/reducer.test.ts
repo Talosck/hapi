@@ -168,8 +168,64 @@ describe('reduceChatBlocks', () => {
         }))
     })
 
-    it('keeps a plan card the agent did not withdraw', () => {
+    it('takes the question definition from the question request', () => {
+        // The tool call only carries the questions; the request carries the
+        // agent's own definition, including which questions may be skipped.
         const messages = [
+            decryptedMessage('question-call', {
+                role: 'agent',
+                content: {
+                    type: 'codex',
+                    data: {
+                        type: 'tool-call',
+                        callId: 'call-question-1',
+                        name: 'ask_user_question',
+                        input: {
+                            questions: [{
+                                question: 'Which one?',
+                                options: [{ label: 'Alpha', description: null }],
+                                multiSelect: false
+                            }]
+                        }
+                    }
+                }
+            }, 1)
+        ].map(message => normalizeDecryptedMessage(message))
+            .filter((message): message is NormalizedMessage => message !== null)
+
+        const agentState = {
+            requests: {
+                'request-1': {
+                    tool: 'ask_user_question',
+                    toolCallId: 'call-question-1',
+                    arguments: {
+                        questions: [{
+                            question: 'Which one?',
+                            options: [{ label: 'Alpha', description: null }],
+                            multiSelect: false,
+                            required: false
+                        }]
+                    },
+                    createdAt: 2
+                }
+            },
+            completedRequests: {}
+        } as unknown as Parameters<typeof reduceChatBlocks>[1]
+
+        const reduced = reduceChatBlocks(messages, agentState)
+
+        expect(reduced.blocks).toContainEqual(expect.objectContaining({
+            kind: 'tool-call',
+            id: 'call-question-1',
+            tool: expect.objectContaining({
+                input: {
+                    questions: [expect.objectContaining({ required: false })]
+                }
+            })
+        }))
+    })
+
+    it('keeps a plan card the agent did not withdraw', () => {        const messages = [
             decryptedMessage('plan-doc', {
                 role: 'agent',
                 content: {

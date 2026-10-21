@@ -212,6 +212,13 @@ export function AskUserQuestionFooter(props: {
             : String(index)
     )
 
+    /**
+     * Whether the question has to be answered. The agent decides (an ACP
+     * form property that is not in the schema's `required` list is optional);
+     * a payload without the flag counts as required.
+     */
+    const isQuestionRequired = (idx: number): boolean => questions[idx]?.required !== false
+
     const submit = async () => {
         if (loading) return
 
@@ -224,9 +231,15 @@ export function AskUserQuestionFooter(props: {
             }
             answers['0'] = a0
         } else {
+            let answeredCount = 0
             for (let i = 0; i < questions.length; i += 1) {
                 const a = validateQuestion(i)
                 if (!a) {
+                    // An optional question the user left empty is not an
+                    // error: it is simply not answered.
+                    if (!isQuestionRequired(i)) {
+                        continue
+                    }
                     setError(t('tool.selectOption'))
                     setStep(i)
                     return
@@ -235,7 +248,14 @@ export function AskUserQuestionFooter(props: {
                 if (!q) {
                     continue
                 }
+                answeredCount += 1
                 answers[questionAnswerKey(q, i)] = a
+            }
+            // The agent expects at least one answer: a questionnaire without a
+            // single answer is dismissed instead of sent.
+            if (answeredCount === 0) {
+                setError(t('tool.selectOption'))
+                return
             }
         }
 
@@ -247,7 +267,7 @@ export function AskUserQuestionFooter(props: {
     const next = () => {
         if (questions.length === 0) return
         const a = validateQuestion(clampedStep)
-        if (!a) {
+        if (!a && isQuestionRequired(clampedStep)) {
             setError(t('tool.selectOption'))
             return
         }
@@ -372,6 +392,11 @@ export function AskUserQuestionFooter(props: {
                                     <Badge variant="default">
                                         {questions[clampedStep].header}
                                     </Badge>
+                                </div>
+                            ) : null}
+                            {questions[clampedStep]?.required === false ? (
+                                <div className="mt-1 text-xs text-[var(--app-hint)]">
+                                    {t('tool.askUserQuestion.optional')}
                                 </div>
                             ) : null}
                             {questions[clampedStep]?.question ? (

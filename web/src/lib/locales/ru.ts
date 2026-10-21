@@ -605,6 +605,7 @@ export default {
   'tool.askUserQuestion.fallback': 'Данные AskUserQuestion не в ожидаемом формате. Введите ответ:',
   'tool.askUserQuestion.placeholder': 'Введите ответ…',
   'tool.askUserQuestion.otherPlaceholder': 'Или введите свой ответ…',
+  'tool.askUserQuestion.optional': 'Необязательно — этот вопрос можно пропустить',
   'tool.requestUserInput.textPlaceholder': 'Введите ответ…',
   'tool.requestUserInput.noteLabel': 'Дополнительное примечание (необязательно)',
   'tool.requestUserInput.notePlaceholder': 'Добавить примечание…',

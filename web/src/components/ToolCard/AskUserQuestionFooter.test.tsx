@@ -54,8 +54,69 @@ function SessionKeyedWrapper(props: { sessionId: string; tool: ChatToolCall }) {
     )
 }
 
-describe('AskUserQuestionFooter draft persistence (hapi#1734)', () => {
-    it('restores an in-progress answer after a session-switch remount', () => {
+describe('AskUserQuestionFooter optional questions', () => {
+    // The draft is stored per session and tool id, so every case needs its own
+    // pair — otherwise a restored draft answers the next case.
+    function makeQuestionTool(required: boolean[], id = 'tool-questions'): ChatToolCall {
+        const questions = required.map((isRequired, index) => ({
+            question: `Question ${index + 1}`,
+            options: [{ label: `Option ${index + 1}`, description: null }],
+            multiSelect: false,
+            required: isRequired
+        }))
+        return {
+            id,
+            name: 'ask_user_question',
+            state: 'pending',
+            input: { questions },
+            createdAt: 1,
+            startedAt: null,
+            completedAt: null,
+            execStartedAt: null,
+            execCompletedAt: null,
+            description: null,
+            permission: { id: 'permission-1', status: 'pending' }
+        } as unknown as ChatToolCall
+    }
+
+    it('lets the user skip an optional question', async () => {
+        const { approvePermission } = renderFooter('session-optional', makeQuestionTool([true, false]))
+
+        fireEvent.click(screen.getByRole('radio', { name: /Option 1/ }))
+        // The second question is optional: stepping over it is allowed.
+        fireEvent.click(screen.getByRole('button', { name: 'tool.next' }))
+        fireEvent.click(screen.getByRole('button', { name: 'tool.submit' }))
+
+        await vi.waitFor(() => expect(approvePermission).toHaveBeenCalled())
+        expect(approvePermission.mock.calls[0]?.[2]).toEqual({ answers: { '0': ['Option 1'] } })
+    })
+
+    it('still requires an answer for a required question', async () => {
+        const { approvePermission } = renderFooter('session-required', makeQuestionTool([true, true]))
+
+        fireEvent.click(screen.getByRole('radio', { name: /Option 1/ }))
+        fireEvent.click(screen.getByRole('button', { name: 'tool.next' }))
+        fireEvent.click(screen.getByRole('button', { name: 'tool.submit' }))
+
+        // The second question has no answer: the submission is refused.
+        expect(approvePermission).not.toHaveBeenCalled()
+        expect(screen.getByText('tool.selectOption')).toBeTruthy()
+    })
+
+    it('needs at least one answer even when every question is optional', async () => {
+        const { approvePermission } = renderFooter('session-none', makeQuestionTool([false, false]))
+
+        // Both questions are optional, so stepping over them is allowed — but
+        // the questionnaire still needs one answer.
+        fireEvent.click(screen.getByRole('button', { name: 'tool.next' }))
+        fireEvent.click(screen.getByRole('button', { name: 'tool.submit' }))
+
+        expect(approvePermission).not.toHaveBeenCalled()
+        expect(screen.getByText('tool.selectOption')).toBeTruthy()
+    })
+})
+
+describe('AskUserQuestionFooter draft persistence (hapi#1734)', () => {    it('restores an in-progress answer after a session-switch remount', () => {
         const tool = makeTool('tool-1')
         const { rerender } = render(<SessionKeyedWrapper sessionId="session-A" tool={tool} />)
 

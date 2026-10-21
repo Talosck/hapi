@@ -76,6 +76,12 @@ export type McodeAskUserQuestionInput = {
         question: string;
         options: Array<{ label: string; description: string | null }>;
         multiSelect: boolean;
+        /**
+         * False for a question the user may leave unanswered. The ACP form
+         * schema decides: a property that is not listed in `required` is
+         * optional, and the client has to be able to skip it.
+         */
+        required: boolean;
     }>;
 };
 
@@ -333,6 +339,9 @@ export function parseMcodeAskUserSteps(input: unknown): McodeQuestionStep[] | nu
 export function buildMcodeQuestionInput(steps: McodeQuestionStep[]): McodeAskUserQuestionInput {
     return buildQuestionInput(steps.map((step) => ({
         ...step,
+        // The tool call carries no required information: only the elicitation
+        // schema knows which questions may be skipped. Until it arrives every
+        // question counts as required.
         required: true,
         otherFieldId: null
     })));
@@ -384,7 +393,8 @@ function buildQuestionInput(specs: McodeQuestionSpec[]): McodeAskUserQuestionInp
                 label: option.label,
                 description: option.description
             })),
-            multiSelect: spec.multiSelect
+            multiSelect: spec.multiSelect,
+            required: spec.required
         }))
     };
 }
@@ -549,6 +559,29 @@ function answeredStepKeys(
     return answered;
 }
 
+/**
+ * The values answered for one question.
+ *
+ * A client may answer under the question's own id, under its index, or — when
+ * it fills the ACP form — under the id of the question's free-text ("Other")
+ * property. All three are the same answer, so all three are read here.
+ */
+function answerValuesForSpec(
+    flat: Record<string, string[]>,
+    spec: McodeQuestionSpec,
+    index: number
+): string[] {
+    const byId = flat[spec.id];
+    if (byId && byId.length > 0) return byId;
+    const byIndex = flat[String(index)];
+    if (byIndex && byIndex.length > 0) return byIndex;
+    if (spec.otherFieldId !== null) {
+        const byOtherField = flat[spec.otherFieldId];
+        if (byOtherField && byOtherField.length > 0) return byOtherField;
+    }
+    return [];
+}
+
 /** Flat `{ index: [labels] }` shape used by the question card's answered view. */
 function buildAnswerSummary(
     specs: McodeQuestionSpec[],
@@ -559,8 +592,8 @@ function buildAnswerSummary(
 
     const summary: Record<string, string[]> = {};
     specs.forEach((spec, index) => {
-        const raw = flat[spec.id] ?? flat[String(index)];
-        if (!raw || raw.length === 0) return;
+        const raw = answerValuesForSpec(flat, spec, index);
+        if (raw.length === 0) return;
         summary[String(index)] = raw.map((value) => {
             const option = spec.options.find((candidate) => (
                 candidate.id === value || candidate.label === value
@@ -585,8 +618,7 @@ function buildAnswerMessage(
     const blocks: string[] = [];
 
     specs.forEach((spec, index) => {
-        const raw = flat[spec.id] ?? flat[String(index)] ?? [];
-        const values = raw
+        const values = answerValuesForSpec(flat, spec, index)
             .map((value) => value.trim())
             .filter((value) => value.length > 0)
             .map((value) => spec.options.find((candidate) => (

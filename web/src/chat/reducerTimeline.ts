@@ -60,6 +60,25 @@ function getAgentRunCardId(event: Record<string, unknown>, fallback: string): st
     return getEventString(event, 'cardId') ?? getEventString(event, 'card_id') ?? fallback
 }
 
+/**
+ * The tool name MiniMax Code's `ask_user` bridge uses for its question card.
+ * The question request carries the agent's own question definition (which
+ * questions may be skipped); the tool call only carries the questions.
+ */
+const QUESTION_REQUEST_TOOL = 'ask_user_question'
+
+/**
+ * The question definition of a pending question request, if the permission
+ * entry is one.
+ *
+ * The request is the authoritative source: it knows which questions the agent
+ * marked as optional, so the card can let the user skip them.
+ */
+function questionRequestInput(entry: PermissionEntry | undefined): unknown {
+    if (!entry || entry.toolName !== QUESTION_REQUEST_TOOL) return undefined
+    return isObject(entry.input) ? entry.input : undefined
+}
+
 function isFallbackAgentRunCardId(cardId: string, agentId: string | null): boolean {
     return agentId !== null && cardId === `codex-agent:${agentId}`
 }
@@ -1008,7 +1027,8 @@ export function reduceTimeline(
                         continue
                     }
 
-                    const permission = context.permissionsById.get(c.id)?.permission
+                    const permissionEntry = context.permissionsById.get(c.id)
+                    const permission = permissionEntry?.permission
 
                     const block = ensureToolBlock(blocks, toolBlocksById, c.id, {
                         createdAt: msg.createdAt,
@@ -1018,7 +1038,7 @@ export function reduceTimeline(
                         localId: msg.localId,
                         meta: msg.meta,
                         name: c.name,
-                        input: c.input,
+                        input: questionRequestInput(permissionEntry) ?? c.input,
                         description: c.description,
                         nativeTitle: c.nativeTitle,
                         nativeKind: c.nativeKind,

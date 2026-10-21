@@ -603,6 +603,7 @@ export default {
   'tool.askUserQuestion.fallback': 'AskUserQuestion payload is not in the expected format. Type your answer:',
   'tool.askUserQuestion.placeholder': 'Type your answer…',
   'tool.askUserQuestion.otherPlaceholder': 'Or type your own answer…',
+  'tool.askUserQuestion.optional': 'Optional — you can skip this question',
   'tool.requestUserInput.textPlaceholder': 'Type your answer…',
   'tool.requestUserInput.noteLabel': 'Additional note (optional)',
   'tool.requestUserInput.notePlaceholder': 'Add a note…',
