@@ -1,5 +1,5 @@
 import { logger } from '@/ui/logger';
-import type { AcpSdkBackend } from '@/agent/backends/acp';
+import { AcpSessionModeUnsupportedError, type AcpSdkBackend } from '@/agent/backends/acp';
 import type { PermissionMode } from '../types';
 import {
     MCODE_PERMISSION_CONFIG_CATEGORY,
@@ -83,6 +83,16 @@ export function resolveMcodePermissionMode(
 }
 
 /**
+ * What a permission-mode apply did to the two MiniMax Code axes.
+ */
+export type McodePermissionApplyResult = {
+    /** The permission mode the agent ends up running with. */
+    mode: PermissionMode;
+    /** False when the agent cannot switch session modes at all. */
+    sessionModeApplied: boolean;
+};
+
+/**
  * Applies a HAPI permission mode to the MiniMax Code session.
  *
  * The plan mode is applied through `session/set_mode` first, then the tool
@@ -90,19 +100,42 @@ export function resolveMcodePermissionMode(
  * first means a rejected plan transition cannot leave the process-scoped
  * permission policy changed; the launcher rolls both axes back if either call
  * fails.
+ *
+ * An agent that does not implement `session/set_mode` at all is a different
+ * case: it cannot run in plan mode, but the tool permission policy lives on
+ * its own config option and is what `auto` and `bypassPermissions` need. The
+ * policy is applied all the same, and the returned mode is the one the agent
+ * actually runs with.
  */
 export async function applyMcodePermissionMode(
     backend: AcpSdkBackend,
     sessionId: string,
     mode: PermissionMode | undefined
-): Promise<void> {
+): Promise<McodePermissionApplyResult> {
     const { permissionOption, sessionMode } = mapMcodePermissionMode(mode);
 
-    // `session/set_mode` carries the session mode (default / plan), not the
-    // reasoning effort — see AcpSdkBackend.setSessionMode.
-    await backend.setSessionMode(sessionId, sessionMode);
+    let sessionModeApplied = true;
+    try {
+        // `session/set_mode` carries the session mode (default / plan), not the
+        // reasoning effort — see AcpSdkBackend.setSessionMode.
+        await backend.setSessionMode(sessionId, sessionMode);
+    } catch (error) {
+        if (!(error instanceof AcpSessionModeUnsupportedError)) throw error;
+        sessionModeApplied = false;
+        logger.warn(
+            '[mcode-remote] Agent does not support session/set_mode; the session mode stays as the agent runs it',
+            error
+        );
+    }
 
     const configId = resolveMcodePermissionConfigId(backend, sessionId);
     await backend.setConfigOption(sessionId, configId, permissionOption);
     logger.debug(`[mcode-remote] Applied permission mode ${mode} (option=${permissionOption}, sessionMode=${sessionMode})`);
+
+    // Plan is the only mode that rides on the session mode, so without
+    // `session/set_mode` the agent runs the tool permission policy alone.
+    return {
+        mode: !sessionModeApplied && mode === 'plan' ? 'default' : mode ?? 'default',
+        sessionModeApplied
+    };
 }

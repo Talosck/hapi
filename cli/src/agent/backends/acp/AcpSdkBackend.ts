@@ -52,6 +52,20 @@ export type AcpConfigOptionDescriptor = {
 };
 
 /**
+ * The agent does not implement `session/set_mode` at all.
+ *
+ * A capability gap, not a rejected request: the agent cannot run in that
+ * mode, but the other permission axis it publishes as a config option is
+ * unaffected and must keep working.
+ */
+export class AcpSessionModeUnsupportedError extends Error {
+    constructor() {
+        super('ACP agent does not support session/set_mode');
+        this.name = 'AcpSessionModeUnsupportedError';
+    }
+}
+
+/**
  * Session state the agent publishes over `session/update` outside of the
  * message stream. These updates describe what the agent currently runs, so a
  * launcher can keep the displayed mode / model / effort honest.
@@ -101,6 +115,8 @@ export class AcpSdkBackend implements AgentBackend {
     private initializeResult: AcpInitializeResult | null = null;
     private initializeInFlight: Promise<void> | null = null;
     private setModeSupported: boolean | undefined = undefined;
+    /** Whether the agent implements `session/set_mode` at all. */
+    private setSessionModeSupported: boolean | undefined = undefined;
     private isProcessingMessage = false;
     private promptRequestInFlight = false;
     /** Concurrent session/prompt requests (main prompt + soft steers). */
@@ -417,6 +433,12 @@ export class AcpSdkBackend implements AgentBackend {
      * `thought_level` config option. MiniMax Code's session modes
      * (`default` / `plan`) are a different axis, so they must not overwrite
      * the cached thinking-effort value.
+     *
+     * An agent that does not implement the method at all cannot run in that
+     * mode. That is a capability gap rather than a rejected request, so it
+     * raises {@link AcpSessionModeUnsupportedError} and the caller decides
+     * how to degrade — the capability gap must not take the other permission
+     * axis down with it.
      */
     async setSessionMode(sessionId: string, modeId: string): Promise<void> {
         if (!this.transport) {
@@ -424,7 +446,22 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         await this.waitForResponseComplete();
-        await this.transport.sendRequest('session/set_mode', { sessionId, modeId });
+
+        if (this.setSessionModeSupported === false) {
+            throw new AcpSessionModeUnsupportedError();
+        }
+
+        try {
+            await this.transport.sendRequest('session/set_mode', { sessionId, modeId });
+            this.setSessionModeSupported = true;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (/method not found/i.test(message)) {
+                this.setSessionModeSupported = false;
+                throw new AcpSessionModeUnsupportedError();
+            }
+            throw error;
+        }
     }
 
     async newSession(config: AgentSessionConfig): Promise<string> {

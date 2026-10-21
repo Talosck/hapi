@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
+import { AcpSessionModeUnsupportedError } from '@/agent/backends/acp'
 import { MessageQueue2 } from '@/utils/MessageQueue2'
 import type { McodeMode } from './types'
 
@@ -150,6 +151,15 @@ function createSession(messages: QueuedMessage[] = [], permissionMode: 'default'
         pushKeepAlive: vi.fn()
     }
     return session
+}
+
+/** The permission-mode failure messages the session reported to the user. */
+function failureMessages(session: { sendSessionEvent: ReturnType<typeof vi.fn> }): string[] {
+    return session.sendSessionEvent.mock.calls
+        .map((call) => call[0] as { type?: string; message?: string })
+        .filter((event) => event?.type === 'message' && typeof event.message === 'string')
+        .map((event) => event.message as string)
+        .filter((message) => message.includes('Failed to apply MiniMax Code permission mode'))
 }
 
 function createScriptedSession() {
@@ -355,6 +365,51 @@ describe('mcodeRemoteLauncher config sync', () => {
         expect(backend.setSessionMode.mock.calls.map((call) => call[1]))
             .toEqual(['default', 'plan', 'default'])
         expect(backend.prompt).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps the tool permission policy when the agent cannot switch session modes', async () => {
+        const backend = createBackend({
+            setSessionMode: vi.fn(async () => {
+                throw new AcpSessionModeUnsupportedError()
+            })
+        })
+        const session = createSession([
+            { message: 'go', mode: { permissionMode: 'bypassPermissions', model: null } }
+        ])
+        const onPermissionModeRollback = vi.fn()
+
+        await mcodeRemoteLauncher(session as never, { onPermissionModeRollback })
+
+        // The policy rides on its own config option and must still be applied.
+        expect(backend.setConfigOption).toHaveBeenCalledWith(
+            'mcode-session-1',
+            'permissionMode',
+            'bypassPermissions'
+        )
+        expect(onPermissionModeRollback).not.toHaveBeenCalled()
+        expect(failureMessages(session)).toEqual([])
+        expect(backend.prompt).toHaveBeenCalledTimes(1)
+    })
+
+    it('reports the default mode when plan is asked for and the agent cannot switch modes', async () => {
+        const backend = createBackend({
+            setSessionMode: vi.fn(async () => {
+                throw new AcpSessionModeUnsupportedError()
+            })
+        })
+        const session = createSession([
+            { message: 'plan this', mode: { permissionMode: 'plan', model: null } }
+        ])
+        const onPermissionModeRollback = vi.fn()
+
+        await mcodeRemoteLauncher(session as never, { onPermissionModeRollback })
+
+        expect(onPermissionModeRollback).not.toHaveBeenCalled()
+        expect(backend.setConfigOption).toHaveBeenCalledWith(
+            'mcode-session-1',
+            'permissionMode',
+            'default'
+        )
     })
 
     it('keeps questions answerable after the turn that raised them ends', async () => {

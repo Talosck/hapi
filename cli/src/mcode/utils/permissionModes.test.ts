@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AcpSdkBackend } from '@/agent/backends/acp';
+import { AcpSessionModeUnsupportedError, type AcpSdkBackend } from '@/agent/backends/acp';
 import {
     applyMcodePermissionMode,
     mapMcodePermissionMode,
@@ -77,6 +77,44 @@ describe('applyMcodePermissionMode', () => {
         await expect(applyMcodePermissionMode(backend, 'session-1', 'plan'))
             .rejects.toThrow('Unsupported Session mode');
         expect(calls).toEqual(['mode']);
+    });
+
+    it('applies the permission policy when the agent cannot switch session modes', async () => {
+        const calls: string[] = [];
+        const backend = {
+            getConfigOptionByCategory: () => {
+                calls.push('lookup');
+                return { id: 'permissionMode', currentValue: 'default', options: [] };
+            },
+            setSessionMode: async () => {
+                calls.push('mode');
+                throw new AcpSessionModeUnsupportedError();
+            },
+            setConfigOption: async (_sessionId: string, id: string, value: string) => {
+                calls.push(`config:${id}:${value}`);
+            }
+        } as unknown as AcpSdkBackend;
+
+        const result = await applyMcodePermissionMode(backend, 'session-1', 'bypassPermissions');
+
+        // The tool permission policy lives on its own config option, so a
+        // missing session/set_mode must not take it down with it.
+        expect(calls).toEqual(['mode', 'lookup', 'config:permissionMode:bypassPermissions']);
+        expect(result).toEqual({ mode: 'bypassPermissions', sessionModeApplied: false });
+    });
+
+    it('reports the default mode when plan is asked for and the agent cannot switch modes', async () => {
+        const backend = {
+            getConfigOptionByCategory: () => ({ id: 'permissionMode', currentValue: 'default', options: [] }),
+            setSessionMode: async () => {
+                throw new AcpSessionModeUnsupportedError();
+            },
+            setConfigOption: async () => {}
+        } as unknown as AcpSdkBackend;
+
+        const result = await applyMcodePermissionMode(backend, 'session-1', 'plan');
+
+        expect(result).toEqual({ mode: 'default', sessionModeApplied: false });
     });
 });
 

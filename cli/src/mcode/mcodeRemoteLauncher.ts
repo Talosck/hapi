@@ -75,6 +75,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private currentBackendEffort: string | null = null;
     private defaultBackendEffort: string | null = null;
     private appliedPermissionMode: PermissionMode | null = null;
+    /** The permission mode HAPI last asked for, even when the agent cannot honor it. */
+    private requestedPermissionMode: PermissionMode | null = null;
     private hasAppliedPermissionMode = false;
     private readonly backgroundTasks = new BackgroundTaskAggregator();
     /** ACP session id of the running MiniMax Code session. */
@@ -318,12 +320,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 }
             }
 
-            const permissionApplied = await this.applyPermissionMode(acpSessionId, batch.mode.permissionMode);
-            if (!permissionApplied) {
-                // Keep the per-turn mode in sync with the policy the agent
-                // actually runs; runMcode's keepalive was rolled back too.
-                batch.mode.permissionMode = this.appliedPermissionMode ?? 'default';
-            }
+            await this.applyPermissionMode(acpSessionId, batch.mode.permissionMode);
+            // Keep the per-turn mode in sync with the policy the agent
+            // actually runs: a rolled-back apply and an agent that cannot
+            // switch session modes both end up on a different mode than the
+            // one that was asked for.
+            batch.mode.permissionMode = this.appliedPermissionMode ?? 'default';
 
             this.applyDisplayMode(batch.mode.permissionMode, this.currentBackendModel ?? undefined);
             messageBuffer.addMessage(batch.message, 'user');
@@ -441,39 +443,43 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * option is process-scoped and the mode is a separate session axis), so
      * restore the previously applied mode before reporting the failure.
      */
-    private async applyPermissionMode(sessionId: string, mode: PermissionMode | undefined): Promise<boolean> {
-        if (!this.backend) return true;
-        if (this.hasAppliedPermissionMode && this.appliedPermissionMode === mode) return true;
+    private async applyPermissionMode(sessionId: string, mode: PermissionMode | undefined): Promise<void> {
+        if (!this.backend) return;
+        if (this.hasAppliedPermissionMode && this.requestedPermissionMode === (mode ?? null)) return;
         try {
-            await applyMcodePermissionMode(this.backend, sessionId, mode);
-            this.appliedPermissionMode = mode ?? null;
+            const applied = await applyMcodePermissionMode(this.backend, sessionId, mode);
+            this.appliedPermissionMode = applied.mode;
+            this.requestedPermissionMode = mode ?? null;
             this.hasAppliedPermissionMode = true;
-            this.hubPermissionMode = mode ?? null;
-            // HAPI's own request decides the session mode the agent runs with:
-            // MiniMax Code applies a mode transition on the next prompt.
-            this.currentSessionMode = mapMcodePermissionMode(mode).sessionMode;
-            return true;
+            this.hubPermissionMode = applied.mode;
+            if (applied.sessionModeApplied) {
+                // HAPI's own request decides the session mode the agent runs with:
+                // MiniMax Code applies a mode transition on the next prompt.
+                this.currentSessionMode = mapMcodePermissionMode(mode).sessionMode;
+            }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             const previous = this.appliedPermissionMode ?? 'default';
             logger.warn('[mcode-remote] Failed to apply permission mode; rolling back', error);
             try {
-                await applyMcodePermissionMode(this.backend, sessionId, previous);
+                const restored = await applyMcodePermissionMode(this.backend, sessionId, previous);
+                if (restored.sessionModeApplied) {
+                    this.currentSessionMode = mapMcodePermissionMode(previous).sessionMode;
+                }
             } catch (rollbackError) {
                 // Keep retrying the previous mode on the next turn rather than
                 // claiming it was applied.
                 logger.warn('[mcode-remote] Failed to roll back permission mode', rollbackError);
             }
             this.appliedPermissionMode = previous;
+            this.requestedPermissionMode = previous;
             this.hasAppliedPermissionMode = false;
             this.hubPermissionMode = previous;
-            this.currentSessionMode = mapMcodePermissionMode(previous).sessionMode;
             this.opts.onPermissionModeRollback?.(previous);
             this.session.sendSessionEvent({
                 type: 'message',
                 message: `Failed to apply MiniMax Code permission mode: ${message}. Keeping ${previous}.`
             });
-            return false;
         }
     }
 
