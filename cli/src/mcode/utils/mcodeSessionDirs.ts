@@ -87,6 +87,13 @@ function dayKey(year: number, month: number, day: number): string {
     return `${Number.isFinite(year) ? year : 0}-${Number.isFinite(month) ? month : 0}-${Number.isFinite(day) ? day : 0}`;
 }
 
+/** The `<year>-<month>` key of a month directory, independent of zero padding. */
+function monthKeyOf(yearDir: string, monthDir: string): string {
+    const year = Number(yearDir);
+    const month = Number(monthDir);
+    return `${Number.isFinite(year) ? year : 0}-${Number.isFinite(month) ? month : 0}`;
+}
+
 /** Orders two day keys chronologically. */
 function compareDayKeys(a: string, b: string): number {
     const [aYear, aMonth, aDay] = a.split('-').map(Number);
@@ -115,13 +122,38 @@ function recentDayKeys(window: number, now: Date = new Date()): Set<string> {
 export async function listMcodeSessionDayDirEntries(
     dataDir: string
 ): Promise<McodeSessionDayDir[]> {
+    return collectMcodeSessionDayDirEntries(dataDir);
+}
+
+/**
+ * The dated directories that can hold a session.
+ *
+ * `monthDays` caches the day directories of a month and `recentMonthKeys`
+ * names the months that are re-read on every call: a new day can only show
+ * up in a month the recent window reaches, so the older months are listed
+ * once instead of on every discovery retry.
+ */
+async function collectMcodeSessionDayDirEntries(
+    dataDir: string,
+    options: {
+        monthDays?: Map<string, string[]>;
+        recentMonthKeys?: Set<string>;
+    } = {}
+): Promise<McodeSessionDayDir[]> {
+    const { monthDays, recentMonthKeys } = options;
     const root = join(dataDir, ...SESSIONS_ROOT_RELATIVE_PATH);
     const dayDirs: McodeSessionDayDir[] = [];
     for (const year of await listDirectories(root)) {
         const yearPath = join(root, year);
         for (const month of await listDirectories(yearPath)) {
             const monthPath = join(yearPath, month);
-            for (const day of await listDirectories(monthPath)) {
+            const isRecent = recentMonthKeys?.has(monthKeyOf(year, month)) ?? true;
+            let days = monthDays?.get(monthPath);
+            if (days === undefined || isRecent) {
+                days = await listDirectories(monthPath);
+                monthDays?.set(monthPath, days);
+            }
+            for (const day of days) {
                 const path = join(monthPath, day);
                 dayDirs.push({ key: dayKeyOf(path), path });
             }
@@ -273,6 +305,8 @@ export function createMcodeSessionDirResolver(opts: {
     const recentDayWindow = opts.recentDayWindow ?? RECENT_DAY_WINDOW;
     const readRelativeDir = opts.readRelativeDir ?? readMcodeSessionIndexRelativeDir;
     const searchedDayDirs = new Set<string>();
+    /** The day directories of every month the resolver has listed. */
+    const monthDays = new Map<string, string[]>();
     let searchedForSessionId: string | null = null;
 
     const resolve = async (sessionId: string): Promise<string | null> => {
@@ -286,7 +320,18 @@ export function createMcodeSessionDirResolver(opts: {
         if (fromIndex) return fromIndex;
 
         const recentKeys = recentDayKeys(recentDayWindow);
-        const dayDirs = await listMcodeSessionDayDirEntries(dataDir);
+        // Only the months the recent window reaches can gain a new day, so the
+        // older months are listed once instead of on every retry: walking the
+        // whole dated tree again costs one traversal per second on a machine
+        // with a year of sessions.
+        const recentMonthKeys = new Set<string>();
+        for (const key of recentKeys) {
+            recentMonthKeys.add(key.slice(0, key.lastIndexOf('-')));
+        }
+        const dayDirs = await collectMcodeSessionDayDirEntries(dataDir, {
+            monthDays,
+            recentMonthKeys
+        });
         const pending = dayDirs.filter(
             (dayDir) => !searchedDayDirs.has(dayDir.path) || recentKeys.has(dayDir.key)
         );
