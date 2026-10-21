@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { asString, isObject } from '@hapi/protocol';
+import { PERMISSION_REQUEST_NOT_FOUND_MESSAGE } from '@hapi/protocol/rpcMethods';
 import type { AgentState } from '@/api/types';
 import type { AgentMessage } from '@/agent/types';
 import type { AcpPermissionResponseMessage } from '@/modules/common/permission/AcpPermissionHandler';
@@ -63,6 +64,8 @@ type PendingQuestion = {
     toolCallId: string | null;
     input: McodeAskUserQuestionInput;
     createdAt: number;
+    /** ACP session the questionnaire belongs to (the turn to cancel). */
+    sessionId: string;
     respond: (result: ElicitationResult) => void;
 };
 
@@ -87,6 +90,8 @@ type QuestionBackend = {
     ): void;
     /** Drains queued session/update messages so the ask_user hint is visible. */
     waitForSessionUpdateQueue?: () => Promise<void>;
+    /** Stops the turn the agent is running (an aborted questionnaire). */
+    cancelPrompt?: (sessionId: string) => Promise<void> | void;
 };
 
 export type McodeQuestionHandlerOptions = {
@@ -96,6 +101,12 @@ export type McodeQuestionHandlerOptions = {
      * answer back as the next user message.
      */
     submitAnswer: (text: string) => void;
+    /**
+     * Called when the user aborts a questionnaire. The agent turn has to
+     * stop: the question is only one part of it, and the other pending
+     * approvals would keep the agent working.
+     */
+    onAbort?: (sessionId: string) => Promise<void> | void;
 };
 
 const ASK_USER_QUESTION_TOOL = 'ask_user_question';
@@ -119,7 +130,15 @@ export class McodeQuestionHandler {
     /** Consumes a permission response that belongs to a pending question. */
     async handleResponse(response: AcpPermissionResponseMessage): Promise<boolean> {
         const pending = this.pending.get(response.id);
-        if (!pending) return false;
+        if (!pending) {
+            // The question is gone: it was answered already, canceled by a new
+            // message, or the session ended. Throwing (instead of returning
+            // false) makes the RPC caller see a real error: the hub turns this
+            // message into a 409, so a duplicate answer is not accepted as if
+            // it had been delivered.
+            logger.debug(PERMISSION_REQUEST_NOT_FOUND_MESSAGE);
+            throw new Error(PERMISSION_REQUEST_NOT_FOUND_MESSAGE);
+        }
 
         this.pending.delete(response.id);
 
@@ -127,6 +146,10 @@ export class McodeQuestionHandler {
         if (decision === 'abort') {
             pending.respond({ action: 'cancel' });
             this.complete(pending, response.id, 'canceled', 'abort', response.reason);
+            // The questionnaire is only one part of the turn: the agent keeps
+            // working (and the other approvals stay open) unless the turn is
+            // stopped as well.
+            await this.options.onAbort?.(pending.sessionId);
             return true;
         }
 
@@ -210,6 +233,9 @@ export class McodeQuestionHandler {
         const toolCallId = hintId ?? null;
         const input = buildQuestionInput(specs);
         const createdAt = Date.now();
+        // The elicitation names the session the questionnaire belongs to, so
+        // an abort can stop that turn.
+        const sessionId = isObject(params) ? (asString(params.sessionId) ?? '') : '';
 
         logger.debug(`[mcode] Elicitation question queued (${requestId})`);
 
@@ -219,6 +245,7 @@ export class McodeQuestionHandler {
                 toolCallId,
                 input,
                 createdAt,
+                sessionId,
                 respond: resolve
             });
 

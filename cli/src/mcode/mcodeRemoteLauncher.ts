@@ -150,7 +150,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 // mcode ends the ask_user turn as soon as the questionnaire is
                 // raised, so answering it continues the conversation as the
                 // next user turn (see McodeQuestionHandler).
-                submitAnswer: (text) => this.submitQuestionAnswer(text)
+                submitAnswer: (text) => this.submitQuestionAnswer(text),
+                // Aborting a questionnaire aborts the turn: the agent would
+                // otherwise keep working on it, and the other pending tool
+                // approvals would stay open.
+                onAbort: async (acpSessionId) => {
+                    if (acpSessionId) {
+                        await backend.cancelPrompt(acpSessionId);
+                    }
+                    await this.permissionHandler?.cancelAll('User aborted');
+                }
             }
         );
 

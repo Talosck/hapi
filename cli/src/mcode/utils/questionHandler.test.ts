@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PERMISSION_REQUEST_NOT_FOUND_MESSAGE } from '@hapi/protocol/rpcMethods';
 import type { AgentState } from '@/api/types';
 import type { AgentBackend } from '@/agent/types';
 import { AcpPermissionHandler } from '@/modules/common/permission/AcpPermissionHandler';
@@ -39,6 +40,7 @@ function createHarness(
 
     let nextHint = hint;
     const submitAnswer = vi.fn<(text: string) => void>();
+    const onAbort = vi.fn<(sessionId: string) => Promise<void> | void>();
     const questionHandler = new McodeQuestionHandler(
         client,
         backend,
@@ -48,13 +50,14 @@ function createHarness(
             nextHint = null;
             return value;
         },
-        { submitAnswer }
+        { submitAnswer, onAbort }
     );
 
     return {
         questionHandler,
         getState: () => state,
         submitAnswer,
+        onAbort,
         elicit: (params: unknown) => {
             if (!elicitationHandler) throw new Error('elicitation handler not registered');
             return elicitationHandler(params) as Promise<Record<string, unknown>>;
@@ -346,6 +349,8 @@ describe('McodeQuestionHandler', () => {
             decision: 'denied'
         });
         await expect(deniedPromise).resolves.toEqual({ action: 'decline' });
+        // A denial is an answer, not an abort: the turn keeps running.
+        expect(denied.onAbort).not.toHaveBeenCalled();
 
         const aborted = createHarness(choiceHint);
         const abortedPromise = aborted.elicit(choiceRequest);
@@ -355,6 +360,9 @@ describe('McodeQuestionHandler', () => {
             decision: 'abort'
         });
         await expect(abortedPromise).resolves.toEqual({ action: 'cancel' });
+        // Aborting a questionnaire aborts the turn it belongs to: the agent
+        // would otherwise keep working on it.
+        expect(aborted.onAbort).toHaveBeenCalledWith('acp-session-1');
     });
 
     it('cancels pending questions when they are superseded or the session ends', async () => {
@@ -372,13 +380,16 @@ describe('McodeQuestionHandler', () => {
         });
     });
 
-    it('ignores responses for unknown question ids', async () => {
+    it('reports a response for an unknown question id as not found', async () => {
         const { questionHandler } = createHarness();
 
+        // The question is gone (answered already, superseded, or the session
+        // ended). The caller has to learn that: a silent success would let
+        // the user believe the answer was delivered.
         await expect(questionHandler.handleResponse({
             id: 'missing',
             approved: true
-        })).resolves.toBe(false);
+        })).rejects.toThrow(PERMISSION_REQUEST_NOT_FOUND_MESSAGE);
     });
 
     it('declines malformed elicitation requests', async () => {
