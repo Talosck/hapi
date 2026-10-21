@@ -2,6 +2,46 @@ import { describe, expect, it } from 'vitest'
 import { normalizeAgentRecord } from '@/chat/normalizeAgent'
 
 describe('normalizeAgentRecord — agentTimestamp exposure', () => {
+    it('drops a goal event whose status is outside the known vocabulary', () => {
+        // The goal is rendered as session state, so an unknown status would
+        // show up as an untranslated key in the status panel.
+        const normalized = normalizeAgentRecord('goal-row', null, 1, {
+            type: 'event',
+            data: {
+                type: 'thread-goal-updated',
+                goal: {
+                    threadId: 'thread-1',
+                    objective: 'finish the task',
+                    status: 'budget-limited'
+                }
+            }
+        })
+
+        expect(normalized).toBeNull()
+    })
+
+    it('keeps a goal event that carries a known status', () => {
+        const normalized = normalizeAgentRecord('goal-row', null, 1, {
+            type: 'event',
+            data: {
+                type: 'thread-goal-updated',
+                goal: {
+                    threadId: 'thread-1',
+                    objective: 'finish the task',
+                    status: 'budgetLimited'
+                }
+            }
+        })
+
+        expect(normalized).toMatchObject({
+            role: 'event',
+            content: {
+                type: 'thread-goal-updated',
+                goal: { status: 'budgetLimited' }
+            }
+        })
+    })
+
     it.each(['blocked', 'usageLimited'] as const)('preserves %s Codex goal status', (status) => {
         const normalized = normalizeAgentRecord('goal-row', null, 1, {
             type: 'codex',

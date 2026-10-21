@@ -31,6 +31,21 @@ function normalizeToolResultPermissions(value: unknown): ToolResultPermission | 
 
 function normalizeAgentEvent(value: unknown): AgentEvent | null {
     if (!isObject(value) || typeof value.type !== 'string') return null
+    if (value.type === 'thread-goal-updated') {
+        // The goal is rendered as session state (the status panel), so it has
+        // to hold the same shape as the goal the codex envelope carries: an
+        // unknown status would be rendered as an untranslated key.
+        const goal = normalizeThreadGoal(value.goal)
+        if (!goal) return null
+        return {
+            ...value,
+            type: 'thread-goal-updated',
+            goal,
+            ...(asString(value.threadId ?? value.thread_id)
+                ? { threadId: asString(value.threadId ?? value.thread_id)! }
+                : {})
+        } as AgentEvent
+    }
     return value as AgentEvent
 }
 
