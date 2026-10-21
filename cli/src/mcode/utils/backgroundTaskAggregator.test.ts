@@ -381,4 +381,62 @@ describe('BackgroundTaskAggregator', () => {
 
         expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
     });
+
+    it('releases a task whose stop was accepted when the turn ends', () => {
+        // A polled task stays alive across turns: the agent polls it again
+        // later. A task whose stop was accepted ("stopping") is not observed
+        // again, so the hub counter must not keep it.
+        const aggregator = new BackgroundTaskAggregator();
+        startBackgroundTask(aggregator);
+        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
+
+        aggregator.handle(taskOutputCall({ id: 'poll-stop' }));
+        aggregator.handle(taskOutputResult('running', 'working', { id: 'poll-stop' }));
+
+        aggregator.handle(toolCall({ id: 'stop-1', name: 'task_stop', input: { task_id: 'bg_1' } }));
+        aggregator.handle(toolResult({
+            id: 'stop-1',
+            text: '<task_stop status="stopping">Stop requested.</task_stop>',
+            details: { task_id: 'bg_1', status: 'stopping' }
+        }));
+
+        // The turn ends: the task is released, so the counter drops.
+        const released = aggregator.flushPromptEnd();
+        expect(released).toHaveLength(1);
+        expect(released[0]).toMatchObject({ type: 'tool_result', id: 'task-call' });
+        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
+    });
+
+    it('keeps a polled task alive across turns while it still runs', () => {
+        const aggregator = new BackgroundTaskAggregator();
+        startBackgroundTask(aggregator);
+        aggregator.takeBackgroundTaskDelta();
+        aggregator.handle(taskOutputCall({ id: 'poll-live' }));
+        aggregator.handle(taskOutputResult('running', 'working', { id: 'poll-live' }));
+
+        expect(aggregator.flushPromptEnd()).toEqual([]);
+        expect(aggregator.takeBackgroundTaskDelta()).toBeNull();
+    });
+
+    it('counts a released task again when it turns out to still run', () => {
+        const aggregator = new BackgroundTaskAggregator();
+        startBackgroundTask(aggregator);
+        aggregator.takeBackgroundTaskDelta();
+        aggregator.handle(taskOutputCall({ id: 'poll-stop' }));
+        aggregator.handle(taskOutputResult('running', 'working', { id: 'poll-stop' }));
+        aggregator.handle(toolCall({ id: 'stop-1', name: 'task_stop', input: { task_id: 'bg_1' } }));
+        aggregator.handle(toolResult({
+            id: 'stop-1',
+            text: '<task_stop status="stopping">Stop requested.</task_stop>',
+            details: { task_id: 'bg_1', status: 'stopping' }
+        }));
+        aggregator.flushPromptEnd();
+        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
+
+        // The stop did not take effect: the task runs on and is counted again.
+        aggregator.handle(taskOutputCall({ id: 'poll-again' }));
+        aggregator.handle(taskOutputResult('running', 'still working', { id: 'poll-again' }));
+
+        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
+    });
 });

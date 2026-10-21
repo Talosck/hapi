@@ -75,6 +75,13 @@ type TrackedTask = {
      * finished) is never counted or completed a second time.
      */
     completed: boolean;
+    /**
+     * True once a stop was accepted for this task (`task_stop` answered
+     * "stopping"). The task winds down and is not observed again, so it is
+     * released at the end of the turn — otherwise the hub counter would keep
+     * a task that no longer runs.
+     */
+    stopRequested: boolean;
 };
 
 type ParsedTaskResult = {
@@ -247,7 +254,28 @@ export class BackgroundTaskAggregator {
         const forwarded: AgentMessage[] = [];
 
         for (const task of this.tasks.values()) {
-            if (task.polled || task.launchResultForwarded) continue;
+            if (task.completed) continue;
+            if (task.polled) {
+                // A polled task normally stays alive across turns: the agent
+                // polls it again later. A task whose stop was accepted is not
+                // observed again, so it is released here — otherwise the hub
+                // counter would keep a task that no longer runs and the
+                // session would never look idle.
+                if (!task.stopRequested) continue;
+                this.heldLaunchResults.delete(task.callId);
+                task.completed = true;
+                this.completedCount += 1;
+                forwarded.push({
+                    type: 'tool_result',
+                    id: task.callId,
+                    output: {
+                        content: [{ type: 'text', text: `Background task ${task.taskId} stopped` }],
+                        details: { task_id: task.taskId, status: 'stopped' }
+                    },
+                    status: 'completed'
+                });
+                continue;
+            }
             const held = this.heldLaunchResults.get(task.callId);
             if (!held) continue;
             this.heldLaunchResults.delete(task.callId);
@@ -342,7 +370,8 @@ export class BackgroundTaskAggregator {
                     status: parsed.status,
                     polled: false,
                     launchResultForwarded: false,
-                    completed: false
+                    completed: false,
+                    stopRequested: false
                 });
                 this.startedCount += 1;
                 this.heldLaunchResults.set(message.id, message);
@@ -374,6 +403,21 @@ export class BackgroundTaskAggregator {
 
         task.polled = true;
         task.status = parsed.status ?? task.status;
+
+        // A stop that was accepted ("stopping") means the task winds down and
+        // is not observed again: it is released at the end of the turn.
+        if (parsed.status === 'stopping') {
+            task.stopRequested = true;
+        }
+
+        // A task that was released at the end of an earlier turn (its card was
+        // completed and the hub counter was decremented) but is still running
+        // is counted again: the counter has to match the cards.
+        if (task.completed && !isTerminalStatus(parsed.status)) {
+            task.completed = false;
+            task.stopRequested = false;
+            this.startedCount += 1;
+        }
 
         // task_append can activate an idle child under a NEW task id. Re-key
         // the tracked task so later task_output calls still land on this card.
