@@ -253,7 +253,64 @@ describe('readMcodeUsageSince', () => {
     it('treats a missing journal as an empty read', async () => {
         const dataDir = await createTempDir();
         await expect(readMcodeUsageSince(join(dataDir, 'missing.jsonl'), 42))
-            .resolves.toEqual({ records: [], nextOffset: 42, reachedEnd: false, replaced: false });
+            .resolves.toEqual({ records: [], nextOffset: 42, reachedEnd: false, replaced: false, anchor: null });
+    });
+
+    it('re-reads a journal that was rewritten in place and grew', async () => {
+        // MiniMax Code compacts a session by rewriting the transcript, and
+        // the rewrite can make the file larger. When the rewrite changed the
+        // bytes before the read offset, reading on from there would start in
+        // the middle of a record and skip whatever the rewrite moved.
+        const dataDir = await createTempDir();
+        const messagesPath = join(dataDir, 'messages.jsonl');
+        const first = `${assistantLine({ messageId: 'msg-1' })}\n`;
+        const second = `${assistantLine({ messageId: 'msg-2' })}\n`;
+        await writeFile(messagesPath, first + second);
+
+        const initial = await readMcodeUsageSince(messagesPath, 0);
+        expect(initial.records.map((record) => record.messageId)).toEqual(['msg-1', 'msg-2']);
+
+        // The same history, rewritten with a different record in front.
+        const rewritten = `${assistantLine({ messageId: 'msg-0' })}\n${first}${second}`;
+        await writeFile(messagesPath, rewritten);
+
+        const afterRewrite = await readMcodeUsageSince(messagesPath, initial.nextOffset, initial.anchor);
+        expect(afterRewrite.replaced).toBe(true);
+        expect(afterRewrite.nextOffset).toBe(Buffer.byteLength(rewritten));
+        expect(afterRewrite.records.map((record) => record.messageId)).toEqual(['msg-0', 'msg-1', 'msg-2']);
+    });
+
+    it('keeps reading a journal that was appended to', async () => {
+        const dataDir = await createTempDir();
+        const messagesPath = join(dataDir, 'messages.jsonl');
+        const first = `${assistantLine({ messageId: 'msg-1' })}\n`;
+        await writeFile(messagesPath, first);
+
+        const initial = await readMcodeUsageSince(messagesPath, 0);
+        const second = `${assistantLine({ messageId: 'msg-2' })}\n`;
+        await appendFile(messagesPath, second);
+
+        const appended = await readMcodeUsageSince(messagesPath, initial.nextOffset, initial.anchor);
+        expect(appended.replaced).toBe(false);
+        expect(appended.records.map((record) => record.messageId)).toEqual(['msg-2']);
+    });
+
+    it('keeps reading a journal whose rewritten prefix still matches', async () => {
+        // A rewrite that left the bytes before the read offset untouched moved
+        // nothing: the records already read are the same ones, so reading on
+        // from the offset stays correct.
+        const dataDir = await createTempDir();
+        const messagesPath = join(dataDir, 'messages.jsonl');
+        const first = `${assistantLine({ messageId: 'msg-1' })}\n`;
+        await writeFile(messagesPath, first);
+
+        const initial = await readMcodeUsageSince(messagesPath, 0);
+        const second = `${assistantLine({ messageId: 'msg-2' })}\n`;
+        await writeFile(messagesPath, first + second);
+
+        const afterRewrite = await readMcodeUsageSince(messagesPath, initial.nextOffset, initial.anchor);
+        expect(afterRewrite.replaced).toBe(false);
+        expect(afterRewrite.records.map((record) => record.messageId)).toEqual(['msg-2']);
     });
 });
 

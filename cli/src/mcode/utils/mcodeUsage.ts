@@ -41,6 +41,11 @@ export type McodeUsageReadResult = {
     reachedEnd: boolean;
     /** True when the journal was replaced and read again from the start. */
     replaced: boolean;
+    /**
+     * The bytes the read ended on, to tell an append from a rewrite on the
+     * next read.
+     */
+    anchor: string | null;
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -155,30 +160,45 @@ export function parseMcodeUsageLine(line: string): McodeUsageRecord | null {
 /**
  * Reads complete lines appended after `offset`. An incomplete trailing line is
  * left for the next call so a mid-write poll cannot discard a usage record.
+ *
+ * The journal is not append-only: MiniMax Code rewrites it when it compacts a
+ * session, and the rewrite can leave the file the same size or even make it
+ * larger. The size alone therefore cannot tell an append from a rewrite, so
+ * the caller hands back the bytes the previous read ended on and this read
+ * checks that they are still in place. A rewrite re-reads the journal from
+ * the start; the caller de-duplicates the records it already billed.
  */
 export async function readMcodeUsageSince(
     filePath: string,
-    offset: number
+    offset: number,
+    anchor: string | null = null
 ): Promise<McodeUsageReadResult> {
     let size: number;
     try {
         size = (await stat(filePath)).size;
     } catch {
-        return { records: [], nextOffset: offset, reachedEnd: false, replaced: false };
+        return { records: [], nextOffset: offset, reachedEnd: false, replaced: false, anchor };
     }
 
     let replaced = false;
     if (size < offset) {
-        // The journal is append-only for a live session, so a smaller file
-        // means it was replaced. Read it again from the start: the records it
-        // holds are still the session's usage, and the caller de-duplicates
-        // the ones it already billed.
+        // The journal shrank: it was replaced. Read it again from the start:
+        // the records it holds are still the session's usage, and the caller
+        // de-duplicates the ones it already billed.
         logger.debug(`[mcode-usage] Journal shrank (${size} < ${offset}); re-reading from the start`);
+        offset = 0;
+        replaced = true;
+    } else if (offset > 0 && anchor !== null && !(await anchorStillInPlace(filePath, offset, anchor))) {
+        // The journal did not shrink, but the bytes the previous read ended
+        // on are gone: it was rewritten in place. Reading on from the old
+        // offset would start in the middle of a record and skip whatever the
+        // rewrite moved before that point.
+        logger.debug(`[mcode-usage] Journal was rewritten at offset ${offset}; re-reading from the start`);
         offset = 0;
         replaced = true;
     }
     if (size === offset) {
-        return { records: [], nextOffset: offset, reachedEnd: true, replaced };
+        return { records: [], nextOffset: offset, reachedEnd: true, replaced, anchor };
     }
 
     const handle = await open(filePath, 'r');
@@ -189,28 +209,61 @@ export async function readMcodeUsageSince(
         const lastNewline = text.lastIndexOf('\n');
         if (lastNewline === -1) {
             // A single half-written line: nothing is complete yet.
-            return { records: [], nextOffset: offset, reachedEnd: false, replaced };
+            return { records: [], nextOffset: offset, reachedEnd: false, replaced, anchor };
         }
 
         const complete = text.slice(0, lastNewline + 1);
+        const completeBytes = Buffer.byteLength(complete, 'utf8');
         const records: McodeUsageRecord[] = [];
         for (const line of complete.split('\n')) {
             if (!line.trim()) continue;
             const record = parseMcodeUsageLine(line);
             if (record) records.push(record);
         }
-        const nextOffset = offset + Buffer.byteLength(complete, 'utf8');
+        const nextOffset = offset + completeBytes;
         return {
             records,
             nextOffset,
             // The file was read to its end only when the complete lines cover
             // it. A trailing partial line means the tail is still unread.
             reachedEnd: nextOffset >= size,
-            replaced
+            replaced,
+            anchor: anchorFrom(buffer.subarray(0, completeBytes))
         };
     } finally {
         await handle.close();
     }
+}
+
+/**
+ * Whether the bytes the previous read ended on are still at the same place.
+ *
+ * An append leaves them untouched; a rewrite replaces them.
+ */
+async function anchorStillInPlace(filePath: string, offset: number, anchor: string): Promise<boolean> {
+    const expected = Buffer.from(anchor, 'base64');
+    if (expected.length === 0 || expected.length > offset) return true;
+    const handle = await open(filePath, 'r');
+    try {
+        const buffer = Buffer.alloc(expected.length);
+        const { bytesRead } = await handle.read(buffer, 0, expected.length, offset - expected.length);
+        if (bytesRead !== expected.length) return false;
+        return buffer.equals(expected);
+    } finally {
+        await handle.close();
+    }
+}
+
+/** The tail of a read, kept to tell an append from a rewrite on the next read. */
+function anchorFrom(bytes: Buffer): string | null {
+    if (bytes.length === 0) return null;
+    // The last complete line, newline included, so the anchor ends exactly at
+    // the read offset. A whole line is used rather than a few trailing bytes
+    // because a usage record ends in the same JSON boilerplate as every
+    // other one, which would make the anchor fit a rewritten journal too.
+    const previousNewline = bytes.lastIndexOf(0x0a, bytes.length - 2);
+    const start = previousNewline === -1 ? 0 : previousNewline + 1;
+    return bytes.subarray(start).toString('base64');
 }
 
 type McodeFileStats = {
@@ -309,6 +362,8 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
     let sessionDir: string | null = null;
     let messagesPath: string | null = null;
     let offset = 0;
+    /** The bytes the last read ended on, to tell an append from a rewrite. */
+    let anchor: string | null = null;
     let attachedAtMs = 0;
     let minTimestampMs: number | null = null;
     let generation = 0;
@@ -396,11 +451,12 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
         const targetPath = messagesPath;
         const targetGeneration = generation;
         const startOffset = offset;
+        const startAnchor = anchor;
         const timestampFloor = minTimestampMs;
         pollPromise = (async () => {
             let result: McodeUsageReadResult;
             try {
-                result = await readMcodeUsageSince(targetPath, startOffset);
+                result = await readMcodeUsageSince(targetPath, startOffset, startAnchor);
             } catch (error) {
                 logger.debug(`[mcode-usage] Failed to read ${targetPath}`, error);
                 return;
@@ -415,6 +471,7 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
                 );
             }
             offset = result.nextOffset;
+            anchor = result.anchor;
             if (timestampFloor !== null && result.reachedEnd) {
                 // The catch-up read covered the file's current end, so every
                 // later append is unambiguously new. A read that stopped at a
@@ -538,6 +595,7 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
 
             messagesPath = path;
             journalWaitAttempts = 0;
+            anchor = null;
             if (stats.mtimeMs < attachedAtMs) {
                 // The journal predates this attach: resume from its tail so
                 // pre-HAPI history is never attributed to this session.
@@ -600,6 +658,7 @@ export function createMcodeUsageWatcher(options: McodeUsageWatcherOptions): Mcod
         sessionDir = null;
         messagesPath = null;
         offset = 0;
+        anchor = null;
         attachedAtMs = Date.now();
         minTimestampMs = null;
         discoveryAttempts = 0;
