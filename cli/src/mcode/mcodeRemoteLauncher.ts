@@ -238,9 +238,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         };
 
         while (!this.shouldExit) {
-            const batch = await session.queue.waitForMessagesAndGetAsString(this.abortController.signal);
+            // The abort controller is replaced right after every abort, so the
+            // signal has to be captured before the wait: reading
+            // `this.abortController.signal` afterwards would inspect the NEW
+            // controller, report "not aborted" and break out of the loop — an
+            // abort while the agent is idle would end the whole HAPI session
+            // instead of cancelling a turn.
+            const waitSignal = this.abortController.signal;
+            const batch = await session.queue.waitForMessagesAndGetAsString(waitSignal);
             if (!batch) {
-                if (this.abortController.signal.aborted && !this.shouldExit) {
+                if (waitSignal.aborted && !this.shouldExit) {
                     continue;
                 }
                 break;
@@ -641,11 +648,19 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
 
     /**
      * Handles the ACP session updates that publish the agent's own state: the
-     * session mode it switched to and the config options it re-published.
+     * session mode it switched to, the config options it re-published and the
+     * plan it withdrew.
      */
     private handleSessionStateUpdate(update: AcpSessionStateUpdate): void {
         if (update.kind === 'mode') {
             this.currentSessionMode = update.modeId;
+        }
+        if (update.kind === 'plan-removed') {
+            // The agent withdrew a plan (MiniMax Code removes the plan it
+            // attached to a questionnaire once the questionnaire is answered).
+            // The web drops the matching plan card.
+            this.session.sendSessionEvent({ type: 'plan-removed', planId: update.planId });
+            return;
         }
         this.publishAgentPermissionMode();
     }

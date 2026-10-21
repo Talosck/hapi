@@ -624,7 +624,11 @@ describe('mcodeRemoteLauncher session state', () => {
 
     function createStateBackend(options: {
         configOptions?: ConfigOption[]
-        updates?: Array<{ kind: 'mode'; sessionId: string | null; modeId: string } | { kind: 'config-options'; sessionId: string | null }>
+        updates?: Array<
+            | { kind: 'mode'; sessionId: string | null; modeId: string }
+            | { kind: 'config-options'; sessionId: string | null }
+            | { kind: 'plan-removed'; sessionId: string | null; planId: string }
+        >
     }) {
         let listener: ((update: never) => void) | null = null
         const configOptions: ConfigOption[] = options.configOptions ?? [
@@ -716,5 +720,90 @@ describe('mcodeRemoteLauncher session state', () => {
         await mcodeRemoteLauncher(session as never, { onPermissionModeChanged })
 
         expect(onPermissionModeChanged).not.toHaveBeenCalled()
+    })
+
+    it('forwards a withdrawn plan so the web can drop the plan card', async () => {
+        createStateBackend({
+            updates: [{ kind: 'plan-removed', sessionId: 'mcode-session-1', planId: 'plan-1' }]
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'plan-removed', planId: 'plan-1' })
+    })
+})
+
+describe('mcodeRemoteLauncher abort handling', () => {
+    afterEach(() => {
+        harness.backend = {}
+    })
+
+    /**
+     * A session whose agent is idle: the first wait blocks until the user
+     * aborts, the second one returns immediately (the queue is closed).
+     */
+    function createIdleSession() {
+        const abortHandlers: Array<() => Promise<void>> = []
+        const waits: number[] = []
+        const queue = {
+            waitForMessagesAndGetAsString: vi.fn((signal?: AbortSignal) => {
+                waits.push(waits.length)
+                if (waits.length === 1) {
+                    return new Promise((resolve) => {
+                        signal?.addEventListener('abort', () => resolve(null))
+                    })
+                }
+                return Promise.resolve(null)
+            }),
+            size: () => 0,
+            reset: vi.fn(),
+            pushIsolated: vi.fn()
+        }
+        const client = {
+            rpcHandlerManager: {
+                registerHandler: vi.fn((method: string, handler: () => Promise<void>) => {
+                    if (method === RPC_METHODS.Abort) abortHandlers.push(handler)
+                })
+            },
+            sendAgentMessage: vi.fn(),
+            sendSessionEvent: vi.fn(),
+            sendClaudeSessionMessage: vi.fn(),
+            updateAgentState: vi.fn()
+        }
+        const session = {
+            path: '/tmp/mcode-test',
+            logPath: '/tmp/mcode-test/test.log',
+            client,
+            queue,
+            sessionId: null as string | null,
+            getPermissionMode: () => 'default' as const,
+            onSessionFound(id: string) { session.sessionId = id },
+            onThinkingChange: vi.fn(),
+            sendUserMessage: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            sendSessionEvent: vi.fn(),
+            setModel: vi.fn(),
+            setPermissionMode: vi.fn(),
+            pushKeepAlive: vi.fn()
+        }
+        return { session, abortHandlers, waits }
+    }
+
+    it('keeps the session alive when the user aborts while the agent is idle', async () => {
+        createBackend()
+        const { session, abortHandlers, waits } = createIdleSession()
+
+        const launched = mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => expect(abortHandlers.length).toBeGreaterThan(0))
+        await vi.waitFor(() => expect(waits.length).toBe(1))
+
+        await abortHandlers[0]()
+
+        // The abort only cancels a turn: the launcher waits for the next
+        // message instead of ending the whole HAPI session.
+        const reason = await launched
+        expect(waits.length).toBe(2)
+        expect(reason).toBe('exit')
     })
 })
