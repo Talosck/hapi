@@ -361,3 +361,21 @@ describe('subagent counting', () => {
         expect(data?.subagents.map((subagent) => subagent.id)).toEqual(['call-1'])
     })
 })
+
+describe('buildSessionStatusData alwaysVisible', () => {
+    it('keeps the panel rendered when a session supports goals but has none yet', () => {
+        // The goal controls live in the panel, so a session whose agent
+        // supports goals needs the panel to exist before the first goal.
+        expect(buildSessionStatusData({
+            goal: null,
+            tasks: [],
+            blocks: [],
+            messages: [],
+            alwaysVisible: true
+        })).toMatchObject({ goal: null, tasks: [], subagents: [] })
+    })
+
+    it('still hides an empty panel without the flag', () => {
+        expect(buildSessionStatusData({ goal: null, tasks: [], blocks: [], messages: [] })).toBeNull()
+    })
+})

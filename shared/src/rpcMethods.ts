@@ -47,6 +47,14 @@ export const RPC_METHODS = {
     ListKimiModels: 'listKimiModels',
     ListMcodeModelsForCwd: 'listMcodeModelsForCwd',
     ListMcodeModels: 'listMcodeModels',
+    /** Create MiniMax Code's autonomous goal for the session. */
+    McodeCreateGoal: 'mcode-create-goal',
+    /** Patch the goal's objective, status or token budget. */
+    McodePatchGoal: 'mcode-patch-goal',
+    /** Clear the session's goal. */
+    McodeClearGoal: 'mcode-clear-goal',
+    /** Stop MiniMax Code's delegated sessions (subagents). */
+    McodeStopDelegation: 'mcode-stop-delegation',
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
     ListAgyModels: 'listAgyModels',
     /** Deliver one queued message into the active Pi turn (native steer). */

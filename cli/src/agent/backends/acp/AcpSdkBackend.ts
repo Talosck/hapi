@@ -113,6 +113,8 @@ export class AcpSdkBackend implements AgentBackend {
     private messageHandler: AcpMessageHandler | null = null;
     private activeSessionId: string | null = null;
     private initializeResult: AcpInitializeResult | null = null;
+    /** The agent's `_meta` block from the initialize response (extension surface). */
+    private initializeMeta: Record<string, unknown> | null = null;
     private initializeInFlight: Promise<void> | null = null;
     private setModeSupported: boolean | undefined = undefined;
     /** Whether the agent implements `session/set_mode` at all. */
@@ -300,6 +302,11 @@ export class AcpSdkBackend implements AgentBackend {
 
         this.captureAvailableCommands(null, response);
 
+        // The agent's own `_meta` block describes the extension surface it
+        // supports (e.g. MiniMax Code's `minimax-code/extensions`). The backend
+        // stays flavor-agnostic and hands the raw block to the flavor adapter.
+        this.initializeMeta = isObject(response._meta) ? response._meta : null;
+
         this.initializeResult = {
             protocolVersion: response.protocolVersion,
             authMethods: Array.isArray(response.authMethods)
@@ -346,6 +353,18 @@ export class AcpSdkBackend implements AgentBackend {
 
     supportsLoadSession(): boolean {
         return this.initializeResult?.agentCapabilities?.loadSession === true;
+    }
+
+    /**
+     * The agent's `_meta` block from the initialize response.
+     *
+     * Agents describe their extension surface here (e.g. MiniMax Code's
+     * `minimax-code/extensions` with the methods and notifications it
+     * supports). The block is returned raw: interpreting it belongs to the
+     * flavor adapter, not to this generic backend.
+     */
+    getInitializeMeta(): Record<string, unknown> | null {
+        return this.initializeMeta;
     }
 
     getSessionConfigOptions(sessionId: string): AcpConfigOptionDescriptor[] | undefined {

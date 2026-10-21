@@ -890,6 +890,98 @@ export type McodeModelsResponse = {
 
 export type ListMcodeModelsResponse = McodeModelsResponse
 
+/**
+ * MiniMax Code's goal statuses, spelled the way the agent spells them.
+ *
+ * `budget_limited` and `usage_limited` are runtime-derived states the agent
+ * enters on its own; only the first five can be requested in a patch.
+ */
+export type McodeGoalStatus =
+    | 'active'
+    | 'paused'
+    | 'blocked'
+    | 'complete'
+    | 'budget_limited'
+    | 'usage_limited';
+
+/**
+ * MiniMax Code's autonomous goal, as the agent reports it over the
+ * `mcode/session/goal/*` ACP extension. The status spellings are the agent's
+ * own (`budget_limited`, not HAPI's `budgetLimited`).
+ */
+export type McodeGoalState = {
+    goalId: string
+    sessionId: string
+    objective: string
+    status: McodeGoalStatus
+    createdAt: number
+    updatedAt: number
+    tokensUsed: number
+    turnsUsed: number
+    timeUsedSeconds: number
+    tokenBudget: number | null
+    statusReason?: string
+    /** The goal was kicked off with attachments (the agent's own flag). */
+    hasKickoffAttachments?: boolean
+}
+
+/** Result of stopping MiniMax Code's delegation tree. */
+export type McodeDelegationStopReceipt = {
+    schemaVersion: number
+    rootSessionId: string
+    rootStopped: boolean
+    stoppedSessionIds: string[]
+    activeSessionIds: string[]
+    failedSessionIds: string[]
+}
+
+export type McodeGoalResponse = {
+    success: boolean
+    goal?: McodeGoalState | null
+    error?: string
+}
+
+export type McodeGoalClearResponse = {
+    success: boolean
+    cleared?: boolean
+    error?: string
+}
+
+export type McodeDelegationStopResponse = {
+    success: boolean
+    receipt?: McodeDelegationStopReceipt
+    error?: string
+}
+
+/**
+ * The body of a "create a MiniMax Code goal" request.
+ *
+ * `tokenBudget` is `null` for an unlimited goal; the agent requires a
+ * positive number otherwise.
+ */
+export const McodeGoalCreateRequestSchema = z.object({
+    objective: z.string().min(1),
+    tokenBudget: z.number().int().positive().nullable().optional()
+})
+
+export type McodeGoalCreateRequest = z.infer<typeof McodeGoalCreateRequestSchema>
+
+/** The body of a "patch the MiniMax Code goal" request. */
+export const McodeGoalPatchRequestSchema = z.object({
+    status: z.enum([
+        'active',
+        'paused',
+        'blocked',
+        'complete',
+        'budgetLimited',
+        'usageLimited'
+    ]).optional(),
+    objective: z.string().min(1).optional(),
+    tokenBudget: z.number().int().positive().nullable().optional()
+})
+
+export type McodeGoalPatchRequest = z.infer<typeof McodeGoalPatchRequestSchema>
+
 export type GrokReasoningEffortResponse = {
     success: boolean
     options?: GrokReasoningEffortOption[]

@@ -44,6 +44,9 @@ import type {
     GrokModelsResponse,
     KimiModelsResponse,
     McodeModelsResponse,
+    McodeGoalResponse,
+    McodeGoalClearResponse,
+    McodeDelegationStopResponse,
     CopilotModelsResponse,
     GrokReasoningEffortResponse,
     ListDirectoryResponse,
@@ -984,6 +987,56 @@ export class ApiClient {
     async getSessionMcodeModels(sessionId: string): Promise<McodeModelsResponse> {
         return await this.request<McodeModelsResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/mcode-models`
+        )
+    }
+
+    /**
+     * Creates MiniMax Code's autonomous goal for the session.
+     *
+     * The agent starts executing the objective as soon as the goal exists, so
+     * this is not a request it reviews later.
+     */
+    async createMcodeGoal(
+        sessionId: string,
+        objective: string,
+        tokenBudget?: number | null
+    ): Promise<McodeGoalResponse> {
+        return await this.request<McodeGoalResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/mcode/goal`,
+            {
+                method: 'POST',
+                body: JSON.stringify({
+                    objective,
+                    ...(tokenBudget === undefined ? {} : { tokenBudget })
+                })
+            }
+        )
+    }
+
+    /** Patches the goal's objective, status or token budget. */
+    async patchMcodeGoal(
+        sessionId: string,
+        patch: { status?: string; objective?: string; tokenBudget?: number | null }
+    ): Promise<McodeGoalResponse> {
+        return await this.request<McodeGoalResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/mcode/goal`,
+            { method: 'PATCH', body: JSON.stringify(patch) }
+        )
+    }
+
+    /** Clears the session's goal. */
+    async clearMcodeGoal(sessionId: string): Promise<McodeGoalClearResponse> {
+        return await this.request<McodeGoalClearResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/mcode/goal`,
+            { method: 'DELETE' }
+        )
+    }
+
+    /** Stops the session's delegated sessions (its subagents). */
+    async stopMcodeDelegation(sessionId: string): Promise<McodeDelegationStopResponse> {
+        return await this.request<McodeDelegationStopResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/mcode/delegation/stop`,
+            { method: 'POST' }
         )
     }
 

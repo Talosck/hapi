@@ -5,9 +5,14 @@ import {
     MCODE_NOTIFICATION_GOAL_UPDATE,
     goalLifecycleSignature,
     normalizeDelegationStatus,
+    parseMcodeDelegationStopReceipt,
     parseMcodeDelegationUpdate,
+    parseMcodeExtensionSupport,
+    parseMcodeGoalState,
     parseMcodeGoalUpdate,
     toHapiThreadGoal,
+    toMcodeExtensionCapabilities,
+    toMcodeGoalPatchStatus,
     toSubagentSnapshotMembers,
     type McodeGoal
 } from './mcodeExtensions';
@@ -209,8 +214,7 @@ describe('toHapiThreadGoal', () => {
     });
 });
 
-describe('goalLifecycleSignature', () => {
-    it('changes with the objective, the status and the budget', () => {
+describe('goalLifecycleSignature', () => {    it('changes with the objective, the status and the budget', () => {
         const base = toHapiThreadGoal(goal(), 'session-1');
 
         expect(goalLifecycleSignature(base)).toBe(goalLifecycleSignature({ ...base }));
@@ -226,5 +230,140 @@ describe('goalLifecycleSignature', () => {
         // goals: the second one has to be announced in the chat.
         expect(goalLifecycleSignature(base, 'goal-1')).not.toBe(goalLifecycleSignature(base, 'goal-2'));
         expect(goalLifecycleSignature(base, 'goal-1')).toBe(goalLifecycleSignature(base, 'goal-1'));
+    });
+});
+
+describe('parseMcodeExtensionSupport', () => {
+    it('reads the methods and notifications the agent advertised', () => {
+        const support = parseMcodeExtensionSupport({
+            'minimax-code/extensions': {
+                version: 1,
+                methods: ['mcode/session/goal/create', 'mcode/session/delegation/stop'],
+                notifications: ['mcode/session/goal_update', 'mcode/session/delegation_update']
+            }
+        });
+
+        expect(support.methods.has('mcode/session/goal/create')).toBe(true);
+        expect(support.methods.has('mcode/session/delegation/stop')).toBe(true);
+        expect(support.notifications.has('mcode/session/goal_update')).toBe(true);
+        expect(support.notifications.has('mcode/session/delegation_update')).toBe(true);
+    });
+
+    it('advertises nothing when the agent published no extension block', () => {
+        // An agent that feature-gates the goal extension publishes a block
+        // without the goal methods — and an older agent publishes none at all.
+        const support = parseMcodeExtensionSupport({});
+        expect(support.methods.size).toBe(0);
+        expect(support.notifications.size).toBe(0);
+        expect(parseMcodeExtensionSupport(null).methods.size).toBe(0);
+    });
+
+    it('ignores a malformed method list', () => {
+        const support = parseMcodeExtensionSupport({
+            'minimax-code/extensions': { version: 1, methods: 'nope', notifications: [1, 'ok'] }
+        });
+
+        expect(support.methods.size).toBe(0);
+        expect([...support.notifications]).toEqual(['ok']);
+    });
+});
+
+describe('toMcodeExtensionCapabilities', () => {
+    it('reports the goal features the agent advertised', () => {
+        const capabilities = toMcodeExtensionCapabilities(parseMcodeExtensionSupport({
+            'minimax-code/extensions': {
+                version: 1,
+                methods: [
+                    'mcode/session/goal/get',
+                    'mcode/session/goal/create',
+                    'mcode/session/goal/patch',
+                    'mcode/session/goal/clear',
+                    'mcode/session/delegation/stop'
+                ],
+                notifications: ['mcode/session/goal_update', 'mcode/session/delegation_update']
+            }
+        }));
+
+        expect(capabilities).toEqual({
+            goal: true,
+            goalCreate: true,
+            goalPatch: true,
+            goalClear: true,
+            delegation: true,
+            delegationStop: true
+        });
+    });
+
+    it('reports no goal features when the agent disabled the goal extension', () => {
+        // MiniMax Code removes every goal method and the goal notification
+        // when the runtime disables goals — the web must not offer the
+        // controls then.
+        const capabilities = toMcodeExtensionCapabilities(parseMcodeExtensionSupport({
+            'minimax-code/extensions': {
+                version: 1,
+                methods: ['mcode/session/delegation/stop'],
+                notifications: ['mcode/session/delegation_update']
+            }
+        }));
+
+        expect(capabilities.goal).toBe(false);
+        expect(capabilities.goalCreate).toBe(false);
+        expect(capabilities.goalPatch).toBe(false);
+        expect(capabilities.goalClear).toBe(false);
+        expect(capabilities.delegation).toBe(true);
+        expect(capabilities.delegationStop).toBe(true);
+    });
+});
+
+describe('parseMcodeGoalState', () => {
+    it('parses a goal from a method response', () => {
+        expect(parseMcodeGoalState(goal())).toEqual(goal());
+    });
+
+    it('rejects a goal without the required fields', () => {
+        expect(parseMcodeGoalState({ goalId: 'goal-1' })).toBeNull();
+        expect(parseMcodeGoalState(goal({ status: 'weird' as never }))).toBeNull();
+    });
+});
+
+describe('toMcodeGoalPatchStatus', () => {
+    it('maps HAPI status spellings onto the agent spellings', () => {
+        expect(toMcodeGoalPatchStatus('active')).toBe('active');
+        expect(toMcodeGoalPatchStatus('paused')).toBe('paused');
+        expect(toMcodeGoalPatchStatus('blocked')).toBe('blocked');
+        expect(toMcodeGoalPatchStatus('complete')).toBe('complete');
+        expect(toMcodeGoalPatchStatus('budgetLimited')).toBe('budget_limited');
+    });
+
+    it('refuses a status the agent cannot be asked to enter', () => {
+        // `usage_limited` is derived by the agent from its own counters.
+        expect(toMcodeGoalPatchStatus('usageLimited')).toBeNull();
+    });
+});
+
+describe('parseMcodeDelegationStopReceipt', () => {
+    it('splits the stopped, active and failed sessions', () => {
+        const receipt = parseMcodeDelegationStopReceipt({
+            schemaVersion: 1,
+            rootSessionId: 'session-1',
+            rootStopped: true,
+            stoppedSessionIds: ['child-1'],
+            activeSessionIds: ['child-2'],
+            failedSessionIds: []
+        });
+
+        expect(receipt).toEqual({
+            schemaVersion: 1,
+            rootSessionId: 'session-1',
+            rootStopped: true,
+            stoppedSessionIds: ['child-1'],
+            activeSessionIds: ['child-2'],
+            failedSessionIds: []
+        });
+    });
+
+    it('rejects a receipt without a root session', () => {
+        expect(parseMcodeDelegationStopReceipt({ schemaVersion: 1 })).toBeNull();
+        expect(parseMcodeDelegationStopReceipt(null)).toBeNull();
     });
 });

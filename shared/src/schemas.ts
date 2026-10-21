@@ -34,10 +34,37 @@ export const OpencodeClearOperationSchema = z.object({
 })
 export type OpencodeClearOperation = z.infer<typeof OpencodeClearOperationSchema>
 
+/**
+ * MiniMax Code's ACP extension surface, as advertised by the agent in its
+ * `initialize` response.
+ *
+ * The agent feature-gates its goal extension at runtime: when the goal
+ * extension is disabled the agent omits every `mcode/session/goal/*` method
+ * and the `mcode/session/goal_update` notification. The web therefore reads
+ * these flags instead of assuming the extension exists.
+ */
+const McodeExtensionCapabilitiesSchema = z.object({
+    /** The agent advertises the goal extension (goal methods and goal_update). */
+    goal: z.boolean().optional(),
+    /** The agent can create a goal (`mcode/session/goal/create`). */
+    goalCreate: z.boolean().optional(),
+    /** The agent can patch the goal (`mcode/session/goal/patch`). */
+    goalPatch: z.boolean().optional(),
+    /** The agent can clear the goal (`mcode/session/goal/clear`). */
+    goalClear: z.boolean().optional(),
+    /** The agent streams the delegation tree (`mcode/session/delegation_update`). */
+    delegation: z.boolean().optional(),
+    /** The agent can stop delegated sessions (`mcode/session/delegation/stop`). */
+    delegationStop: z.boolean().optional()
+})
+
+export type McodeExtensionCapabilities = z.infer<typeof McodeExtensionCapabilitiesSchema>
+
 const SessionCapabilitiesSchema = z.object({
     concurrentClients: z.boolean().optional(),
     terminal: z.boolean().optional(),
-    conversationHistory: ConversationHistoryCapabilitiesSchema.optional()
+    conversationHistory: ConversationHistoryCapabilitiesSchema.optional(),
+    mcodeExtensions: McodeExtensionCapabilitiesSchema.optional()
 })
 
 export type ConversationHistoryCapabilities = z.infer<typeof ConversationHistoryCapabilitiesSchema>

@@ -73,6 +73,10 @@ function createApp(session: Session, opts?: {
     updateSessionSummary?: SyncEngine['updateSessionSummary']
     setSessionPinned?: (sessionId: string, pinned: boolean) => void
     setSessionPinMode?: (sessionId: string, mode: 'none' | 'project' | 'global') => void
+    createMcodeGoal?: SyncEngine['createMcodeGoal']
+    patchMcodeGoal?: SyncEngine['patchMcodeGoal']
+    clearMcodeGoal?: SyncEngine['clearMcodeGoal']
+    stopMcodeDelegation?: SyncEngine['stopMcodeDelegation']
 }) {
     const applySessionConfigCalls: Array<[string, Record<string, unknown>]> = []
     const applySessionConfig = async (sessionId: string, config: Record<string, unknown>) => {
@@ -180,7 +184,11 @@ function createApp(session: Session, opts?: {
         implementCodexPlan: opts?.implementCodexPlan,
         rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' })),
         suggestSessionTitle: opts?.suggestSessionTitle ?? (async () => 'Generated title'),
-        updateSessionSummary: opts?.updateSessionSummary ?? (async () => {})
+        updateSessionSummary: opts?.updateSessionSummary ?? (async () => {}),
+        createMcodeGoal: opts?.createMcodeGoal ?? (async () => ({ success: true, goal: null })),
+        patchMcodeGoal: opts?.patchMcodeGoal ?? (async () => ({ success: true, goal: null })),
+        clearMcodeGoal: opts?.clearMcodeGoal ?? (async () => ({ success: true, cleared: true })),
+        stopMcodeDelegation: opts?.stopMcodeDelegation ?? (async () => ({ success: true }))
     } as Partial<SyncEngine>
 
     const app = new Hono<WebAppEnv>()
@@ -192,6 +200,105 @@ function createApp(session: Session, opts?: {
 
     return { app, applySessionConfigCalls }
 }
+
+describe('mcode goal routes', () => {
+    function mcodeSession(flavor = 'mcode') {
+        return createSession({ metadata: { path: '/tmp', host: 'test', flavor } })
+    }
+
+    it('creates a goal for a MiniMax Code session', async () => {
+        const calls: unknown[][] = []
+        const session = mcodeSession()
+        const { app } = createApp(session, {
+            createMcodeGoal: (async (sessionId: string, objective: string, tokenBudget?: number | null) => {
+                calls.push([sessionId, objective, tokenBudget])
+                return { success: true, goal: null }
+            }) as SyncEngine['createMcodeGoal']
+        })
+
+        const res = await app.request('/api/sessions/session-1/mcode/goal', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ objective: 'Ship it', tokenBudget: 5000 })
+        })
+
+        expect(res.status).toBe(200)
+        expect(await res.json()).toEqual({ success: true, goal: null })
+        expect(calls).toEqual([['session-1', 'Ship it', 5000]])
+    })
+
+    it('rejects a goal without an objective', async () => {
+        const session = mcodeSession()
+        const { app } = createApp(session)
+
+        const res = await app.request('/api/sessions/session-1/mcode/goal', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({})
+        })
+
+        expect(res.status).toBe(400)
+        expect(((await res.json()) as { success?: boolean }).success).toBe(false)
+    })
+
+    it('refuses goal control for a session of another flavor', async () => {
+        const session = mcodeSession('codex')
+        const { app } = createApp(session)
+
+        const res = await app.request('/api/sessions/session-1/mcode/goal', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ objective: 'Ship it' })
+        })
+
+        expect(res.status).toBe(400)
+        expect(((await res.json()) as { error?: string }).error).toContain('only available for MiniMax Code sessions')
+    })
+
+    it('patches and clears the goal', async () => {
+        const patches: unknown[][] = []
+        const clears: string[] = []
+        const session = mcodeSession()
+        const { app } = createApp(session, {
+            patchMcodeGoal: (async (sessionId: string, patch: unknown) => {
+                patches.push([sessionId, patch])
+                return { success: true, goal: null }
+            }) as SyncEngine['patchMcodeGoal'],
+            clearMcodeGoal: (async (sessionId: string) => {
+                clears.push(sessionId)
+                return { success: true, cleared: true }
+            }) as SyncEngine['clearMcodeGoal']
+        })
+
+        const patchRes = await app.request('/api/sessions/session-1/mcode/goal', {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ status: 'paused' })
+        })
+        expect(patchRes.status).toBe(200)
+        expect(patches).toEqual([['session-1', { status: 'paused' }]])
+
+        const clearRes = await app.request('/api/sessions/session-1/mcode/goal', { method: 'DELETE' })
+        expect(clearRes.status).toBe(200)
+        expect(clears).toEqual(['session-1'])
+    })
+
+    it('stops the delegated sessions', async () => {
+        const stops: string[] = []
+        const session = mcodeSession()
+        const { app } = createApp(session, {
+            stopMcodeDelegation: (async (sessionId: string) => {
+                stops.push(sessionId)
+                return { success: true }
+            }) as SyncEngine['stopMcodeDelegation']
+        })
+
+        const res = await app.request('/api/sessions/session-1/mcode/delegation/stop', { method: 'POST' })
+
+        expect(res.status).toBe(200)
+        expect(stops).toEqual(['session-1'])
+    })
+})
 
 describe('sessions routes', () => {
     it('dispatches plan implementation using the authenticated namespace and returns stale/unknown outcomes', async () => {

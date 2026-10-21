@@ -1489,16 +1489,38 @@ function SessionChatInner(props: SessionChatProps) {
             tasks: props.session.todos,
             blocks: reconciled.blocks,
             messages: normalizedMessages,
-            backgroundTaskCount: props.session.backgroundTaskCount
+            backgroundTaskCount: props.session.backgroundTaskCount,
+            // The MiniMax Code goal controls live in this panel, so it has to
+            // render even when the session has no status to show yet —
+            // otherwise there is no way to create the first goal.
+            alwaysVisible: props.session.metadata?.capabilities?.mcodeExtensions?.goalCreate === true
         }),
         [
             reduced.latestGoal,
             props.session.todos,
             props.session.backgroundTaskCount,
             reconciled.blocks,
-            normalizedMessages
+            normalizedMessages,
+            props.session.metadata?.capabilities?.mcodeExtensions?.goalCreate
         ]
     )
+
+    /**
+     * MiniMax Code's goal and subagent controls.
+     *
+     * The agent advertises its extension surface when it starts, and the goal
+     * extension is optional — so the controls only appear for the features the
+     * running agent actually supports.
+     */
+    const mcodeGoalControls = useMemo(() => {
+        const capabilities = props.session.metadata?.capabilities?.mcodeExtensions
+        if (!capabilities) return null
+        return {
+            api: props.api,
+            sessionId: props.session.id,
+            capabilities
+        }
+    }, [props.api, props.session.id, props.session.metadata?.capabilities?.mcodeExtensions])
     const hasRunningChildAgent = useMemo(
         () => hasAbortableAgentRun(reduced.blocks),
         [reduced.blocks]
@@ -1948,7 +1970,12 @@ function SessionChatInner(props: SessionChatProps) {
 
             <CursorMigrationBanner metadata={props.session.metadata} />
 
-            {sessionStatus ? <SessionStatusPanel data={sessionStatus} /> : null}
+            {sessionStatus ? (
+                <SessionStatusPanel
+                    data={sessionStatus}
+                    goalControls={mcodeGoalControls}
+                />
+            ) : null}
 
             <div className="flex flex-col min-h-0 flex-1">
             {props.session.teamState && (

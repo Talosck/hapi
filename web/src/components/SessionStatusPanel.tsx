@@ -3,6 +3,8 @@ import { formatDuration } from '@/chat/presentation'
 import type { SessionStatusData, SessionStatusSubagent } from '@/chat/sessionStatus'
 import { ChecklistList } from '@/components/ToolCard/checklist'
 import { useTranslation } from '@/lib/use-translation'
+import type { ApiClient } from '@/api/client'
+import type { McodeExtensionCapabilities, ThreadGoal } from '@hapi/protocol'
 
 function Section(props: { title: string; children: ReactNode }) {
     return (
@@ -26,18 +28,230 @@ function elapsedSince(startedAt: number | null, now: number): string | null {
     return formatDuration(Math.max(0, now - startedAt))
 }
 
-export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
+/**
+ * The MiniMax Code controls the session's agent actually supports.
+ *
+ * The agent advertises its extension surface when it starts, and the goal
+ * extension is optional, so the panel renders the controls only for the
+ * features the running agent advertised.
+ */
+export type McodeGoalControls = {
+    api: ApiClient | null
+    sessionId: string
+    capabilities: McodeExtensionCapabilities | null
+}
+
+function ControlButton(props: {
+    label: string
+    onClick: () => void
+    disabled?: boolean
+    tone?: 'default' | 'danger'
+}) {
+    const tone = props.tone === 'danger'
+        ? 'border-red-300 text-red-600 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/40'
+        : 'border-[var(--app-border)] text-[var(--app-fg)] hover:bg-[var(--app-hover-bg)]'
+    return (
+        <button
+            type="button"
+            onClick={props.onClick}
+            disabled={props.disabled}
+            className={`rounded border px-1.5 py-0.5 text-[11px] disabled:opacity-50 ${tone}`}
+        >
+            {props.label}
+        </button>
+    )
+}
+
+/**
+ * The goal lifecycle controls.
+ *
+ * Creating a goal makes the agent start working on the objective right away,
+ * so the form says so instead of presenting it as a saved preference.
+ */
+function GoalControls(props: {
+    api: ApiClient
+    sessionId: string
+    capabilities: McodeExtensionCapabilities
+    goal: ThreadGoal | null
+}) {
+    const { t } = useTranslation()
+    const [busy, setBusy] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const [objective, setObjective] = useState('')
+    const [budget, setBudget] = useState('')
+    const [showForm, setShowForm] = useState(false)
+
+    const goal = props.goal
+    const canCreate = props.capabilities.goalCreate === true
+    const canPatch = props.capabilities.goalPatch === true
+    const canClear = props.capabilities.goalClear === true
+
+    const run = async (action: () => Promise<{ success: boolean; error?: string }>) => {
+        setBusy(true)
+        setError(null)
+        try {
+            const result = await action()
+            if (!result.success) {
+                setError(result.error ?? t('session.status.goal.actionFailed'))
+            }
+        } catch (e) {
+            setError(e instanceof Error ? e.message : t('session.status.goal.actionFailed'))
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    const submitCreate = async () => {
+        const trimmed = objective.trim()
+        if (!trimmed) return
+        const parsedBudget = budget.trim() ? Number(budget.trim()) : null
+        if (parsedBudget !== null && (!Number.isFinite(parsedBudget) || parsedBudget <= 0)) {
+            setError(t('session.status.goal.budgetInvalid'))
+            return
+        }
+        await run(() => props.api.createMcodeGoal(props.sessionId, trimmed, parsedBudget))
+        setObjective('')
+        setBudget('')
+        setShowForm(false)
+    }
+
+    const patchStatus = (status: ThreadGoal['status']) => {
+        void run(() => props.api.patchMcodeGoal(props.sessionId, { status }))
+    }
+
+    const clear = () => {
+        void run(() => props.api.clearMcodeGoal(props.sessionId))
+    }
+
+    const controls: ReactNode[] = []
+
+    if (goal && canPatch) {
+        if (goal.status === 'active') {
+            controls.push(
+                <ControlButton
+                    key="pause"
+                    label={t('session.status.goal.pause')}
+                    disabled={busy}
+                    onClick={() => patchStatus('paused')}
+                />
+            )
+        } else if (goal.status === 'paused' || goal.status === 'blocked') {
+            controls.push(
+                <ControlButton
+                    key="resume"
+                    label={t('session.status.goal.resume')}
+                    disabled={busy}
+                    onClick={() => patchStatus('active')}
+                />
+            )
+        }
+    }
+    if (goal && canClear) {
+        controls.push(
+            <ControlButton
+                key="clear"
+                label={t('session.status.goal.clear')}
+                tone="danger"
+                disabled={busy}
+                onClick={clear}
+            />
+        )
+    }
+    if (!goal && canCreate && !showForm) {
+        controls.push(
+            <ControlButton
+                key="create"
+                label={t('session.status.goal.create')}
+                disabled={busy}
+                onClick={() => setShowForm(true)}
+            />
+        )
+    }
+
+    return (
+        <div className="mt-1.5 flex flex-col gap-1.5">
+            {showForm ? (
+                <div className="flex flex-col gap-1.5">
+                    <input
+                        type="text"
+                        value={objective}
+                        onChange={(e) => setObjective(e.target.value)}
+                        placeholder={t('session.status.goal.objectivePlaceholder')}
+                        aria-label={t('session.status.goal.objectivePlaceholder')}
+                        className="w-full rounded border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1 text-xs text-[var(--app-fg)] outline-none focus:border-[var(--app-accent)]"
+                    />
+                    <input
+                        type="number"
+                        min={1}
+                        value={budget}
+                        onChange={(e) => setBudget(e.target.value)}
+                        placeholder={t('session.status.goal.budgetPlaceholder')}
+                        aria-label={t('session.status.goal.budgetPlaceholder')}
+                        className="w-full rounded border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1 text-xs text-[var(--app-fg)] outline-none focus:border-[var(--app-accent)]"
+                    />
+                    <div className="flex items-center gap-1.5">
+                        <ControlButton
+                            label={t('session.status.goal.start')}
+                            disabled={busy || objective.trim().length === 0}
+                            onClick={() => void submitCreate()}
+                        />
+                        <ControlButton
+                            label={t('session.status.goal.cancel')}
+                            disabled={busy}
+                            onClick={() => setShowForm(false)}
+                        />
+                    </div>
+                    <div className="text-[11px] text-[var(--app-hint)]">
+                        {t('session.status.goal.startsImmediately')}
+                    </div>
+                </div>
+            ) : null}
+            {controls.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-1.5">{controls}</div>
+            ) : null}
+            {error ? <div className="text-[11px] text-red-600">{error}</div> : null}
+        </div>
+    )
+}
+
+export function SessionStatusPanel(props: {
+    data: SessionStatusData
+    goalControls?: McodeGoalControls | null
+}) {
+    const { data } = props
     const { t } = useTranslation()
     const completedTasks = data.tasks.filter((task) => task.status === 'completed').length
     const hasLiveElapsed = data.terminals.length > 0
         || data.subagents.some((subagent) => subagent.endedAt === null && subagent.startedAt !== null)
     const [now, setNow] = useState(() => Date.now())
+    const [stopping, setStopping] = useState(false)
+    const [stopError, setStopError] = useState<string | null>(null)
 
     useEffect(() => {
         if (!hasLiveElapsed) return
         const timer = window.setInterval(() => setNow(Date.now()), 1000)
         return () => window.clearInterval(timer)
     }, [hasLiveElapsed])
+
+    const controls = props.goalControls
+    const canStopDelegation = controls?.capabilities?.delegationStop === true
+    const hasRunningSubagent = data.subagents.some((subagent) => subagent.state === 'running')
+
+    const stopDelegation = async () => {
+        if (!controls?.api) return
+        setStopping(true)
+        setStopError(null)
+        try {
+            const result = await controls.api.stopMcodeDelegation(controls.sessionId)
+            if (!result.success) {
+                setStopError(result.error ?? t('session.status.subagents.stopFailed'))
+            }
+        } catch (e) {
+            setStopError(e instanceof Error ? e.message : t('session.status.subagents.stopFailed'))
+        } finally {
+            setStopping(false)
+        }
+    }
 
     return (
         // Match the chat column width (`max-w-content`) so the panel lines up
@@ -60,6 +274,23 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
                                 {t(`session.status.goal.${data.goal.status}`)}
                                 {data.goal.timeUsedSeconds > 0 ? ` · ${formatDuration(data.goal.timeUsedSeconds * 1000)}` : ''}
                             </div>
+                            {controls?.api ? (
+                                <GoalControls
+                                    api={controls.api}
+                                    sessionId={controls.sessionId}
+                                    capabilities={controls.capabilities ?? {}}
+                                    goal={data.goal}
+                                />
+                            ) : null}
+                        </Section>
+                    ) : controls?.api && controls.capabilities?.goalCreate ? (
+                        <Section title={t('session.status.goal')}>
+                            <GoalControls
+                                api={controls.api}
+                                sessionId={controls.sessionId}
+                                capabilities={controls.capabilities ?? {}}
+                                goal={null}
+                            />
                         </Section>
                     ) : null}
 
@@ -102,6 +333,19 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
                                     )
                                 })}
                             </div>
+                            {canStopDelegation && hasRunningSubagent ? (
+                                <div className="mt-1.5 flex flex-col gap-1">
+                                    <ControlButton
+                                        label={t('session.status.subagents.stop')}
+                                        tone="danger"
+                                        disabled={stopping}
+                                        onClick={() => void stopDelegation()}
+                                    />
+                                    {stopError ? (
+                                        <div className="text-[11px] text-red-600">{stopError}</div>
+                                    ) : null}
+                                </div>
+                            ) : null}
                         </Section>
                     ) : null}
 

@@ -12,7 +12,7 @@ import {
     cliBinaryUpdatedOnDisk,
     isMachineCapabilitySkewed,
 } from '@hapi/protocol/runnerCapabilities'
-import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, RewindConversationErrorCode, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, McodeDelegationStopResponse, McodeGoalClearResponse, McodeGoalResponse, QueuedStateResponse, RewindConversationErrorCode, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
 import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { ImplementCodexPlanResult } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
@@ -4381,6 +4381,33 @@ export class SyncEngine {
 
     async listMcodeModelsForSession(sessionId: string): Promise<RpcListMcodeModelsResponse> {
         return await this.rpcGateway.listMcodeModelsForSession(sessionId)
+    }
+
+    /** Creates MiniMax Code's autonomous goal for the session. */
+    async createMcodeGoal(
+        sessionId: string,
+        objective: string,
+        tokenBudget?: number | null
+    ): Promise<McodeGoalResponse> {
+        return await this.rpcGateway.createMcodeGoal(sessionId, objective, tokenBudget)
+    }
+
+    /** Patches the goal's objective, status or token budget. */
+    async patchMcodeGoal(
+        sessionId: string,
+        patch: { status?: string; objective?: string; tokenBudget?: number | null }
+    ): Promise<McodeGoalResponse> {
+        return await this.rpcGateway.patchMcodeGoal(sessionId, patch)
+    }
+
+    /** Clears the session's goal. */
+    async clearMcodeGoal(sessionId: string): Promise<McodeGoalClearResponse> {
+        return await this.rpcGateway.clearMcodeGoal(sessionId)
+    }
+
+    /** Stops the session's delegated sessions (its subagents). */
+    async stopMcodeDelegation(sessionId: string): Promise<McodeDelegationStopResponse> {
+        return await this.rpcGateway.stopMcodeDelegation(sessionId)
     }
 
     /** Generic Pi RPC — delegates to rpcGateway.callPiRpc. */

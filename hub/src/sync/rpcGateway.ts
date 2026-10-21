@@ -25,6 +25,9 @@ import type {
     GrokModelsResponse,
     KimiModelsResponse,
     McodeModelsResponse,
+    McodeGoalClearResponse,
+    McodeGoalResponse,
+    McodeDelegationStopResponse,
     GrokReasoningEffortResponse,
     ListDirectoryResponse,
     ListCodexSessionsRpcResponse,
@@ -560,6 +563,57 @@ export class RpcGateway {
             {},
             MODEL_LIST_RPC_TIMEOUT_MS
         ) as RpcListMcodeModelsResponse
+    }
+
+    /**
+     * Creates MiniMax Code's autonomous goal for the session.
+     *
+     * The agent starts executing the objective as soon as the goal exists, so
+     * this call is not a request it reviews later.
+     */
+    async createMcodeGoal(
+        sessionId: string,
+        objective: string,
+        tokenBudget?: number | null
+    ): Promise<McodeGoalResponse> {
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.McodeCreateGoal,
+            {
+                objective,
+                ...(tokenBudget === undefined ? {} : { tokenBudget })
+            }
+        ) as McodeGoalResponse
+    }
+
+    /** Patches the goal's objective, status or token budget. */
+    async patchMcodeGoal(
+        sessionId: string,
+        patch: { status?: string; objective?: string; tokenBudget?: number | null }
+    ): Promise<McodeGoalResponse> {
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.McodePatchGoal,
+            patch
+        ) as McodeGoalResponse
+    }
+
+    /** Clears the session's goal. */
+    async clearMcodeGoal(sessionId: string): Promise<McodeGoalClearResponse> {
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.McodeClearGoal,
+            {}
+        ) as McodeGoalClearResponse
+    }
+
+    /** Stops the session's delegated sessions (its subagents). */
+    async stopMcodeDelegation(sessionId: string): Promise<McodeDelegationStopResponse> {
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.McodeStopDelegation,
+            {}
+        ) as McodeDelegationStopResponse
     }
 
     /** Generic Pi RPC call — routes all Pi-specific session RPCs through

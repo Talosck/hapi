@@ -1,4 +1,10 @@
-import type { SubagentSnapshotMember, ThreadGoal } from '@hapi/protocol';
+import type {
+    McodeDelegationStopReceipt,
+    McodeExtensionCapabilities,
+    McodeGoalStatus as SharedMcodeGoalStatus,
+    SubagentSnapshotMember,
+    ThreadGoal
+} from '@hapi/protocol';
 
 /**
  * MiniMax Code's ACP extensions.
@@ -10,13 +16,94 @@ import type { SubagentSnapshotMember, ThreadGoal } from '@hapi/protocol';
  *   (its subagents). MiniMax Code does not stream the subagents' own tool
  *   calls, so this tree is the only view of them.
  * - `mcode/session/goal_update`: the goal of an autonomous run.
+ *
+ * The agent also exposes extension *methods* (goal lifecycle, delegation
+ * control, queueing). The agent advertises the exact set it supports in its
+ * `initialize` response and feature-gates the goal group at runtime, so HAPI
+ * reads the advertised list instead of assuming the methods exist.
  */
 export const MCODE_EXTENSION_CAPABILITY_META = {
     'minimax-code/extensions': { version: 1, notifications: true }
 } as const;
 
+/** The `_meta` key the agent uses to describe its extension surface. */
+export const MCODE_EXTENSION_CAPABILITY_KEY = 'minimax-code/extensions';
+
 export const MCODE_NOTIFICATION_DELEGATION_UPDATE = 'mcode/session/delegation_update';
 export const MCODE_NOTIFICATION_GOAL_UPDATE = 'mcode/session/goal_update';
+
+export const MCODE_METHOD_GOAL_GET = 'mcode/session/goal/get';
+export const MCODE_METHOD_GOAL_CREATE = 'mcode/session/goal/create';
+export const MCODE_METHOD_GOAL_PATCH = 'mcode/session/goal/patch';
+export const MCODE_METHOD_GOAL_CLEAR = 'mcode/session/goal/clear';
+export const MCODE_METHOD_DELEGATION_GET = 'mcode/session/delegation/get';
+export const MCODE_METHOD_DELEGATION_STOP = 'mcode/session/delegation/stop';
+
+/**
+ * The extension surface the agent advertised.
+ *
+ * An empty set means "the agent did not advertise this", which is different
+ * from "the agent advertised it but it is not ready" — the first disables a
+ * feature, the second is a transient error.
+ */
+export type McodeExtensionSupport = {
+    methods: ReadonlySet<string>;
+    notifications: ReadonlySet<string>;
+};
+
+const EMPTY_SUPPORT: McodeExtensionSupport = {
+    methods: new Set<string>(),
+    notifications: new Set<string>()
+};
+
+/**
+ * Reads the agent's advertised extension surface out of the initialize
+ * response's `_meta` block.
+ *
+ * The agent publishes `{ version, methods, notifications }`. A malformed or
+ * missing block yields an empty surface: the agent then simply does not
+ * advertise any extension, and HAPI disables the features instead of calling
+ * methods that would fail.
+ */
+export function parseMcodeExtensionSupport(meta: unknown): McodeExtensionSupport {
+    if (!isObject(meta)) return EMPTY_SUPPORT;
+    const block = meta[MCODE_EXTENSION_CAPABILITY_KEY];
+    if (!isObject(block)) return EMPTY_SUPPORT;
+
+    const readList = (value: unknown): string[] => {
+        if (!Array.isArray(value)) return [];
+        return value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+    };
+
+    return {
+        methods: new Set(readList(block.methods)),
+        notifications: new Set(readList(block.notifications))
+    };
+}
+
+/**
+ * Projects the advertised extension surface onto the capability flags the web
+ * renders against.
+ *
+ * The web never sees a method name: it asks "can this session create a goal?"
+ * and the CLI answers from what the agent actually advertised.
+ */
+export function toMcodeExtensionCapabilities(support: McodeExtensionSupport): McodeExtensionCapabilities {
+    const hasMethod = (method: string) => support.methods.has(method);
+    const hasNotification = (notification: string) => support.notifications.has(notification);
+
+    const goal = hasMethod(MCODE_METHOD_GOAL_CREATE)
+        || hasNotification(MCODE_NOTIFICATION_GOAL_UPDATE);
+
+    return {
+        goal,
+        goalCreate: hasMethod(MCODE_METHOD_GOAL_CREATE),
+        goalPatch: hasMethod(MCODE_METHOD_GOAL_PATCH),
+        goalClear: hasMethod(MCODE_METHOD_GOAL_CLEAR),
+        delegation: hasNotification(MCODE_NOTIFICATION_DELEGATION_UPDATE),
+        delegationStop: hasMethod(MCODE_METHOD_DELEGATION_STOP)
+    };
+}
 
 /** Lifecycle state of a delegated session, normalized to HAPI's vocabulary. */
 export type McodeDelegationStatus =
@@ -47,13 +134,7 @@ export type McodeDelegationSnapshot = {
     members: McodeDelegationMember[];
 };
 
-export type McodeGoalStatus =
-    | 'active'
-    | 'paused'
-    | 'blocked'
-    | 'complete'
-    | 'budget_limited'
-    | 'usage_limited';
+export type McodeGoalStatus = SharedMcodeGoalStatus;
 
 export type McodeGoal = {
     goalId: string;
@@ -69,7 +150,7 @@ export type McodeGoal = {
     timeUsedSeconds: number;
     tokenBudget: number | null;
     statusReason?: string;
-    hasKickoffAttachments: boolean;
+    hasKickoffAttachments?: boolean;
 };
 
 export type McodeGoalUpdate =
@@ -238,6 +319,46 @@ export function toSubagentSnapshotMembers(snapshot: McodeDelegationSnapshot): Su
 }
 
 /**
+ * Parses MiniMax Code's goal object.
+ *
+ * Used for both the `mcode/session/goal_update` notification and the
+ * `mcode/session/goal/*` method responses, which carry the same shape.
+ */
+export function parseMcodeGoalState(value: unknown): McodeGoal | null {
+    if (!isObject(value)) return null;
+
+    const goalId = readString(value.goalId);
+    const sessionId = readString(value.sessionId);
+    const objective = readString(value.objective);
+    const status = normalizeGoalStatus(value.status);
+    const createdAt = readNumber(value.createdAt);
+    const updatedAt = readNumber(value.updatedAt);
+    const tokensUsed = readNumber(value.tokensUsed);
+    const timeUsedSeconds = readNumber(value.timeUsedSeconds);
+    if (!goalId || !sessionId || !objective || !status || createdAt === undefined
+        || updatedAt === undefined || tokensUsed === undefined || timeUsedSeconds === undefined) {
+        return null;
+    }
+    const tokenBudget = value.tokenBudget === null ? null : readNumber(value.tokenBudget) ?? null;
+    const parsed: McodeGoal = {
+        goalId,
+        sessionId,
+        objective,
+        status,
+        createdAt,
+        updatedAt,
+        tokensUsed,
+        turnsUsed: readNumber(value.turnsUsed) ?? 0,
+        timeUsedSeconds,
+        tokenBudget,
+        hasKickoffAttachments: value.hasKickoffAttachments === true
+    };
+    const statusReason = readString(value.statusReason);
+    if (statusReason) parsed.statusReason = statusReason;
+    return parsed;
+}
+
+/**
  * Parses a `mcode/session/goal_update` payload. A cleared goal arrives as
  * `{ goal: null, goalId }`.
  *
@@ -252,36 +373,8 @@ export function parseMcodeGoalUpdate(params: unknown): McodeGoalUpdate | null {
     if (goal === null) {
         return { kind: 'cleared', goalId: readString(params.goalId) ?? null };
     }
-    if (!isObject(goal)) return null;
-
-    const goalId = readString(goal.goalId);
-    const sessionId = readString(goal.sessionId);
-    const objective = readString(goal.objective);
-    const status = normalizeGoalStatus(goal.status);
-    const createdAt = readNumber(goal.createdAt);
-    const updatedAt = readNumber(goal.updatedAt);
-    const tokensUsed = readNumber(goal.tokensUsed);
-    const timeUsedSeconds = readNumber(goal.timeUsedSeconds);
-    if (!goalId || !sessionId || !objective || !status || createdAt === undefined
-        || updatedAt === undefined || tokensUsed === undefined || timeUsedSeconds === undefined) {
-        return null;
-    }
-    const tokenBudget = goal.tokenBudget === null ? null : readNumber(goal.tokenBudget) ?? null;
-    const parsed: McodeGoal = {
-        goalId,
-        sessionId,
-        objective,
-        status,
-        createdAt,
-        updatedAt,
-        tokensUsed,
-        turnsUsed: readNumber(goal.turnsUsed) ?? 0,
-        timeUsedSeconds,
-        tokenBudget,
-        hasKickoffAttachments: goal.hasKickoffAttachments === true
-    };
-    const statusReason = readString(goal.statusReason);
-    if (statusReason) parsed.statusReason = statusReason;
+    const parsed = parseMcodeGoalState(goal);
+    if (!parsed) return null;
     return { kind: 'goal', goal: parsed };
 }
 
@@ -302,6 +395,65 @@ export function toHapiThreadGoal(goal: McodeGoal, threadId: string): ThreadGoal 
         timeUsedSeconds: goal.timeUsedSeconds,
         createdAt: Math.floor(goal.createdAt / 1000),
         updatedAt: Math.floor(goal.updatedAt / 1000)
+    };
+}
+
+/**
+ * The statuses the agent accepts in a `mcode/session/goal/patch` call.
+ *
+ * `usage_limited` is a runtime-derived state the user cannot set, so it is
+ * not part of the patchable set.
+ */
+export const MCODE_GOAL_PATCH_STATUSES = [
+    'active',
+    'paused',
+    'blocked',
+    'complete',
+    'budget_limited'
+] as const;
+
+export type McodeGoalPatchStatus = (typeof MCODE_GOAL_PATCH_STATUSES)[number];
+
+const HAPI_TO_MCODE_GOAL_STATUS: Partial<Record<ThreadGoal['status'], McodeGoalPatchStatus>> = {
+    active: 'active',
+    paused: 'paused',
+    blocked: 'blocked',
+    complete: 'complete',
+    budgetLimited: 'budget_limited'
+};
+
+/**
+ * Maps HAPI's thread-goal status onto a status the agent accepts in a patch.
+ *
+ * Returns null for a status the agent cannot be told to enter (for example
+ * `usageLimited`, which the agent derives from its own usage counters).
+ */
+export function toMcodeGoalPatchStatus(status: ThreadGoal['status']): McodeGoalPatchStatus | null {
+    return HAPI_TO_MCODE_GOAL_STATUS[status] ?? null;
+}
+
+/**
+ * Parses the receipt a `mcode/session/delegation/stop` call returns.
+ *
+ * The receipt lists which delegated sessions were stopped, which are still
+ * active and which could not be stopped — the web shows that split so a
+ * failed stop is not mistaken for a successful one.
+ */
+export function parseMcodeDelegationStopReceipt(value: unknown): McodeDelegationStopReceipt | null {
+    if (!isObject(value)) return null;
+    const rootSessionId = readString(value.rootSessionId);
+    if (!rootSessionId) return null;
+    const readIds = (entries: unknown): string[] => {
+        if (!Array.isArray(entries)) return [];
+        return entries.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+    };
+    return {
+        schemaVersion: readNumber(value.schemaVersion) ?? 1,
+        rootSessionId,
+        rootStopped: value.rootStopped === true,
+        stoppedSessionIds: readIds(value.stoppedSessionIds),
+        activeSessionIds: readIds(value.activeSessionIds),
+        failedSessionIds: readIds(value.failedSessionIds)
     };
 }
 

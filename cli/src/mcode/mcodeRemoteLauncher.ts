@@ -1,6 +1,12 @@
 import React from 'react';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
-import type { McodeModelsResponse } from '@hapi/protocol/apiTypes';
+import type {
+    McodeDelegationStopResponse,
+    McodeGoalClearResponse,
+    McodeGoalResponse,
+    McodeModelsResponse
+} from '@hapi/protocol/apiTypes';
+import type { ThreadGoal } from '@hapi/protocol';
 import { getBuiltinSlashCommands, mergeSlashCommands } from '@hapi/protocol/slashCommands';
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 import { listSlashCommands } from '@/modules/common/slashCommands';
@@ -32,14 +38,20 @@ import { BackgroundTaskAggregator } from './utils/backgroundTaskAggregator';
 import { normalizeMcodeToolCall } from './utils/toolCallNormalizer';
 import { acpModelIdToCliModelId, cliModelIdToAcpModelId } from './utils/modelId';
 import {
+    MCODE_METHOD_DELEGATION_GET,
+    MCODE_METHOD_GOAL_GET,
     MCODE_NOTIFICATION_DELEGATION_UPDATE,
     MCODE_NOTIFICATION_GOAL_UPDATE,
     goalLifecycleSignature,
     parseMcodeDelegationUpdate,
     parseMcodeGoalUpdate,
+    parseMcodeExtensionSupport,
     toHapiThreadGoal,
-    toSubagentSnapshotMembers
+    toMcodeGoalPatchStatus,
+    toSubagentSnapshotMembers,
+    type McodeGoal
 } from './utils/mcodeExtensions';
+import { McodeExtensionControl } from './utils/mcodeExtensionControl';
 
 export type McodeRemoteLauncherOptions = {
     model?: string;
@@ -89,6 +101,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private currentSessionMode: string | null = null;
     /** The permission mode the hub currently shows for this session. */
     private hubPermissionMode: PermissionMode | null = null;
+    /** Drives the goal and delegation extension methods the agent advertised. */
+    private extensionControl: McodeExtensionControl | null = null;
 
     constructor(session: McodeSession, opts: McodeRemoteLauncherOptions) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -128,6 +142,14 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         });
 
         await backend.initialize();
+
+        // The agent advertises its extension surface (methods it accepts and
+        // notifications it emits) in the initialize response. MiniMax Code
+        // feature-gates its goal extension at runtime, so the advertised list —
+        // not the HAPI side — decides which features this session has.
+        const extensionSupport = parseMcodeExtensionSupport(backend.getInitializeMeta());
+        this.extensionControl = new McodeExtensionControl(backend, extensionSupport);
+        this.publishExtensionCapabilities();
 
         // MiniMax Code streams its delegation tree and thread goal through
         // ACP extension notifications; the agent only emits them because the
@@ -231,6 +253,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         // a requested value was rejected.
         this.opts.onConfigDiscovered?.({ model: effectiveModel, effort: effectiveEffort });
         this.registerAcpCommandHandlers(acpSessionId);
+        this.registerExtensionControlHandlers(acpSessionId);
+        // The goal notification is a one-way push: a resumed session would
+        // otherwise show no goal even though the agent is still running one.
+        await this.restoreGoalState(acpSessionId);
+        await this.restoreDelegationState(acpSessionId);
 
         this.setupAbortHandlers(session.client.rpcHandlerManager, {
             onAbort: () => this.handleAbort(),
@@ -419,6 +446,25 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         // after the handoff.
         this.session.sendSessionEvent({ type: 'thread-goal-cleared' });
         this.session.sendSessionEvent({ type: 'subagent-snapshot', members: [] });
+        // The extension surface belongs to the agent process that just went
+        // away, so the web must not offer controls the local TUI cannot honor.
+        // The flags are set to "off" rather than removed: the hub merges
+        // metadata writes, so a removed key could survive the merge.
+        this.extensionControl = null;
+        this.session.client.updateMetadata((metadata) => ({
+            ...metadata,
+            capabilities: {
+                ...metadata?.capabilities,
+                mcodeExtensions: {
+                    goal: false,
+                    goalCreate: false,
+                    goalPatch: false,
+                    goalClear: false,
+                    delegation: false,
+                    delegationStop: false
+                }
+            }
+        }));
 
         // The live session-scoped catalog dies with the backend. Restore the
         // probe-based handlers so the local mode can still answer the model
@@ -537,6 +583,154 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 ])
             };
         });
+    }
+
+    /**
+     * Publishes the agent's advertised extension surface as session
+     * capabilities.
+     *
+     * The web renders the goal and delegation controls from these flags, so a
+     * session whose agent does not support the goal extension shows no goal
+     * controls instead of buttons that would fail.
+     */
+    private publishExtensionCapabilities(): void {
+        const capabilities = this.extensionControl?.getCapabilities();
+        if (!capabilities) return;
+        this.session.client.updateMetadata((metadata) => ({
+            ...metadata,
+            capabilities: {
+                ...metadata?.capabilities,
+                mcodeExtensions: capabilities
+            }
+        }));
+    }
+
+    /**
+     * Registers the goal and delegation control RPCs.
+     *
+     * Every handler checks the advertised extension surface first: an agent
+     * that does not support the goal extension answers with a clear message
+     * rather than an opaque JSON-RPC failure.
+     */
+    private registerExtensionControlHandlers(sessionId: string): void {
+        const control = this.extensionControl;
+        if (!control) return;
+        const manager = this.session.client.rpcHandlerManager;
+
+        manager.registerHandler<unknown, McodeGoalResponse>(
+            RPC_METHODS.McodeCreateGoal,
+            async (payload) => {
+                const objective = readRequestString(payload, 'objective');
+                if (!objective) {
+                    return { success: false, error: 'A goal needs an objective' };
+                }
+                const tokenBudget = readRequestNumber(payload, 'tokenBudget');
+                const response = await control.createGoal(sessionId, objective, tokenBudget ?? null);
+                this.applyGoalResponse(response.goal);
+                return response;
+            }
+        );
+
+        manager.registerHandler<unknown, McodeGoalResponse>(
+            RPC_METHODS.McodePatchGoal,
+            async (payload) => {
+                const patch: { status?: string; objective?: string; tokenBudget?: number | null } = {};
+                const status = readRequestString(payload, 'status');
+                if (status) {
+                    const mapped = toMcodeGoalPatchStatus(status as ThreadGoal['status']);
+                    if (!mapped) {
+                        return {
+                            success: false,
+                            error: `MiniMax Code cannot be asked to enter the "${status}" goal status`
+                        };
+                    }
+                    patch.status = mapped;
+                }
+                const objective = readRequestString(payload, 'objective');
+                if (objective) patch.objective = objective;
+                const tokenBudget = readRequestNumber(payload, 'tokenBudget');
+                if (tokenBudget !== undefined) patch.tokenBudget = tokenBudget;
+
+                if (Object.keys(patch).length === 0) {
+                    return { success: false, error: 'A goal update needs at least one field' };
+                }
+                const response = await control.patchGoal(sessionId, patch);
+                this.applyGoalResponse(response.goal);
+                return response;
+            }
+        );
+
+        manager.registerHandler<unknown, McodeGoalClearResponse>(
+            RPC_METHODS.McodeClearGoal,
+            async () => {
+                const response = await control.clearGoal(sessionId);
+                if (response.success && response.cleared) {
+                    this.lastGoalLifecycleSignature = null;
+                    this.session.sendSessionEvent({ type: 'thread-goal-cleared' });
+                }
+                return response;
+            }
+        );
+
+        manager.registerHandler<unknown, McodeDelegationStopResponse>(
+            RPC_METHODS.McodeStopDelegation,
+            async () => {
+                const response = await control.stopDelegation(sessionId);
+                if (response.success && response.receipt) {
+                    // The agent re-publishes the delegation tree after a stop,
+                    // but a session without subagents must not keep a stale
+                    // tree on screen.
+                    if (response.receipt.stoppedSessionIds.length > 0 || response.receipt.rootStopped) {
+                        this.lastDelegationSignature = null;
+                    }
+                }
+                return response;
+            }
+        );
+    }
+
+    /**
+     * Forwards a goal the agent returned in response to a control call.
+     *
+     * The agent also pushes goal updates as a notification, but a call
+     * response is the only source for a goal created or patched outside the
+     * notification stream.
+     */
+    private applyGoalResponse(goal: McodeGoal | null | undefined): void {
+        if (!goal) return;
+        this.handleGoalUpdate({ goal });
+    }
+
+    /**
+     * Restores the goal of a resumed session.
+     *
+     * The goal notification is a one-way push, so a CLI that restarted would
+     * otherwise leave the web without the goal the agent is still running.
+     */
+    private async restoreGoalState(sessionId: string): Promise<void> {
+        const control = this.extensionControl;
+        if (!control?.supportsMethod(MCODE_METHOD_GOAL_GET)) return;
+        const response = await control.getGoal(sessionId);
+        if (!response.success || !response.goal) return;
+        this.applyGoalResponse(response.goal);
+    }
+
+    /**
+     * Restores the delegation tree of a resumed session.
+     *
+     * The tree is a one-way push like the goal, so a CLI that restarted would
+     * otherwise leave the web without the subagents the agent is still
+     * running.
+     */
+    private async restoreDelegationState(sessionId: string): Promise<void> {
+        const control = this.extensionControl;
+        if (!control?.supportsMethod(MCODE_METHOD_DELEGATION_GET)) return;
+        const snapshot = await control.getDelegationSnapshot(sessionId);
+        // An empty tree is not a state change: the panel already shows no
+        // subagents, and forwarding it would clear a tree the agent has not
+        // published yet.
+        if (!snapshot || snapshot.members.length === 0) return;
+        this.handleDelegationUpdate({ snapshot });
     }
 
     private async applyInitialEffort(sessionId: string, effort: string | undefined): Promise<string | null> {
@@ -665,15 +859,33 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     /**
      * Routes MiniMax Code's ACP extension notifications. Unknown methods are
      * ignored: the agent may add more extensions over time.
+     *
+     * A notification the agent did not advertise is ignored as well. The agent
+     * gates its goal extension at runtime, so a build without goals never
+     * emits `goal_update` — and a build that renames it must not leave the
+     * web showing a goal nobody can control.
      */
     private handleExtensionNotification(method: string, params: unknown): void {
         if (method === MCODE_NOTIFICATION_DELEGATION_UPDATE) {
+            if (!this.supportsExtensionNotification(method)) return;
             this.handleDelegationUpdate(params);
             return;
         }
         if (method === MCODE_NOTIFICATION_GOAL_UPDATE) {
+            if (!this.supportsExtensionNotification(method)) return;
             this.handleGoalUpdate(params);
         }
+    }
+
+    /**
+     * Whether the agent advertised this notification.
+     *
+     * An agent that advertised no extension surface at all (an older build)
+     * is treated as supporting nothing: the notifications it does send are
+     * then ignored rather than half-handled.
+     */
+    private supportsExtensionNotification(notification: string): boolean {
+        return this.extensionControl?.supportsNotification(notification) === true;
     }
 
     /**
@@ -882,6 +1094,29 @@ function toAcpMcpServers(config: Record<string, { command: string; args: string[
         args: entry.args,
         env: []
     }));
+}
+
+/** Reads a non-empty string field from an RPC payload. */
+function readRequestString(payload: unknown, key: string): string | undefined {
+    if (typeof payload !== 'object' || payload === null) return undefined;
+    const value = (payload as Record<string, unknown>)[key];
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Reads a numeric field from an RPC payload.
+ *
+ * `null` is a meaningful value for a token budget ("unlimited"), so it is
+ * reported separately from "the caller did not send one".
+ */
+function readRequestNumber(payload: unknown, key: string): number | null | undefined {
+    if (typeof payload !== 'object' || payload === null) return undefined;
+    const value = (payload as Record<string, unknown>)[key];
+    if (value === null) return null;
+    if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+    return value;
 }
 
 export async function mcodeRemoteLauncher(

@@ -307,6 +307,14 @@ export function buildSessionStatusData(args: {
     blocks: readonly ChatBlock[]
     messages: readonly NormalizedMessage[]
     backgroundTaskCount?: number
+    /**
+     * Keep the panel rendered even when the session has no status to show.
+     *
+     * The MiniMax Code goal controls live in the panel, so a session whose
+     * agent supports goals needs the panel to exist before the first goal
+     * does — otherwise there is no way to create one.
+     */
+    alwaysVisible?: boolean
 }): SessionStatusData | null {
     const tools = collectToolBlocks(args.blocks)
     const detectedTerminals = buildBackgroundTerminals(tools, args.messages)
@@ -343,6 +351,7 @@ export function buildSessionStatusData(args: {
         || data.subagents.length > 0
         || data.terminals.length > 0
         || data.undiscoveredTerminalCount > 0
+        || args.alwaysVisible
         ? data
         : null
 }

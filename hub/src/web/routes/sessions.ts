@@ -6,6 +6,8 @@ import {
     getPermissionModesForFlavor,
     isLiveLifecycleState,
     isPermissionModeAllowedForFlavor,
+    McodeGoalCreateRequestSchema,
+    McodeGoalPatchRequestSchema,
     RenameSessionRequestSchema,
     SetSessionPinnedRequestSchema,
     ResumeSessionRequestSchema,
@@ -1558,6 +1560,99 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list MiniMax Code models'
+            }, 500)
+        }
+    })
+
+    /**
+     * MiniMax Code goal control.
+     *
+     * The goal extension is optional in the agent, so the route answers with
+     * the CLI's "not advertised" message instead of pretending the feature
+     * exists.
+     */
+    app.post('/sessions/:id/mcode/goal', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) return sessionResult
+        if (sessionResult.session.metadata?.flavor !== 'mcode') {
+            return c.json({ success: false, error: 'MiniMax Code goals are only available for MiniMax Code sessions' }, 400)
+        }
+        const body = await c.req.json().catch(() => null)
+        const parsed = McodeGoalCreateRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ success: false, error: 'A goal needs an objective' }, 400)
+        }
+        try {
+            return c.json(await engine.createMcodeGoal(
+                sessionResult.sessionId,
+                parsed.data.objective,
+                parsed.data.tokenBudget
+            ))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to create the MiniMax Code goal'
+            }, 500)
+        }
+    })
+
+    app.patch('/sessions/:id/mcode/goal', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) return sessionResult
+        if (sessionResult.session.metadata?.flavor !== 'mcode') {
+            return c.json({ success: false, error: 'MiniMax Code goals are only available for MiniMax Code sessions' }, 400)
+        }
+        const body = await c.req.json().catch(() => null)
+        const parsed = McodeGoalPatchRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ success: false, error: 'Invalid goal update' }, 400)
+        }
+        try {
+            return c.json(await engine.patchMcodeGoal(sessionResult.sessionId, parsed.data))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to update the MiniMax Code goal'
+            }, 500)
+        }
+    })
+
+    app.delete('/sessions/:id/mcode/goal', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) return sessionResult
+        if (sessionResult.session.metadata?.flavor !== 'mcode') {
+            return c.json({ success: false, error: 'MiniMax Code goals are only available for MiniMax Code sessions' }, 400)
+        }
+        try {
+            return c.json(await engine.clearMcodeGoal(sessionResult.sessionId))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to clear the MiniMax Code goal'
+            }, 500)
+        }
+    })
+
+    app.post('/sessions/:id/mcode/delegation/stop', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) return sessionResult
+        if (sessionResult.session.metadata?.flavor !== 'mcode') {
+            return c.json({ success: false, error: 'MiniMax Code subagents are only available for MiniMax Code sessions' }, 400)
+        }
+        try {
+            return c.json(await engine.stopMcodeDelegation(sessionResult.sessionId))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to stop the MiniMax Code subagents'
             }, 500)
         }
     })

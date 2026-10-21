@@ -102,6 +102,25 @@ function createBackend(overrides: Record<string, unknown> = {}) {
             ]
         })),
         getAvailableCommands: vi.fn(() => []),
+        getInitializeMeta: vi.fn(() => ({
+            'minimax-code/extensions': {
+                version: 1,
+                methods: [
+                    'mcode/session/goal/get',
+                    'mcode/session/goal/create',
+                    'mcode/session/goal/patch',
+                    'mcode/session/goal/clear',
+                    'mcode/session/delegation/get',
+                    'mcode/session/delegation/stop'
+                ],
+                notifications: ['mcode/session/goal_update', 'mcode/session/delegation_update']
+            }
+        })),
+        sendExtensionRequest: vi.fn(async (method: string) => {
+            if (method === 'mcode/session/goal/get') return { goal: null }
+            if (method === 'mcode/session/delegation/get') return { snapshot: null }
+            throw new Error(`unexpected method ${method}`)
+        }),
         waitForSessionUpdateQueue: vi.fn(async () => {}),
         prompt: vi.fn(async () => {}),
         cancelPrompt: vi.fn(async () => {}),
@@ -131,7 +150,8 @@ function createSession(messages: QueuedMessage[] = [], permissionMode: 'default'
         sendAgentMessage: vi.fn(),
         sendSessionEvent: vi.fn(),
         sendClaudeSessionMessage: vi.fn(),
-        updateAgentState: vi.fn()
+        updateAgentState: vi.fn(),
+        updateMetadata: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -177,7 +197,8 @@ function createScriptedSession() {
         sendAgentMessage: vi.fn(),
         sendSessionEvent: vi.fn(),
         sendClaudeSessionMessage: vi.fn(),
-        updateAgentState: vi.fn()
+        updateAgentState: vi.fn(),
+        updateMetadata: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -686,6 +707,225 @@ describe('mcodeRemoteLauncher ACP extensions', () => {
     })
 })
 
+describe('mcodeRemoteLauncher extension capabilities', () => {
+    afterEach(() => {
+        harness.backend = {}
+    })
+
+    function createExtensionBackend(notifications: Array<[string, unknown]>, meta?: unknown) {
+        let listener: ((method: string, params: unknown) => void) | null = null
+        const backend = createBackend({
+            getInitializeMeta: vi.fn(() => meta),
+            setExtensionNotificationListener: vi.fn((next: (method: string, params: unknown) => void) => {
+                listener = next
+            }),
+            prompt: vi.fn(async () => {
+                for (const [method, params] of notifications) {
+                    listener?.(method, params)
+                }
+            })
+        })
+        return backend
+    }
+
+    it('publishes the advertised extension surface as session capabilities', async () => {
+        createBackend()
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(session.client.updateMetadata).toHaveBeenCalledWith(expect.any(Function))
+        const updater = session.client.updateMetadata.mock.calls[0][0] as (m: unknown) => unknown
+        expect(updater({ capabilities: { terminal: true } })).toMatchObject({
+            capabilities: {
+                terminal: true,
+                mcodeExtensions: {
+                    goal: true,
+                    goalCreate: true,
+                    goalPatch: true,
+                    goalClear: true,
+                    delegation: true,
+                    delegationStop: true
+                }
+            }
+        })
+    })
+
+    it('reports no goal capabilities when the agent disabled the goal extension', async () => {
+        createBackend({
+            getInitializeMeta: vi.fn(() => ({
+                'minimax-code/extensions': {
+                    version: 1,
+                    methods: ['mcode/session/delegation/stop'],
+                    notifications: ['mcode/session/delegation_update']
+                }
+            }))
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const updater = session.client.updateMetadata.mock.calls[0][0] as (m: unknown) => unknown
+        expect(updater({})).toMatchObject({
+            capabilities: {
+                mcodeExtensions: {
+                    goal: false,
+                    goalCreate: false,
+                    goalPatch: false,
+                    goalClear: false,
+                    delegation: true,
+                    delegationStop: true
+                }
+            }
+        })
+    })
+
+    it('ignores an extension notification the agent did not advertise', async () => {
+        // The agent feature-gates its goal extension: a build without goals
+        // never emits goal_update, and a build that renames it must not leave
+        // the web showing a goal nobody can control.
+        createExtensionBackend(
+            [['mcode/session/goal_update', {
+                sessionId: 'mcode-session-1',
+                goal: {
+                    goalId: 'goal-1',
+                    sessionId: 'mcode-session-1',
+                    objective: 'Ship the feature',
+                    status: 'active',
+                    createdAt: 1_700_000_000_000,
+                    updatedAt: 1_700_000_060_000,
+                    tokensUsed: 1200,
+                    turnsUsed: 3,
+                    timeUsedSeconds: 42,
+                    tokenBudget: 10_000
+                }
+            }]],
+            {
+                'minimax-code/extensions': {
+                    version: 1,
+                    methods: [],
+                    notifications: ['mcode/session/delegation_update']
+                }
+            }
+        )
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events.filter((event) => event?.type === 'thread-goal-updated')).toEqual([])
+    })
+
+    it('restores the goal of a resumed session', async () => {
+        // The goal notification is a one-way push, so a CLI that restarted
+        // would otherwise leave the web without the goal the agent runs on.
+        const backend = createBackend({
+            sendExtensionRequest: vi.fn(async (method: string) => {
+                if (method === 'mcode/session/goal/get') {
+                    return {
+                        goal: {
+                            goalId: 'goal-1',
+                            sessionId: 'mcode-session-1',
+                            objective: 'Ship the feature',
+                            status: 'active',
+                            createdAt: 1_700_000_000_000,
+                            updatedAt: 1_700_000_060_000,
+                            tokensUsed: 1200,
+                            turnsUsed: 3,
+                            timeUsedSeconds: 42,
+                            tokenBudget: 10_000
+                        }
+                    }
+                }
+                throw new Error(`unexpected method ${method}`)
+            })
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(backend.sendExtensionRequest).toHaveBeenCalledWith(
+            'mcode/session/goal/get',
+            { sessionId: 'mcode-session-1' }
+        )
+        expect(session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'thread-goal-updated',
+            goal: expect.objectContaining({ objective: 'Ship the feature', status: 'active' })
+        }))
+    })
+
+    it('restores the delegation tree of a resumed session', async () => {
+        // The tree is a one-way push like the goal: a CLI that restarted would
+        // otherwise show no subagents even though the agent runs them.
+        const backend = createBackend({
+            sendExtensionRequest: vi.fn(async (method: string) => {
+                if (method === 'mcode/session/delegation/get') {
+                    return {
+                        snapshot: {
+                            schemaVersion: 1,
+                            rootSessionId: 'mcode-session-1',
+                            members: [{
+                                sessionId: 'child-1',
+                                parentSessionId: 'mcode-session-1',
+                                agentName: 'explore',
+                                task: 'Explore the API',
+                                status: 'running',
+                                createdAtMs: 5
+                            }]
+                        }
+                    }
+                }
+                if (method === 'mcode/session/goal/get') return { goal: null }
+                throw new Error(`unexpected method ${method}`)
+            })
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(backend.sendExtensionRequest).toHaveBeenCalledWith(
+            'mcode/session/delegation/get',
+            { sessionId: 'mcode-session-1' }
+        )
+        expect(session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'subagent-snapshot',
+            members: [expect.objectContaining({ id: 'child-1', title: 'Explore the API' })]
+        }))
+    })
+
+    it('does not ask for a goal the agent did not advertise', async () => {        const backend = createBackend({
+            getInitializeMeta: vi.fn(() => ({
+                'minimax-code/extensions': {
+                    version: 1,
+                    methods: [],
+                    notifications: []
+                }
+            }))
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(backend.sendExtensionRequest).not.toHaveBeenCalled()
+    })
+
+    it('registers the goal and delegation control RPCs', async () => {
+        createBackend()
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const methods = session.client.rpcHandlerManager.registerHandler.mock.calls
+            .map((call) => call[0] as string)
+        expect(methods).toEqual(expect.arrayContaining([
+            RPC_METHODS.McodeCreateGoal,
+            RPC_METHODS.McodePatchGoal,
+            RPC_METHODS.McodeClearGoal,
+            RPC_METHODS.McodeStopDelegation
+        ]))
+    })
+})
+
 describe('mcodeRemoteLauncher session state', () => {
     afterEach(() => {
         harness.backend = {}
@@ -845,7 +1085,8 @@ describe('mcodeRemoteLauncher abort handling', () => {
             sendAgentMessage: vi.fn(),
             sendSessionEvent: vi.fn(),
             sendClaudeSessionMessage: vi.fn(),
-            updateAgentState: vi.fn()
+            updateAgentState: vi.fn(),
+            updateMetadata: vi.fn()
         }
         const session = {
             path: '/tmp/mcode-test',
