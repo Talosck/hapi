@@ -167,6 +167,35 @@ describe('reduceChatBlocks', () => {
         })
     })
 
+    it('does not count the cache twice for an inclusive usage payload', () => {
+        // The generic usage envelope reports an inclusive input: the uncached
+        // prompt plus the cache hits. Adding the cache again would report a
+        // context larger than the window.
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'inclusive-turn',
+                localId: null,
+                createdAt: 1_700_000_000_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                usage: {
+                    input_tokens: 19_837,
+                    output_tokens: 101,
+                    cache_read_input_tokens: 19_349,
+                    input_includes_cache: true
+                }
+            }
+        ] as NormalizedMessage[]
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.latestUsage).toMatchObject({
+            contextSize: 19_837,
+            cacheRead: 19_349
+        })
+    })
+
     it('ignores Claude subagent usage when calculating parent latest usage', () => {
         // Claude never stamps scope_role, so a Task subagent's assistant
         // messages look like ordinary parent usage apart from isSidechain.

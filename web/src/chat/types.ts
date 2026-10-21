@@ -12,6 +12,15 @@ export type UsageData = {
     thread_id?: string
     scope_role?: string
     service_tier?: string
+    /**
+     * True when `input_tokens` already contains the cache hits.
+     *
+     * The generic usage envelope (`hapi.usage.v1`) reports an inclusive
+     * input, while Claude-style payloads report the uncached prompt only.
+     * The context size adds the cache to the input, so it must know which
+     * convention the payload uses — otherwise the cache is counted twice.
+     */
+    input_includes_cache?: boolean
 }
 
 export type RoundModelUsage = {

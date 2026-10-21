@@ -12,7 +12,14 @@ function calculateContextSize(usage: UsageData): number {
     if (typeof usage.context_tokens === 'number') {
         return usage.context_tokens
     }
-    return (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0) + usage.input_tokens
+    const cacheTokens = (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0)
+    // An inclusive input already contains the cache hits, so adding them
+    // again would report a context larger than the window (and a cached count
+    // larger than the used one).
+    if (usage.input_includes_cache) {
+        return usage.input_tokens
+    }
+    return usage.input_tokens + cacheTokens
 }
 
 /**

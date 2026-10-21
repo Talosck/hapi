@@ -255,6 +255,33 @@ describe('normalizeAgentRecord — imported pi compact-summary (codex envelope)'
 })
 
 describe('normalizeAgentRecord — Codex usage provenance', () => {
+    it('marks an inclusive usage payload so the cache is not counted twice', () => {
+        const normalized = normalizeAgentRecord('mcode-token-count', null, 1, {
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                usageSchema: 'hapi.usage.v1',
+                inputTokenSemantics: 'includes-cache',
+                model: 'm:minimax:MiniMax-M3:v:thinking',
+                info: {
+                    total: {
+                        inputTokens: 19_837,
+                        outputTokens: 101,
+                        cachedInputTokens: 19_349
+                    }
+                }
+            }
+        })
+
+        expect(normalized).toMatchObject({
+            usage: {
+                input_tokens: 19_837,
+                cache_read_input_tokens: 19_349,
+                input_includes_cache: true
+            }
+        })
+    })
+
     it('preserves the Codex marker and model on token-count events', () => {
         const normalized = normalizeAgentRecord('codex-token-count', null, 1, {
             type: 'codex',

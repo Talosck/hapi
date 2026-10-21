@@ -81,16 +81,22 @@ export function convertAgentMessage(message: AgentMessage, model?: string | null
                 id: message.id ?? randomUUID(),
                 ...(message.live === true ? { live: true } : {})
             };
-        case 'usage':
+        case 'usage': {
+            // The generic envelope reports an inclusive input: the uncached
+            // prompt plus the cache hits. The context the model call occupied
+            // is that inclusive input, so it is the fallback for the context
+            // size. Without it the web falls back to "input + cache", which
+            // counts the cache twice for an inclusive payload.
+            const inclusiveInputTokens = message.inputTokens
+                + (message.cacheReadTokens ?? 0)
+                + (message.cacheCreationTokens ?? 0);
             return {
                 type: 'token_count',
                 model: typeof model === 'string' && model.trim() ? model.trim() : null,
                 ...INCLUSIVE_INPUT_TOKEN_USAGE_MARKER,
                 info: {
                     total: {
-                        inputTokens: message.inputTokens
-                            + (message.cacheReadTokens ?? 0)
-                            + (message.cacheCreationTokens ?? 0),
+                        inputTokens: inclusiveInputTokens,
                         outputTokens: message.outputTokens,
                         totalTokens: message.totalTokens,
                         thoughtTokens: message.thoughtTokens,
@@ -99,10 +105,11 @@ export function convertAgentMessage(message: AgentMessage, model?: string | null
                             ? { cacheWriteInputTokens: message.cacheCreationTokens }
                             : {})
                     },
-                    contextTokens: message.contextTokens,
+                    contextTokens: message.contextTokens ?? inclusiveInputTokens,
                     modelContextWindow: message.contextWindow
                 }
             };
+        }
         case 'tool_call':
             return {
                 type: 'tool-call',

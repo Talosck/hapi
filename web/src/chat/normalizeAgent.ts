@@ -145,6 +145,12 @@ function normalizeCodexTokenUsage(value: unknown, data?: Record<string, unknown>
     const outputTokens = asNumber(usageSource.outputTokens ?? usageSource.output_tokens)
     if (inputTokens === null || outputTokens === null) return null
 
+    // The generic envelope marks an inclusive input; Claude-style payloads
+    // report the uncached prompt only. The context size adds the cache to the
+    // input, so it has to know which convention the payload uses.
+    const inputIncludesCache = data?.usageSchema === 'hapi.usage.v1'
+        && data?.inputTokenSemantics === 'includes-cache'
+
     return {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
@@ -157,6 +163,7 @@ function normalizeCodexTokenUsage(value: unknown, data?: Record<string, unknown>
             ?? usageSource.cacheReadInputTokens
             ?? usageSource.cache_read_input_tokens
         ) ?? undefined,
+        input_includes_cache: inputIncludesCache || undefined,
         context_tokens: asNumber(
             info.contextTokens
             ?? info.context_tokens
