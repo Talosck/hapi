@@ -8,7 +8,23 @@ const harness = vi.hoisted(() => ({
     question: {
         cancelReasons: [] as string[],
         submitAnswer: null as ((text: string) => void) | null
+    },
+    restoredHandlers: {
+        model: 0,
+        slashCommands: 0
     }
+}))
+
+vi.mock('@/modules/common/handlers/mcodeModels', () => ({
+    registerMcodeSessionModelHandlers: vi.fn(() => {
+        harness.restoredHandlers.model += 1
+    })
+}))
+
+vi.mock('@/modules/common/handlers/slashCommands', () => ({
+    registerSlashCommandHandlers: vi.fn(() => {
+        harness.restoredHandlers.slashCommands += 1
+    })
 }))
 
 vi.mock('./utils/mcodeBackend', async (importOriginal) => {
@@ -556,7 +572,11 @@ describe('mcodeRemoteLauncher ACP extensions', () => {
         await mcodeRemoteLauncher(session as never, {})
 
         const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
-        expect(events).not.toContainEqual(expect.objectContaining({ type: 'subagent-snapshot' }))
+        // The only snapshot is the empty one the cleanup sends when the
+        // remote session ends.
+        expect(events.filter((event) => event?.type === 'subagent-snapshot')).toEqual([
+            { type: 'subagent-snapshot', members: [] }
+        ])
     })
 
     it('forwards the thread goal and records its lifecycle', async () => {
@@ -805,5 +825,31 @@ describe('mcodeRemoteLauncher abort handling', () => {
         const reason = await launched
         expect(waits.length).toBe(2)
         expect(reason).toBe('exit')
+    })
+})
+
+describe('mcodeRemoteLauncher local handoff', () => {
+    afterEach(() => {
+        harness.backend = {}
+        harness.restoredHandlers.model = 0
+        harness.restoredHandlers.slashCommands = 0
+    })
+
+    it('restores the probe handlers and clears the remote state when the session ends', async () => {
+        createBackend()
+        harness.restoredHandlers.model = 0
+        harness.restoredHandlers.slashCommands = 0
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        // The live catalog died with the backend: the local mode has to be
+        // able to answer the model picker again.
+        expect(harness.restoredHandlers.model).toBe(1)
+        expect(harness.restoredHandlers.slashCommands).toBe(1)
+
+        // The goal and the delegation tree belong to the remote session.
+        expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'thread-goal-cleared' })
+        expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'subagent-snapshot', members: [] })
     })
 })

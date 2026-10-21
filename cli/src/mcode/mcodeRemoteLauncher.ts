@@ -4,6 +4,8 @@ import type { McodeModelsResponse } from '@hapi/protocol/apiTypes';
 import { getBuiltinSlashCommands, mergeSlashCommands } from '@hapi/protocol/slashCommands';
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 import { listSlashCommands } from '@/modules/common/slashCommands';
+import { registerSlashCommandHandlers } from '@/modules/common/handlers/slashCommands';
+import { registerMcodeSessionModelHandlers } from '@/modules/common/handlers/mcodeModels';
 import { logger } from '@/ui/logger';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
 import { convertAgentMessage } from '@/agent/messageConverter';
@@ -409,6 +411,18 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             await this.permissionHandler.cancelAll('Session ended');
             this.permissionHandler = null;
         }
+
+        // The goal and the delegation tree belong to the remote session: the
+        // local TUI has its own state, so the web must not keep showing them
+        // after the handoff.
+        this.session.sendSessionEvent({ type: 'thread-goal-cleared' });
+        this.session.sendSessionEvent({ type: 'subagent-snapshot', members: [] });
+
+        // The live session-scoped catalog dies with the backend. Restore the
+        // probe-based handlers so the local mode can still answer the model
+        // picker and the slash command list.
+        registerMcodeSessionModelHandlers(this.session.client.rpcHandlerManager, () => this.session.path);
+        registerSlashCommandHandlers(this.session.client.rpcHandlerManager, this.session.path);
 
         if (this.backend) {
             await this.backend.disconnect();
