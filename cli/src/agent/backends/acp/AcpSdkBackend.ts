@@ -356,6 +356,22 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     /**
+     * Whether the agent advertises `session/fork` support.
+     *
+     * The agent lists it in `agentCapabilities.sessionCapabilities` during
+     * initialize, so the answer comes from the handshake instead of a probe
+     * that would fork a real session to find out.
+     */
+    supportsSessionFork(): boolean {
+        const capabilities = this.initializeResult?.agentCapabilities?.sessionCapabilities;
+        if (!isObject(capabilities)) return false;
+        const fork = capabilities.fork;
+        // An agent advertises the capability either as a flag or as an (empty)
+        // options object - both mean "supported".
+        return fork === true || isObject(fork);
+    }
+
+    /**
      * The agent's `_meta` block from the initialize response.
      *
      * Agents describe their extension surface here (e.g. MiniMax Code's

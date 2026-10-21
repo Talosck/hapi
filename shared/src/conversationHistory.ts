@@ -68,3 +68,16 @@ export const PI_CONVERSATION_HISTORY_INITIAL: ConversationHistoryCapabilityState
     forkAtMessage: 'unknown',
     rewindToMessage: 'unknown'
 }
+
+/**
+ * MiniMax Code forks the whole session and nothing else.
+ *
+ * Its `session/fork` takes the same parameters as `session/load` - there is no
+ * "fork at this message" - and the agent exposes no rewind, so those two
+ * start out unsupported rather than unknown.
+ */
+export const MCODE_CONVERSATION_HISTORY_INITIAL: ConversationHistoryCapabilityStates = {
+    forkCurrent: 'unknown',
+    forkAtMessage: 'unsupported',
+    rewindToMessage: 'unsupported'
+}

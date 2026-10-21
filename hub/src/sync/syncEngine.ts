@@ -1252,7 +1252,7 @@ export class SyncEngine {
     private async waitForExactNativeForkBound(
         childId: string,
         expectedNativeSessionId: string,
-        metadataKey: 'grokSessionId' | 'piSessionId',
+        metadataKey: 'grokSessionId' | 'piSessionId' | 'mcodeSessionId',
         requireSessionReady: boolean,
         timeoutMs: number = 60_000
     ): Promise<boolean> {
@@ -1511,6 +1511,12 @@ export class SyncEngine {
             childMetadata.grokSessionId = rpcResult.nativeSessionId
         } else if (flavor === 'pi') {
             childMetadata.piSessionId = rpcResult.nativeSessionId
+        } else if (flavor === 'mcode') {
+            // The forked MiniMax Code session is a native session of its own:
+            // the child loads it by id (the runner passes it as --resume).
+            // The id is deliberately NOT seeded here: the child publishes the
+            // id it really bound, and that is what proves the fork loaded
+            // instead of falling back to a blank session.
         } else if (flavor === 'claude') {
             // Child will bind the forked Claude id after --fork-session starts.
             childMetadata.claudeSessionId = rpcResult.forkSession ? undefined : rpcResult.nativeSessionId
@@ -1596,6 +1602,20 @@ export class SyncEngine {
                 )
                 if (!bound) {
                     throw new Error('Grok fork could not load the forked native session')
+                }
+            }
+
+            if (flavor === 'mcode') {
+                // The MiniMax Code launcher falls back to a blank session
+                // when loading the forked native session fails, so the child
+                // must be bound to the exact forked id before the fork is
+                // reported as done - otherwise the user gets an empty thread
+                // that looks like a successful fork.
+                const bound = await this.waitForExactNativeForkBound(
+                    childId, rpcResult.nativeSessionId, 'mcodeSessionId', false
+                )
+                if (!bound) {
+                    throw new Error('MiniMax Code fork could not load the forked native session')
                 }
             }
 

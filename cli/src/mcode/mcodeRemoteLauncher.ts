@@ -6,6 +6,7 @@ import type {
     McodeGoalResponse,
     McodeModelsResponse
 } from '@hapi/protocol/apiTypes';
+import { isObject } from '@hapi/protocol';
 import type { ThreadGoal } from '@hapi/protocol';
 import { getBuiltinSlashCommands, mergeSlashCommands } from '@hapi/protocol/slashCommands';
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
@@ -52,6 +53,7 @@ import {
     type McodeGoal
 } from './utils/mcodeExtensions';
 import { McodeExtensionControl } from './utils/mcodeExtensionControl';
+import { McodeConversationHistory } from './conversationHistory';
 
 export type McodeRemoteLauncherOptions = {
     model?: string;
@@ -103,6 +105,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private hubPermissionMode: PermissionMode | null = null;
     /** Drives the goal and delegation extension methods the agent advertised. */
     private extensionControl: McodeExtensionControl | null = null;
+    /** Drives MiniMax Code's conversation history controls (fork). */
+    private conversationHistory: McodeConversationHistory | null = null;
 
     constructor(session: McodeSession, opts: McodeRemoteLauncherOptions) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -149,7 +153,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         // not the HAPI side — decides which features this session has.
         const extensionSupport = parseMcodeExtensionSupport(backend.getInitializeMeta());
         this.extensionControl = new McodeExtensionControl(backend, extensionSupport);
-        this.publishExtensionCapabilities();
+        this.publishCapabilities();
 
         // MiniMax Code streams its delegation tree and thread goal through
         // ACP extension notifications; the agent only emits them because the
@@ -254,6 +258,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         this.opts.onConfigDiscovered?.({ model: effectiveModel, effort: effectiveEffort });
         this.registerAcpCommandHandlers(acpSessionId);
         this.registerExtensionControlHandlers(acpSessionId);
+        this.registerConversationHistoryHandlers(acpSessionId);
         // The goal notification is a one-way push: a resumed session would
         // otherwise show no goal even though the agent is still running one.
         await this.restoreGoalState(acpSessionId);
@@ -365,6 +370,9 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             }];
 
             session.onThinkingChange(true);
+            // The agent can only be forked at the end of a finished turn, so the
+            // fork control has to know that a turn is running.
+            this.conversationHistory?.setBusy(true);
 
             try {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
@@ -381,6 +389,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             } finally {
                 this.flushBackgroundTasks();
                 session.onThinkingChange(false);
+                this.conversationHistory?.setBusy(false);
                 this.pendingAskUserCall = null;
                 // Questions outlive the turn: mcode's ask_user tool ends the
                 // turn as soon as the questionnaire is raised, and the answer
@@ -586,23 +595,55 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     }
 
     /**
-     * Publishes the agent's advertised extension surface as session
-     * capabilities.
+     * Publishes what the running agent supports.
      *
-     * The web renders the goal and delegation controls from these flags, so a
-     * session whose agent does not support the goal extension shows no goal
-     * controls instead of buttons that would fail.
+     * The web renders the goal, subagent and fork controls from these flags,
+     * so a session whose agent does not support one of them shows no control
+     * instead of a button that would fail.
      */
-    private publishExtensionCapabilities(): void {
-        const capabilities = this.extensionControl?.getCapabilities();
-        if (!capabilities) return;
+    private publishCapabilities(): void {
+        const extensionCapabilities = this.extensionControl?.getCapabilities();
+        const historyCapabilities = this.conversationHistory?.getCapabilitiesForMetadata();
+        if (!extensionCapabilities && !historyCapabilities) return;
         this.session.client.updateMetadata((metadata) => ({
             ...metadata,
             capabilities: {
                 ...metadata?.capabilities,
-                mcodeExtensions: capabilities
+                ...(extensionCapabilities ? { mcodeExtensions: extensionCapabilities } : {}),
+                ...(historyCapabilities ?? {})
             }
         }));
+    }
+
+    /**
+     * Registers the conversation history controls.
+     *
+     * MiniMax Code forks the whole session - its `session/fork` takes the
+     * same parameters as `session/load`, so there is no branch at a message.
+     */
+    private registerConversationHistoryHandlers(sessionId: string): void {
+        const history = new McodeConversationHistory(() => this.backend);
+        history.setSession(sessionId, this.session.path);
+        history.setPublishCapabilities(async () => {
+            this.publishCapabilities();
+        });
+        this.conversationHistory = history;
+
+        this.session.client.rpcHandlerManager.registerHandler(
+            RPC_METHODS.ForkConversation,
+            async (payload: unknown) => {
+                const messageLocalId = isObject(payload) && typeof payload.messageLocalId === 'string'
+                    ? payload.messageLocalId
+                    : undefined;
+                return await history.fork(messageLocalId);
+            }
+        );
+
+        // The agent lists `fork` in its initialize response, so the capability
+        // is known without probing by forking a real session.
+        void history.probeCapabilities().catch((error) => {
+            logger.debug('[mcode-remote] conversation history capability probe failed', error);
+        });
     }
 
     /**

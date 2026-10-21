@@ -61,9 +61,10 @@ export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
         effort: opts.effort === 'default' ? undefined : opts.effort
     });
 
-    if (opts.resumeSessionId) {
-        session.onSessionFound(opts.resumeSessionId);
-    }
+    // The requested resume id stays local until the agent has actually bound
+    // the session: the launcher publishes the id it really runs. Publishing the
+    // requested id up front would make a failed resume look like a successful
+    // one - the hub could not tell a loaded session from a blank fallback.
 
     const getCurrentModel = (): string | undefined => {
         const sessionModel = session.getModel();

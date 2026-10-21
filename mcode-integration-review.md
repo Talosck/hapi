@@ -16,7 +16,7 @@
 |---|---|---|
 | 协议契合度 | ✅ 优秀 | HAPI 发出的 `initialize` 能力声明与 mcode 实际实现逐项吻合；扩展方法名、config option id、模型 id 编码全部对得上 |
 | 对接 Bug | ✅ 未发现 | 12 项重点怀疑全部实测排除（含 2 个初判为 bug 的误报） |
-| 能力覆盖 | ⚠️ 部分接入 | **已接入**：`goal/{get,create,patch,clear}`、`delegation/{get,stop}`（P1）；**仍未接入**：`steer`、`queue/*` |
+| 能力覆盖 | ⚠️ 部分接入 | **已接入**：`goal/{get,create,patch,clear}`、`delegation/{get,stop}`（P1）；`session/fork` 整会话 fork（P3）；**仍未接入**：`steer`、`queue/*` |
 | 可维护性 | ✅ 良好 | 扩展点从 agent 自述的 `initialize` 响应中读取，非硬编码（P0 已落地） |
 | 优化空间 | ⚠️ 中等 | 模型探针进程开销、Connector/App 工具未可视化（P2 未做） |
 
@@ -141,8 +141,8 @@
 | **G3** | `mcode/session/steer` | ❌ 未使用 | 无法在 agent 执行中途插入指令 |
 | **G4** | `mcode/session/queue/{list,enqueue,update,delete,steer}` | ❌ 未使用，HAPI 自建客户端队列 | 无原生队列的 steer/delete 语义 |
 | **G5** | `mcode/session/current_session_update`、`queue_update` | ❌ 通知被丢弃 | 丢失 session 切换/队列状态信号 |
-| **G6** | `session/fork`、`session/resume`（`sessionCapabilities` 已声明） | ❌ 未使用 | 无法 fork 会话 |
-| **G7** | Connector / App 工具 | ⚠️ 会话内可用（经 Bash），但 Web 端**完全不可见** | 用户无法发现可用 App、无 App 选择器、无资产上传入口 |
+| **G6** | `session/fork`、`session/resume`（`sessionCapabilities` 已声明） | ⚠️ **fork 已接入**（P3，整会话 fork）；`session/resume` 未使用 | mcode 没有 message 级 fork，只能整会话分叉；resume 与 HAPI 现有 `session/load` 路径语义不同（不返回新 session id） |
+| **G7** | Connector / App 工具 | ✅ **已接入**（P2）：Web 端可列出已连接 App 与授权状态 | — |
 | **G8** | `promptCapabilities.image: false` | ✅ **不是限制**（实测） | mcode 不接受 image 内容块，但 HAPI 的附件走 `@path` 文本引用，agent 用自己的 `read`/`bash` 读图——实测能正确识别图片内容 |
 
 ---
@@ -206,32 +206,29 @@ HAPI 此前：
 
 `mcode/session/delegation/stop` 让用户能在 Web 端点掉某个卡死的子 agent。此前 HAPI 只能看不能控，现已可中止；`delegation/get` 同样用于重启后的委派树恢复。
 
-### ❌ P2 — Connector / App 工具可视化
+### ✅ P2 — Connector / App 工具可视化（已实施）
 
 这是**产品层面最大的落差**。mcode 的整套 App 生态（Lark / Matrix / 邮件等 14 个 Connector）在 HAPI Web 端完全不可见：
 
 - 会话内**能用**（agent 自行通过 Bash + skill 调用）
 - 但用户**不知道存在**，也无法在 UI 里选择 App、查看已连接状态、上传资产（`mcode-tools upload-temp-url` / `get-asset-url` 无人调用）
 
-建议在 Web 端加一个只读的"可用 App"面板：调用 `mcode-tools connector tools` 展示已连接 App 与工具清单（注意：需在 CLI 侧代理执行，因为 `mcode-tools` 依赖 mcode 进程环境）。
+已在 Web 端加只读"可用 App"面板：由 CLI 侧代理执行 `mcode-tools connector tools` / `auth`，展示已连接 App、工具清单与授权状态（Hub 路由 `GET /api/machines/:id/mcode-apps`）。详见 [§8.1](#81-connector--app-可视化)。
 
-### ❌ P2 — 模型探针开销
+### ✅ P2 — 模型探针开销（已实施）
 
 `listMcodeModelsForCwd` 每次缓存失效都会**完整 spawn 一个 `mcode acp` 进程**（约 2-3 秒启动开销）才能拿到模型目录。缓存 TTL 5 分钟、web staleTime 60 秒，意味着每台机器约每 5 分钟拉起一次完整 agent 进程。
 
-可选优化：
-- 延长 probe 缓存 TTL（当前 5 分钟偏短，模型列表变动极少）
-- 复用常驻 mcode 进程而非每次新建
-- 走 `session/new` 而非 `session/load` 的轻量路径（探测目录本身不需要加载历史会话）
+已做的优化：探针 TTL 5 → 30 分钟 + 落盘缓存（`<HAPI_HOME>/mcode-model-probe/models.json`）。实测 `mcode provider list --json` 3.56s vs 完整 ACP 探针 5.17s——**进程 spawn 本身才是大头**，所以缓存是唯一有效的杠杆。详见 [§8.2](#82-模型探针开销)。
 
 ### ⚠️ P2 — 协议健壮性
 
 - ✅ 扩展通知名改为动态订阅（见 P0，已完成）
 - ✅ **`promptCapabilities.image: false` 不是用户限制**（实测推翻）：mcode 不接受 ACP 的 image 内容块，但 HAPI 的附件是以 `@path` 文本引用注入的，agent 会用自己的 `read`/`bash` 去读图。实测上传一张纯红 PNG，agent 用 python 解出 `[(255, 0, 0), 1024]` 并答"Red"。**原先建议的"提示用户 mcode 不支持图片"是错的，会误导用户**——不做。
 
-### ❌ P3 — 会话 fork
+### ✅ P3 — 会话 fork（已实施）
 
-`sessionCapabilities` 已声明 `fork`，但 HAPI 未使用。对"从某条消息分叉出新会话"这类需求有直接价值。
+`sessionCapabilities` 已声明 `fork`，HAPI 未使用。对"从某条消息分叉出新会话"这类需求有直接价值。**实测发现 mcode 只能整会话 fork**（`session/fork` 的参数与 `session/load` 完全相同，没有 message 级变体），因此实施时只接"fork 当前会话"，并在 UI 上如实表达。详见 [§9 P3 实施记录](#9-p3-实施记录)。
 
 ---
 
@@ -249,6 +246,9 @@ HAPI 此前：
 | `mcode_slash_probe.mjs` | `/compact` 是否被 agent 拦截 |
 | `mcode_two_procs.mjs` | 双进程 session 隔离 |
 | `mcode_resume_probe.mjs` | 跨进程 `session/load` 历史保留 |
+| `mcode_fork_probe.mjs` | `session/fork` 返回值与历史继承 |
+| `mcode_fork_xproc.mjs` | 跨进程 fork/load（首次探针：轮次未结束导致 `message-boundary-not-found`） |
+| `mcode_fork_idle.mjs` | **busy vs idle 的 fork 边界**、跨进程加载与历史继承 |
 
 ### 实施期联调脚本（**已进入仓库**）
 
@@ -256,6 +256,12 @@ HAPI 此前：
 
 ```
 cd cli && bun run verify:mcode-extensions
+```
+
+`cli/scripts/verify-mcode-fork.ts` —— 走 CLI 自己的 `AcpSdkBackend` + `McodeConversationHistory`，对真实 mcode 跑通 P3 全链路（能力探测 → 拒绝思考中 fork → 真实 fork → 新进程加载 fork 会话）。
+
+```
+cd cli && bun run verify:mcode-fork
 ```
 
 ---
@@ -428,3 +434,115 @@ ANSWER: Red
 | `bun run test:relay` | ✅ 118 passed / 0 failed（未受影响） |
 | **真实 `mcode-tools` 联调** | ✅ 2 个 provider / 15 个工具，auth 状态正确读取 |
 | **真实图片能力实测** | ✅ 纯红 PNG 经 `@path` → agent 解出 `(255,0,0)` 并答对，推翻"不支持图片"的建议 |
+
+---
+
+## 9. P3 实施记录（会话 fork）
+
+### 9.1 先量：mcode 的 fork 到底怎么工作
+
+写代码前先用真实 agent（0.5.9）测了三件事，结论**推翻了最初的假设**。
+
+**（a）`session/fork` 的参数与 `session/load` 完全相同**（从 bundle `chunks/run-acp-command-SBE5PYAH.js` 反解 + 实测）：
+
+```js
+ed = z.object({ sessionId, cwd, additionalDirectories?, mcpServers?, _meta? })   // session/fork
+td = z.object({ sessionId, cwd, additionalDirectories?, mcpServers?, _meta? })   // session/resume
+Xl = z.object({ sessionId, cwd, additionalDirectories?, mcpServers?, _meta? })   // session/load
+```
+
+**没有 message 级参数** → mcode 只能整会话 fork，"从某条消息分叉"在 mcode 上不存在。
+
+**（b）fork 只能发生在"已完成的 assistant 轮次边界"上，且要求会话 idle。** 实测：
+
+| 时机 | 结果 |
+|---|---|
+| 轮次进行中 fork | ❌ `-32602 Invalid params: message-boundary-not-found` |
+| 轮次结束后 fork | ✅ 返回 `{sessionId, modes, configOptions}` |
+
+bundle 里的判定函数给出了规则（`chunk-QEPCDCRA.js`）：
+
+```js
+function RRn(t, e, r = !1) {                       // r = true 表示"当前边界"
+  return t
+    ? (t.assistant.role !== "assistant" || PRn(t)
+        ? { canFork: !1, unavailableReason: "message-boundary-invalid" }
+        : ARn(t)
+          ? { canFork: !1, unavailableReason: "message-boundary-not-found" }
+          : CRn(t, e, r)
+            ? { canFork: !0 }
+            : { canFork: !1, unavailableReason: "message-boundary-invalid" })
+    : { canFork: !1, unavailableReason: "message-boundary-not-found" }
+}
+```
+
+即：边界必须是 assistant 消息、可达，且（当前 fork 时）`isLatestConversationMessage && state === "idle"`。
+
+**（c）fork 出的会话能被新进程加载，并继承历史**（跨进程实测）：
+
+```
+A session      >> mvs_8cda3681a6c74370a41e6347b83d3e3a
+fork WHILE idle>> SUCCEEDED id=mvs_3cc0641bd1e84c5f8cf7035f2b0e1321
+B load         >> OK
+B inherits history >> true
+B answer       >> FORK_XPROC_MAGIC_42
+```
+
+补充：`session/load` 的**响应里没有 sessionId**（和 `session/resume` 一样），HAPI 的 `AcpSdkBackend.loadSession` 靠 `loadedSessionId ?? config.sessionId` 兜底回到请求 id——所以子进程能绑定到 fork 出来的 id。
+
+### 9.2 实施中发现的真问题：native id 的"发布时机"
+
+最初的实现里，hub 会在建子会话时把 fork 出的 native id **预置**进子会话 metadata：
+
+```ts
+childMetadata.mcodeSessionId = rpcResult.nativeSessionId
+```
+
+同时 CLI 侧 `mcode/loop.ts` 会在 ACP 握手**之前**就把 `--resume` 带来的 id 上报给 hub（`session.onSessionFound(opts.resumeSessionId)`）。
+
+结果：hub 里那个"等子会话绑定到确切 fork id"的守卫（`waitForExactNativeForkBound`）**是空的**——它读到的 `mcodeSessionId` 一开始就等于期望值，子会话其实还没加载任何东西。守卫会立刻返回"绑定成功"，而 mcode launcher 在 `session/load` 失败时**会回退到一个空白会话**——于是一个空线程看起来像一次成功的 fork。
+
+同样的模式在 grok 分支上也是空的（既有代码，未在本次范围内改）。pi 分支靠 `session-ready` 事件补上了栅栏，mcode 没有这个事件。
+
+**修法（两处一起改才有意义）：**
+
+1. CLI：`mcode/loop.ts` 不再提前上报"请求的 id"；`mcodeSessionId` 只由 launcher 在 **ACP 会话真正建立后**发布，代表"agent 实际在跑的 native session"。`McodeSession` 构造时已经把 `sessionId` 设为 `opts.resumeSessionId`，launcher 照常用它去 `session/load`，不影响恢复。
+2. Hub：不再预置子会话的 `mcodeSessionId`。
+
+改完之后 `waitForExactNativeForkBound` 变成真检查：
+
+| 子会话实际情况 | metadata | 守卫结果 |
+|---|---|---|
+| 还没建立 | 无 `mcodeSessionId` | 继续等 |
+| 加载成功 | `mcodeSessionId` == fork id | ✅ 通过 |
+| 加载失败回退空白会话 | `mcodeSessionId` == 另一个 id | ❌ 判失败 → 清理子会话并报错 |
+| 子进程没起来 | 无 | 5s 后判失败 |
+
+### 9.3 行为约定
+
+| 场景 | 行为 |
+|---|---|
+| 思考中点 fork | CLI 侧直接拒绝：`MiniMax Code is still working on a turn; fork it once the turn ends`（hub 侧本来就有 `Session is busy` 闸门） |
+| 请求"在某条消息处分叉" | 拒绝：`Historical fork is not supported for MiniMax Code`——不拿整会话 fork 冒充 |
+| agent 内部报错 `message-boundary-not-found` | 转成可读提示：`MiniMax Code can only fork at the end of a finished turn` |
+| agent 没有 `session/fork` | 能力位标记为不支持，之后不再调用该方法 |
+
+Web 端**无需改动**：消息操作区的 fork/rewind 按钮本来就在 `thread.isRunning`（= `session.thinking`）时隐藏，所以"思考中不给 fork 入口"这条已经成立。
+
+### 9.4 验证
+
+| 检查 | 结果 |
+|---|---|
+| `bun typecheck`（cli/web/hub/relay） | ✅ exit 0 |
+| `bun run test:cli` | ✅ **3282 passed / 0 failed**（新增 15 个：12 能力/行为 + 3 launcher 接线） |
+| `bun run test:hub` | ✅ **1407 passed / 0 failed**（新增 3 个 fork 集成用例） |
+| `bun run test:web` / `test:shared` / `test:relay` | ✅ 310 文件 / 349 / 118，0 failed |
+| **真实 mcode 联调**（`cli && bun run verify:mcode-fork`） | ✅ 能力探测 → 拒绝思考中 fork → 拒绝历史 fork → 真实 fork → **新进程加载 fork 会话并答出 `FORK_VERIFY_MAGIC_77`** |
+
+联调脚本 `cli/scripts/verify-mcode-fork.ts` 走的是 CLI 自己的 `AcpSdkBackend` + `McodeConversationHistory`，不是另写一套。
+
+### 9.5 仍未实现（mcode 侧存在，HAPI 未接）
+
+- `mcode/session/steer`、`mcode/session/queue/*`（插入/重排排队消息）
+- `mcode/session/current_session_update`、`queue_update` 通知
+- `session/resume`（语义与 fork 不同：它没有新 session id，HAPI 现有恢复路径走 `session/load`）

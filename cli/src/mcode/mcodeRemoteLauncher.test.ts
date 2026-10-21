@@ -119,8 +119,10 @@ function createBackend(overrides: Record<string, unknown> = {}) {
         sendExtensionRequest: vi.fn(async (method: string) => {
             if (method === 'mcode/session/goal/get') return { goal: null }
             if (method === 'mcode/session/delegation/get') return { snapshot: null }
+            if (method === 'session/fork') return { sessionId: 'mvs-forked-1' }
             throw new Error(`unexpected method ${method}`)
         }),
+        supportsSessionFork: vi.fn(() => true),
         waitForSessionUpdateQueue: vi.fn(async () => {}),
         prompt: vi.fn(async () => {}),
         cancelPrompt: vi.fn(async () => {}),
@@ -220,6 +222,51 @@ function createScriptedSession() {
         pushKeepAlive: vi.fn()
     }
     return { session, queue }
+}
+
+/**
+ * A session whose message loop stays open, so the launcher's RPC handlers can
+ * be called while the launcher is still running - it tears the backend down
+ * when the loop ends.
+ */
+function createBlockingSession() {
+    let release: (value: null) => void = () => {}
+    const queue = {
+        waitForMessagesAndGetAsString: vi.fn(() => new Promise<null>((resolve) => {
+            release = resolve
+        })),
+        size: () => 0,
+        reset: vi.fn(),
+        pushIsolated: vi.fn()
+    }
+    const client = {
+        rpcHandlerManager: { registerHandler: vi.fn() },
+        sendAgentMessage: vi.fn(),
+        sendSessionEvent: vi.fn(),
+        sendClaudeSessionMessage: vi.fn(),
+        updateAgentState: vi.fn(),
+        updateMetadata: vi.fn()
+    }
+    const session = {
+        path: '/tmp/mcode-test',
+        logPath: '/tmp/mcode-test/test.log',
+        client,
+        queue,
+        sessionId: null as string | null,
+        getPermissionMode: () => 'default' as const,
+        onSessionFound(id: string) {
+            session.sessionId = id
+        },
+        onThinkingChange: vi.fn(),
+        sendBackgroundTaskDelta: vi.fn(),
+        sendUserMessage: vi.fn(),
+        sendAgentMessage: vi.fn(),
+        sendSessionEvent: vi.fn(),
+        setModel: vi.fn(),
+        setPermissionMode: vi.fn(),
+        pushKeepAlive: vi.fn()
+    }
+    return { session, finish: () => release(null) }
 }
 
 describe('mcodeRemoteLauncher config sync', () => {
@@ -778,6 +825,70 @@ describe('mcodeRemoteLauncher extension capabilities', () => {
                 }
             }
         })
+    })
+
+    it('publishes the fork capability when the agent advertises session/fork', async () => {
+        createBackend()
+        const { session, finish } = createBlockingSession()
+
+        const launched = mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(session.client.updateMetadata).toHaveBeenCalled()
+        })
+        finish()
+        await launched
+
+        const calls = session.client.updateMetadata.mock.calls
+        const updaters = calls.map((call) => call[0] as (m: unknown) => unknown)
+        const published = updaters.map((updater) => updater({}) as {
+            capabilities?: { conversationHistory?: { forkCurrent?: boolean } }
+        })
+        expect(published.some((entry) => entry.capabilities?.conversationHistory?.forkCurrent === true)).toBe(true)
+    })
+
+    it('does not publish a fork capability the agent does not have', async () => {
+        createBackend({ supportsSessionFork: vi.fn(() => false) })
+        const { session, finish } = createBlockingSession()
+
+        const launched = mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(session.client.updateMetadata).toHaveBeenCalled()
+        })
+        finish()
+        await launched
+
+        const calls = session.client.updateMetadata.mock.calls
+        const published = calls.map((call) => {
+            const updater = call[0] as (m: unknown) => unknown
+            return updater({}) as { capabilities?: { conversationHistory?: { forkCurrent?: boolean } } }
+        })
+        expect(published.some((entry) => entry.capabilities?.conversationHistory?.forkCurrent === true)).toBe(false)
+    })
+
+    it('forks the session through the registered RPC handler', async () => {
+        const backend = createBackend()
+        const { session, finish } = createBlockingSession()
+
+        const launched = mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            const registration = session.client.rpcHandlerManager.registerHandler.mock.calls
+                .find((call) => call[0] === RPC_METHODS.ForkConversation)
+            expect(registration).toBeDefined()
+        })
+
+        const registration = session.client.rpcHandlerManager.registerHandler.mock.calls
+            .find((call) => call[0] === RPC_METHODS.ForkConversation)!
+        const handler = registration[1] as (payload: unknown) => Promise<unknown>
+
+        await expect(handler({})).resolves.toEqual({ nativeSessionId: 'mvs-forked-1' })
+        expect(backend.sendExtensionRequest).toHaveBeenCalledWith('session/fork', {
+            sessionId: 'mcode-session-1',
+            cwd: '/tmp/mcode-test',
+            mcpServers: []
+        })
+
+        finish()
+        await launched
     })
 
     it('ignores an extension notification the agent did not advertise', async () => {
