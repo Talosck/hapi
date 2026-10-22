@@ -39,28 +39,38 @@ export type RoundSummary = {
     durationMs?: number
 }
 
+/**
+ * The reasons MiniMax Code refuses a turn with. Every one of them means
+ * "later": the message is kept and goes out when the session is ready.
+ *
+ * The list is a value, not just a type, so the client can check that every
+ * reason has a translation in every language.
+ */
+export const QUEUE_NOTICE_REASONS = [
+    'busy',
+    'compacting',
+    'mutating',
+    'queued',
+    'paused',
+    'conflict',
+    'waiting',
+    'unavailable',
+    'plan',
+    'duplicate',
+    'unknown'
+] as const
+
+export type QueueNoticeReason = typeof QUEUE_NOTICE_REASONS[number]
+
 export type AgentEvent =
     | { type: 'switch'; mode: 'local' | 'remote' }
     | { type: 'message'; message: string }
     // The agent refused to start the turn and the message stays queued. This
     // is HAPI talking about the queue, not the agent speaking: it has its own
     // type so a client can render it as a system notice.
-    // The reasons MiniMax Code refuses a turn with. Every one of them means
-    // "later": the message is kept and goes out when the session is ready.
     | {
         type: 'queue-notice'
-        reason:
-            | 'busy'
-            | 'compacting'
-            | 'mutating'
-            | 'queued'
-            | 'paused'
-            | 'conflict'
-            | 'waiting'
-            | 'unavailable'
-            | 'plan'
-            | 'duplicate'
-            | 'unknown'
+        reason: QueueNoticeReason
         message: string
         waitingSeconds?: number
     }

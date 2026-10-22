@@ -28,7 +28,7 @@ function show(text: string, eventType = 'message', kind = 'event') {
     return render(<I18nProvider><HappySystemMessage /></I18nProvider>)
 }
 
-beforeEach(() => { message.role = 'system' })
+beforeEach(() => { message.role = 'system'; localStorage.clear() })
 
 describe('slash-command goal status messages', () => {
     it('renders the actual event/message response as a goal snapshot card', () => {
@@ -72,5 +72,42 @@ describe('slash-command goal status messages', () => {
         message.role = 'assistant'
         const { container } = show(JSON.stringify({ goal }))
         expect(container).toBeEmptyDOMElement()
+    })
+})
+
+describe('queue notices', () => {
+    function showQueueNotice(reason = 'paused') {
+        const cliText = 'The MiniMax Code message queue is paused, so your message was not taken.'
+        message.content = [{ type: 'text', text: cliText }]
+        message.metadata.custom = {
+            kind: 'event',
+            event: {
+                type: 'queue-notice',
+                reason,
+                message: cliText,
+                waitingSeconds: 12
+            }
+        }
+    }
+
+    it('says the notice in the user\'s language, not in the CLI\'s', () => {
+        localStorage.setItem('hapi-lang', 'zh-CN')
+        showQueueNotice()
+        render(<I18nProvider><HappySystemMessage /></I18nProvider>)
+        expect(screen.getByText(/消息队列被暂停了/)).toBeInTheDocument()
+        expect(screen.getByText(/已等待 12 秒/)).toBeInTheDocument()
+        expect(screen.queryByText(/MiniMax Code message queue is paused/)).toBeNull()
+    })
+
+    it('keeps the CLI wording for a reason the client does not know', () => {
+        localStorage.setItem('hapi-lang', 'zh-CN')
+        const cliText = 'MiniMax Code refused the message for a reason it did not explain.'
+        message.content = [{ type: 'text', text: cliText }]
+        message.metadata.custom = {
+            kind: 'event',
+            event: { type: 'queue-notice', reason: 'brand-new-reason', message: cliText }
+        }
+        render(<I18nProvider><HappySystemMessage /></I18nProvider>)
+        expect(screen.getByText(cliText)).toBeInTheDocument()
     })
 })

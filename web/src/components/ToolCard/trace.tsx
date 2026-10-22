@@ -283,7 +283,7 @@ function TraceChildRow({ child, metadata, expanded, onToggle, mode }: TraceChild
     }
 
     if (child.kind === 'agent-event') {
-        const presentation = getEventPresentation(child.event)
+        const presentation = getEventPresentation(child.event, t)
         return (
             <div className={isSessionMode
                 ? 'flex items-center gap-2 rounded-xl border border-[var(--app-border)] bg-[var(--app-subtle-bg)] p-2 text-xs text-[var(--app-hint)]'

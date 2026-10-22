@@ -415,7 +415,6 @@ CLI launcher 1 条（轮次中途死掉 → 标 indeterminate 且不自动重发
 web 3 条（退回的行回到"等待中"、已 ack 的行转 indeterminate 后仍出现在排队浮条里、乐观行不被误伤）。
 
 ### 这一轮之后，投递链路上还剩什么
-
 - **ack 与 release 之间的窄窗口**（见上）：要彻底消掉得把 ack 挪到"agent 真的受理了这一轮"，
   代价是整轮期间消息都留在排队浮条里。没做。
 - **agent 自带队列 API**（`mcode/session/queue/enqueue`）没接：它最持久（agent 自己的库里），
@@ -427,6 +426,44 @@ web 3 条（退回的行回到"等待中"、已 ack 的行转 indeterminate 后�
   `messages-indeterminate` 现在也可能指一条普通消息（不只是 steer）。
   原生端按旧语义实现（清 indeterminate 标记、保留 invokedAt），
   在"被拒绝退回"这一种情况下会显示成"已发送"而 hub 其实还在队列里 —— 属于 C1–C5 那批原生端对齐的活。
+
+---
+
+## 第五轮实施记录（拒绝提示要说人话，2026-10-22）
+
+### 队列提示本地化
+
+**问题**：11 种拒绝理由的提示是 **CLI 里硬编码的英文**，web 直接显示
+（`web/src/chat/presentation.ts` 的 queue-notice 分支 + `SystemMessage.tsx` 渲染系统消息正文）。
+中文和俄文用户看到的是英文 —— 跟第一轮 B20（`Default` 没本地化）是同一类问题，
+只是它藏在一条只有"agent 忙"时才会出现的路径里，平时看不见。
+
+**改法**：理由本来就从 CLI 传过来了（`reason` 字段），所以**文案由客户端出**：
+
+1. `web/src/chat/types.ts`：把 11 个理由从纯类型变成 `QUEUE_NOTICE_REASONS` 常量 + 派生类型，
+   这样"每个理由都得有翻译"可以测。
+2. `web/src/chat/presentation.ts`：`getEventPresentation(event, t?)` 多收一个翻译函数；
+   找到 `queueNotice.<reason>` 就用本地化文案，**找不到就回退 CLI 的原文**
+   （CLI 知道得比理由多，而且理由表在两边可能不同步）。
+3. 三个渲染点都把 `t` 传进去：系统消息（`SystemMessage.tsx`）、
+   工具消息里的 agent 事件（`ToolMessage.tsx`）、工具轨迹（`ToolCard/trace.tsx`）。
+4. 三种语言各加 12 条文案（11 个理由 + 等待时长后缀）。
+5. 英文文案**逐字对齐 CLI 现在的说法**（有一条测试盯着这件事），
+   中文和俄文是重写，不是机翻。
+
+**顺带补上的一个洞**：系统消息的正文是在消息构造时渲染好的（`assistant-runtime.ts`），
+那时候没有语言上下文，所以中文用户在**系统消息这一条路径**上仍会看到英文 ——
+现在组件里对 queue-notice 单独取一次本地化文案。
+
+**验证**：新增回归 7 条（presentation 3 条：有翻译时用翻译 / 理由没翻译时回退 CLI 原文 /
+没有翻译函数时回退原文；文案覆盖 2 条：每个理由三种语言都有、英文与 CLI 逐字一致；
+组件 2 条：中文界面显示中文、未知理由保留 CLI 原文），
+外加 `localeParity` 继续盯着三种语言的键一致。
+
+| 检查 | 结果 |
+|---|---|
+| `bun run typecheck`（cli / web / hub / relay） | 全过 |
+| `bun run test:web` | **3481 passed / 0 fail** |
 
 ---
 

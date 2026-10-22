@@ -689,6 +689,21 @@ export default {
   'queuedMessages.steeredBadge': '↳ 已介入',
   'queuedMessages.steeredBadgeTitle': '已介入当前进行中的回合',
 
+  // 代理拒绝开始这一轮，消息留在队列里。拒绝理由来自 CLI，
+  // 但文案由客户端给出，所以能用用户的语言说。
+  'queueNotice.busy': 'MiniMax Code 正忙：这个会话上还有别的轮次在跑（它自己的任务，或另一个接上来的 MiniMax Code 窗口）。',
+  'queueNotice.compacting': 'MiniMax Code 正在压缩这段对话，暂时没接你的消息。',
+  'queueNotice.mutating': 'MiniMax Code 正在改动这段对话，暂时没接你的消息。',
+  'queueNotice.queued': 'MiniMax Code 队列里还有一条更早的消息要先发，所以先拒了你的。',
+  'queueNotice.paused': 'MiniMax Code 的消息队列被暂停了，你的消息没有被取走。',
+  'queueNotice.conflict': 'MiniMax Code 拒绝你的消息，因为另一个轮次正要同时开始。',
+  'queueNotice.waiting': 'MiniMax Code 在等它自己提出来的问题的答案，在那之前先拒了你的消息。',
+  'queueNotice.unavailable': 'MiniMax Code 刚跑完一轮，暂时还接不了你的消息。',
+  'queueNotice.plan': 'MiniMax Code 还在走计划评审流程，在那之前先拒了你的消息。',
+  'queueNotice.duplicate': 'MiniMax Code 已经接下这一轮了。',
+  'queueNotice.unknown': 'MiniMax Code 拒了消息但没说原因，它会再问一次。',
+  'queueNotice.waitingSuffix': '（已等待 {seconds} 秒）',
+
   // 代理持有 HAPI 并未发起的回合（后台任务回填），会话看起来是空闲的，
   // 消息其实在等待。
   'agentWaiting.title': '代理正忙',

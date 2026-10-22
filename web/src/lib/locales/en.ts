@@ -685,6 +685,22 @@ export default {
   'queuedMessages.steeredBadge': '↳ Steered',
   'queuedMessages.steeredBadgeTitle': 'Steered into the active turn',
 
+  // The agent refused to start the turn and the message stays queued. The
+  // reason comes from the CLI; the wording is the client's, so it can be in
+  // the user's language.
+  'queueNotice.busy': 'MiniMax Code is busy with another turn on this session - a task it is running, or another MiniMax Code window attached to it.',
+  'queueNotice.compacting': 'MiniMax Code is compacting this conversation and refused your message.',
+  'queueNotice.mutating': 'MiniMax Code is changing this conversation and refused your message.',
+  'queueNotice.queued': 'MiniMax Code still has an earlier queued message to deliver and refused yours.',
+  'queueNotice.paused': 'The MiniMax Code message queue is paused, so your message was not taken.',
+  'queueNotice.conflict': 'MiniMax Code refused your message because another turn is starting at the same time.',
+  'queueNotice.waiting': 'MiniMax Code is waiting for an answer to something it asked, and refused your message until then.',
+  'queueNotice.unavailable': 'MiniMax Code just finished a turn and could not take your message yet.',
+  'queueNotice.plan': 'MiniMax Code is still working through a plan review and refused your message until that is done.',
+  'queueNotice.duplicate': 'MiniMax Code had already accepted this turn.',
+  'queueNotice.unknown': 'MiniMax Code refused the message for a reason it did not explain, and will be asked again.',
+  'queueNotice.waitingSuffix': ' ({seconds}s)',
+
   // The agent holds a turn HAPI never started (a background task delivery),
   // so the session looks idle while the message waits.
   'agentWaiting.title': 'The agent is busy',

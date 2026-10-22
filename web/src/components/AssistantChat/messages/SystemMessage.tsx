@@ -40,7 +40,12 @@ export function HappySystemMessage() {
 
     if (role !== 'system') return null
 
-    const icon = event ? getEventPresentation(event).icon : null
+    const presentation = event ? getEventPresentation(event, t) : null
+    const icon = presentation?.icon ?? null
+    // The system message text was rendered when the message was built, in
+    // the CLI's language. A queue notice is HAPI talking about the queue,
+    // so the client says it in the user's language.
+    const label = event?.type === 'queue-notice' ? (presentation?.text ?? text) : text
     const goalMessage = event?.type === 'message' && typeof event.message === 'string' ? event.message : null
     const goal = goalMessage !== null ? parseGoalStatusMessage(goalMessage) : null
     if (goal && goalMessage !== null) {
@@ -90,7 +95,7 @@ export function HappySystemMessage() {
             <div className="mx-auto w-fit max-w-[92%] px-2 text-center text-xs text-[var(--app-hint)] opacity-80">
                 <span className="inline-flex items-center gap-1">
                     {icon ? <span aria-hidden="true">{icon}</span> : null}
-                    <span>{text}</span>
+                    <span>{label}</span>
                     <MessageTimestamp className="text-[10px]" />
                 </span>
             </div>

@@ -687,6 +687,22 @@ export default {
   'queuedMessages.steeredBadge': '↳ Направлено',
   'queuedMessages.steeredBadgeTitle': 'Направлено в активный ход',
 
+  // Агент отказался начинать ход, сообщение осталось в очереди. Причину
+  // присылает CLI, а формулировка здесь — тогда текст может быть на языке
+  // пользователя.
+  'queueNotice.busy': 'MiniMax Code занят: на этой сессии идёт другой ход — его собственная задача или другое окно MiniMax Code.',
+  'queueNotice.compacting': 'MiniMax Code сжимает этот диалог и отказал вашему сообщению.',
+  'queueNotice.mutating': 'MiniMax Code изменяет этот диалог и отказал вашему сообщению.',
+  'queueNotice.queued': 'В очереди MiniMax Code есть более раннее сообщение, поэтому ваше отклонено.',
+  'queueNotice.paused': 'Очередь сообщений MiniMax Code на паузе, ваше сообщение не забрали.',
+  'queueNotice.conflict': 'MiniMax Code отклонил ваше сообщение: одновременно начинается другой ход.',
+  'queueNotice.waiting': 'MiniMax Code ждёт ответа на свой вопрос и до этого отклонил ваше сообщение.',
+  'queueNotice.unavailable': 'MiniMax Code только что закончил ход и пока не может принять ваше сообщение.',
+  'queueNotice.plan': 'MiniMax Code ещё разбирает план и до этого отклонял ваше сообщение.',
+  'queueNotice.duplicate': 'MiniMax Code уже принял этот ход.',
+  'queueNotice.unknown': 'MiniMax Code отклонил сообщение, не объяснив причину, и спросит ещё раз.',
+  'queueNotice.waitingSuffix': ' (ожидание {seconds} с)',
+
   // Агент держит ход, который HAPI не запускал (доставка фоновой задачи),
   // поэтому сессия выглядит простаивающей, хотя сообщение ждёт.
   'agentWaiting.title': 'Агент занят',

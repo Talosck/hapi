@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { getEventPresentation, formatDuration, formatMessageTimestamp, formatOutlineTimestamp, formatResetTime } from './presentation'
+import { QUEUE_NOTICE_REASONS } from './types'
+import en from '@/lib/locales/en'
+import zhCN from '@/lib/locales/zh-CN'
+import ru from '@/lib/locales/ru'
 
 describe('formatDuration', () => {
     it('keeps sub-minute durations at one decimal place', () => {
@@ -371,5 +375,69 @@ describe('getEventPresentation — queue-notice', () => {
         })
         expect(result.icon).toBe('⏳')
         expect(result.text).toBe('Your message is waiting.')
+    })
+
+    it('says the notice in the user\'s language when a translator is given', () => {
+        const result = getEventPresentation({
+            type: 'queue-notice',
+            reason: 'paused',
+            message: 'The MiniMax Code message queue is paused, so your message was not taken.',
+            waitingSeconds: 12
+        }, (key, params) => {
+            if (key === 'queueNotice.paused') return '消息队列被暂停了，你的消息没有被取走。'
+            if (key === 'queueNotice.waitingSuffix') return `（已等待 ${params?.seconds} 秒）`
+            return key
+        })
+        expect(result.text).toBe('消息队列被暂停了，你的消息没有被取走。（已等待 12 秒）')
+    })
+
+    it('falls back to the CLI wording when the reason has no translation', () => {
+        const result = getEventPresentation({
+            type: 'queue-notice',
+            reason: 'a-reason-nobody-translated',
+            message: 'MiniMax Code refused your message.',
+            waitingSeconds: 3
+        }, (key) => key)
+        expect(result.text).toBe('MiniMax Code refused your message. (3s)')
+    })
+
+    it('falls back to the CLI wording when there is no translator at all', () => {
+        const result = getEventPresentation({
+            type: 'queue-notice',
+            reason: 'paused',
+            message: 'The MiniMax Code message queue is paused, so your message was not taken.'
+        })
+        expect(result.text).toBe('The MiniMax Code message queue is paused, so your message was not taken.')
+    })
+})
+
+describe('queue notice translations', () => {
+    it('has a wording for every reason the agent can refuse with, in every language', () => {
+        for (const reason of QUEUE_NOTICE_REASONS) {
+            for (const [name, locale] of Object.entries({ en, 'zh-CN': zhCN, ru })) {
+                expect(locale[`queueNotice.${reason}`], `${name} is missing queueNotice.${reason}`).toBeTruthy()
+            }
+        }
+    })
+
+    it('keeps the english wording the CLI sends, so both sides say the same thing', () => {
+        // The CLI's own wording is the fallback for a reason the client does
+        // not know. It must not drift away from the english locale.
+        const cliWordings: Record<string, string> = {
+            busy: 'MiniMax Code is busy with another turn on this session - a task it is running, or another MiniMax Code window attached to it.',
+            compacting: 'MiniMax Code is compacting this conversation and refused your message.',
+            mutating: 'MiniMax Code is changing this conversation and refused your message.',
+            queued: 'MiniMax Code still has an earlier queued message to deliver and refused yours.',
+            paused: 'The MiniMax Code message queue is paused, so your message was not taken.',
+            conflict: 'MiniMax Code refused your message because another turn is starting at the same time.',
+            waiting: 'MiniMax Code is waiting for an answer to something it asked, and refused your message until then.',
+            unavailable: 'MiniMax Code just finished a turn and could not take your message yet.',
+            plan: 'MiniMax Code is still working through a plan review and refused your message until that is done.',
+            duplicate: 'MiniMax Code had already accepted this turn.',
+            unknown: 'MiniMax Code refused the message for a reason it did not explain, and will be asked again.'
+        }
+        for (const reason of QUEUE_NOTICE_REASONS) {
+            expect(en[`queueNotice.${reason}`]).toBe(cliWordings[reason])
+        }
     })
 })

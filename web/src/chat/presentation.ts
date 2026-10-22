@@ -1,5 +1,11 @@
 import type { AgentEvent } from '@/chat/types'
 
+/**
+ * The translator the i18n context hands out. Kept as a shape instead of the
+ * hook so the presentation layer stays a plain function.
+ */
+export type EventTranslator = (key: string, params?: Record<string, string | number>) => string
+
 function normalizeTimestamp(value: number): Date {
     const ms = value < 1_000_000_000_000 ? value * 1000 : value
     return new Date(ms)
@@ -201,7 +207,41 @@ function apiErrorDetail(error: unknown): string | null {
     return null
 }
 
-export function getEventPresentation(event: AgentEvent): EventPresentation {
+/**
+ * The text of a queue notice, in the user's language.
+ *
+ * The CLI sends the reason the agent refused the turn, so the client can
+ * say it in the user's language instead of showing the CLI's English. The
+ * CLI's own wording stays the fallback: it knows more than the reason does.
+ */
+export function getQueueNoticeText(
+    event: { reason?: string; message?: string },
+    t?: EventTranslator
+): string {
+    if (t && event.reason) {
+        const key = `queueNotice.${event.reason}`
+        const localized = t(key)
+        // An unknown key comes back as the key itself.
+        if (localized !== key) return localized
+    }
+    return event.message ?? 'Your message is waiting for the agent'
+}
+
+/** How long the message has been waiting, in the user's language. */
+export function getQueueNoticeWaitedSuffix(
+    event: { waitingSeconds?: number },
+    t?: EventTranslator
+): string {
+    if (typeof event.waitingSeconds !== 'number' || event.waitingSeconds <= 0) return ''
+    if (t) {
+        const key = 'queueNotice.waitingSuffix'
+        const localized = t(key, { seconds: event.waitingSeconds })
+        if (localized !== key) return localized
+    }
+    return ` (${event.waitingSeconds}s)`
+}
+
+export function getEventPresentation(event: AgentEvent, t?: EventTranslator): EventPresentation {
     if (event.type === 'api-error') {
         const { retryAttempt, maxRetries } = event as { retryAttempt: number; maxRetries: number }
         if (maxRetries > 0 && retryAttempt >= maxRetries) {
@@ -261,10 +301,7 @@ export function getEventPresentation(event: AgentEvent): EventPresentation {
         // A notice about the queue, not something the agent said. It gets its
         // own icon so it cannot be mistaken for a reply.
         const ev = event as { reason?: string; message?: string; waitingSeconds?: number }
-        const waited = typeof ev.waitingSeconds === 'number' && ev.waitingSeconds > 0
-            ? ` (${ev.waitingSeconds}s)`
-            : ''
-        return { icon: '⏳', text: `${ev.message ?? 'Your message is waiting for the agent'}${waited}` }
+        return { icon: '⏳', text: `${getQueueNoticeText(ev, t)}${getQueueNoticeWaitedSuffix(ev, t)}` }
     }
     if (event.type === 'turn-duration') {
         const ms = typeof event.durationMs === 'number' ? event.durationMs : 0
