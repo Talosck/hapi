@@ -1,17 +1,57 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
     _resetMcodeConnectorCacheForTests,
+    buildMcodeToolsEnv,
     connectorProviderOf,
+    discoverMcodeConnectorBrokers,
     groupMcodeConnectorApps,
     listMcodeConnectorApps,
+    mcodeConnectorProbes,
     parseMcodeConnectorAuth,
     parseMcodeConnectorTools,
     resolveMcodeToolsCommand
 } from './mcodeConnectorTools'
 
+const tempRoots: string[] = []
+
+/**
+ * A directory that looks like the temp root of a machine with MiniMax Code
+ * hosts running in it.
+ */
+function makeBrokerRoot(hosts: { dir: string; withBroker: boolean }[]): string {
+    const root = mkdtempSync(join(tmpdir(), 'hapi-broker-test-'))
+    tempRoots.push(root)
+    for (const host of hosts) {
+        const runDir = join(root, host.dir, 'run')
+        mkdirSync(runDir, { recursive: true })
+        if (host.withBroker) {
+            writeFileSync(join(runDir, 'mcode-auth-lease-v1.cap'), 'secret')
+            writeFileSync(join(runDir, 'mcode-auth-lease-v1.sock'), '')
+        }
+    }
+    return root
+}
+
+afterEach(() => {
+    for (const root of tempRoots.splice(0)) {
+        rmSync(root, { recursive: true, force: true })
+    }
+})
+
 beforeEach(() => {
     _resetMcodeConnectorCacheForTests()
 })
+
+/**
+ * One probe with an empty environment.
+ *
+ * The probes of a real run depend on the MiniMax Code hosts running on the
+ * machine, so the tests ask through a fixed one.
+ */
+const TEST_PROBE = [{ command: 'mcode-tools', env: {} as NodeJS.ProcessEnv }]
 
 describe('resolveMcodeToolsCommand', () => {
     it('resolves the sibling of an absolute mcode path', () => {
@@ -104,6 +144,151 @@ describe('groupMcodeConnectorApps', () => {
     })
 })
 
+describe('discoverMcodeConnectorBrokers', () => {
+    it('finds the broker of a running MiniMax Code host', () => {
+        const root = makeBrokerRoot([
+            { dir: 'mcode-tools-tui-4242-abc', withBroker: true }
+        ])
+
+        const brokers = discoverMcodeConnectorBrokers({ tmpRoot: root, isProcessAlive: () => true })
+
+        expect(brokers).toEqual([{
+            endpoint: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.sock'),
+            capabilityFile: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.cap')
+        }])
+    })
+
+    it('skips the hosts that are gone', () => {
+        const root = makeBrokerRoot([
+            { dir: 'mcode-tools-tui-111-dead', withBroker: true },
+            { dir: 'mcode-tools-tui-222-live', withBroker: true }
+        ])
+
+        const brokers = discoverMcodeConnectorBrokers({
+            tmpRoot: root,
+            isProcessAlive: (pid) => pid === 222
+        })
+
+        expect(brokers.map((broker) => broker.capabilityFile)).toEqual([
+            join(root, 'mcode-tools-tui-222-live', 'run', 'mcode-auth-lease-v1.cap')
+        ])
+    })
+
+    it('skips a directory without a broker in it', () => {
+        const root = makeBrokerRoot([{ dir: 'mcode-tools-tui-333-empty', withBroker: false }])
+
+        expect(discoverMcodeConnectorBrokers({ tmpRoot: root, isProcessAlive: () => true })).toEqual([])
+    })
+})
+
+describe('buildMcodeToolsEnv', () => {
+    it('hands the broker coordinates to the tools', () => {
+        const env = buildMcodeToolsEnv({
+            baseEnv: { PATH: '/usr/bin' },
+            broker: { endpoint: '/tmp/broker.sock', capabilityFile: '/tmp/broker.cap' }
+        })
+
+        expect(env.MCODE_AUTH_PROVIDER).toBe('shared-broker')
+        expect(env.MCODE_AUTH_BROKER_ENDPOINT).toBe('/tmp/broker.sock')
+        expect(env.MCODE_AUTH_BROKER_CAPABILITY_FILE).toBe('/tmp/broker.cap')
+        expect(env.PATH).toBe('/usr/bin')
+    })
+
+    it('drops the variables of a host that is gone', () => {
+        // The host's own variables win over anything set here, so a stale
+        // broker would fail the call for a reason the user cannot act on.
+        const env = buildMcodeToolsEnv({
+            baseEnv: {
+                __MAVIS_MCODE_TOOLS_BROKER_ENDPOINT: '/tmp/old.sock',
+                __MAVIS_MCODE_TOOLS_BROKER_CAPABILITY_FILE: '/tmp/old.cap',
+                MCODE_AUTH_PROVIDER: 'shared-broker'
+            },
+            broker: { endpoint: '/tmp/new.sock', capabilityFile: '/tmp/new.cap' }
+        })
+
+        expect(env.__MAVIS_MCODE_TOOLS_BROKER_ENDPOINT).toBeUndefined()
+        expect(env.__MAVIS_MCODE_TOOLS_BROKER_CAPABILITY_FILE).toBeUndefined()
+        expect(env.MCODE_AUTH_BROKER_ENDPOINT).toBe('/tmp/new.sock')
+    })
+
+    it('publishes the whole host environment when it knows the runtime', () => {
+        // The launcher the host puts first on PATH needs the runtime
+        // executable, and the tools refuse a partial set.
+        const env = buildMcodeToolsEnv({
+            baseEnv: { PATH: '/usr/bin' },
+            broker: { endpoint: '/tmp/broker.sock', capabilityFile: '/tmp/broker.cap' },
+            runtimeExecutable: '/usr/bin/node',
+            region: 'cn',
+            configDir: '/home/user/.minimax/integrations/mcode-tools/cn'
+        })
+
+        expect(env.__MAVIS_MCODE_TOOLS_RUNTIME_EXECUTABLE).toBe('/usr/bin/node')
+        expect(env.__MAVIS_MCODE_TOOLS_BROKER_ENDPOINT).toBe('/tmp/broker.sock')
+        expect(env.__MAVIS_MCODE_TOOLS_BROKER_CAPABILITY_FILE).toBe('/tmp/broker.cap')
+        expect(env.__MAVIS_MCODE_TOOLS_CONFIG_DIR).toBe('/home/user/.minimax/integrations/mcode-tools/cn')
+        expect(env.__MAVIS_MCODE_TOOLS_REGION).toBe('cn')
+    })
+
+    it('keeps the minimal set when the runtime is unknown', () => {
+        const env = buildMcodeToolsEnv({
+            baseEnv: { PATH: '/usr/bin' },
+            broker: { endpoint: '/tmp/broker.sock', capabilityFile: '/tmp/broker.cap' },
+            runtimeExecutable: null,
+            region: null,
+            configDir: null
+        })
+
+        expect(env.MCODE_AUTH_PROVIDER).toBe('shared-broker')
+        expect(env.__MAVIS_MCODE_TOOLS_RUNTIME_EXECUTABLE).toBeUndefined()
+    })
+})
+
+describe('mcodeConnectorProbes', () => {
+    it('asks the host HAPI runs in first', () => {
+        const probes = mcodeConnectorProbes({
+            command: 'mcode-tools',
+            env: {
+                __MAVIS_MCODE_TOOLS_BROKER_ENDPOINT: '/tmp/host.sock',
+                __MAVIS_MCODE_TOOLS_BROKER_CAPABILITY_FILE: '/tmp/host.cap'
+            },
+            brokers: [{ endpoint: '/tmp/other.sock', capabilityFile: '/tmp/other.cap' }]
+        })
+
+        expect(probes).toHaveLength(2)
+        expect(probes[0].env.__MAVIS_MCODE_TOOLS_BROKER_ENDPOINT).toBe('/tmp/host.sock')
+        expect(probes[1].env.MCODE_AUTH_BROKER_ENDPOINT).toBe('/tmp/other.sock')
+    })
+
+    it('does not ask the same broker twice', () => {
+        const probes = mcodeConnectorProbes({
+            command: 'mcode-tools',
+            env: {
+                __MAVIS_MCODE_TOOLS_BROKER_ENDPOINT: '/tmp/host.sock',
+                __MAVIS_MCODE_TOOLS_BROKER_CAPABILITY_FILE: '/tmp/host.cap'
+            },
+            brokers: [{ endpoint: '/tmp/host.sock', capabilityFile: '/tmp/host.cap' }]
+        })
+
+        expect(probes).toHaveLength(1)
+    })
+
+    it('has nothing to ask when no host is running', () => {
+        expect(mcodeConnectorProbes({ command: 'mcode-tools', env: {}, brokers: [] })).toEqual([])
+    })
+
+    it('does not ask more hosts than the answer is worth waiting for', () => {
+        const brokers = [1, 2, 3, 4, 5].map((n) => ({
+            endpoint: `/tmp/${n}.sock`,
+            capabilityFile: `/tmp/${n}.cap`
+        }))
+
+        const probes = mcodeConnectorProbes({ command: 'mcode-tools', env: {}, brokers })
+
+        expect(probes).toHaveLength(3)
+        expect(probes[0].env.MCODE_AUTH_BROKER_ENDPOINT).toBe('/tmp/1.sock')
+    })
+})
+
 describe('listMcodeConnectorApps', () => {
     it('reports the connected apps and the auth state', async () => {
         const runTools = async (command: string, args: string[]) => {
@@ -121,7 +306,7 @@ describe('listMcodeConnectorApps', () => {
             }
         }
 
-        const catalog = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
+        const catalog = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
 
         expect(catalog.error).toBeUndefined()
         expect(catalog.auth.status).toBe('authenticated')
@@ -134,7 +319,7 @@ describe('listMcodeConnectorApps', () => {
             throw new Error('spawn mcode-tools ENOENT')
         }
 
-        const catalog = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
+        const catalog = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
 
         expect(catalog.apps).toEqual([])
         expect(catalog.error).toContain('ENOENT')
@@ -151,12 +336,12 @@ describe('listMcodeConnectorApps', () => {
             return { stdout: JSON.stringify({ tools: [] }), stderr: '' }
         }
 
-        const first = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, forceRefresh: true })
+        const first = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, forceRefresh: true, probes: TEST_PROBE })
         expect(first.auth.status).toBe('unknown')
 
         // The failed read must not be cached: the next request has to try
         // again instead of showing "unknown" for the whole TTL.
-        const second = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
+        const second = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
         expect(second.auth.status).toBe('authenticated')
     })
 
@@ -173,8 +358,8 @@ describe('listMcodeConnectorApps', () => {
             }
         }
 
-        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
-        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
+        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
+        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
 
         // Two spawns for the first read (auth + tools), none for the second.
         expect(calls).toBe(2)
@@ -190,8 +375,8 @@ describe('listMcodeConnectorApps', () => {
             throw new Error('boom')
         }
 
-        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
-        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
+        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
+        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
 
         expect(calls).toBe(4)
     })
@@ -209,8 +394,8 @@ describe('listMcodeConnectorApps', () => {
             }
         }
 
-        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
-        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
+        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
+        await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
 
         expect(calls).toBe(4)
     })
@@ -223,9 +408,48 @@ describe('listMcodeConnectorApps', () => {
             throw new Error('boom')
         }
 
-        const catalog = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
+        const catalog = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes: TEST_PROBE })
 
         expect(catalog.auth.status).toBe('unauthenticated')
         expect(catalog.error).toBe('boom')
+    })
+
+    it('asks the next broker when one does not answer', async () => {
+        // The broker of a host that just died is still on disk for a moment,
+        // so the probe has to move on to the next live one.
+        const probes = [
+            { command: 'mcode-tools', env: { MCODE_AUTH_BROKER_ENDPOINT: '/tmp/dead.sock' } as NodeJS.ProcessEnv },
+            { command: 'mcode-tools', env: { MCODE_AUTH_BROKER_ENDPOINT: '/tmp/live.sock' } as NodeJS.ProcessEnv }
+        ]
+        const runTools = async (_command: string, args: string[], env: NodeJS.ProcessEnv) => {
+            if (env.MCODE_AUTH_BROKER_ENDPOINT === '/tmp/dead.sock') {
+                throw new Error('BROKER_UNAVAILABLE')
+            }
+            if (args[0] === 'auth') {
+                return { stdout: JSON.stringify({ status: 'authenticated' }), stderr: '' }
+            }
+            return {
+                stdout: JSON.stringify({ tools: [{ tool_name: 'connector__matrix__a', description: '' }] }),
+                stderr: ''
+            }
+        }
+
+        const catalog = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes })
+
+        expect(catalog.error).toBeUndefined()
+        expect(catalog.apps.map((app) => app.provider)).toEqual(['matrix'])
+    })
+
+    it('says so when no host is running to ask', async () => {
+        const catalog = await listMcodeConnectorApps({
+            mcodeCommand: 'mcode',
+            runTools: async () => {
+                throw new Error('should not be called')
+            },
+            probes: []
+        })
+
+        expect(catalog.apps).toEqual([])
+        expect(catalog.error).toContain('No MiniMax Code host is running')
     })
 })

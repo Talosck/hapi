@@ -236,6 +236,9 @@ describe('SessionStatusPanel', () => {
         )
         expect(screen.getByText('The connected apps could not be read')).toBeInTheDocument()
         expect(screen.queryByText('No apps connected')).not.toBeInTheDocument()
+        // The reason is what tells the user whether the apps are missing or
+        // the probe could not run.
+        expect(screen.getByText('spawn mcode-tools ENOENT')).toBeInTheDocument()
     })
 
     it('shows no apps section for a session without one', () => {

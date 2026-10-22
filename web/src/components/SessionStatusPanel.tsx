@@ -277,7 +277,12 @@ function ConnectedApps(props: {
 
     if (props.error) {
         return (
-            <div className="text-xs text-[var(--app-hint)]">{t('session.status.apps.unavailable')}</div>
+            <div className="flex flex-col gap-0.5">
+                <div className="text-xs text-[var(--app-hint)]">{t('session.status.apps.unavailable')}</div>
+                {/* The reason is the only thing that tells the user whether
+                    the apps are missing or the probe could not run. */}
+                <div className="break-words text-[11px] text-[var(--app-hint)] opacity-80">{props.error}</div>
+            </div>
         )
     }
 
