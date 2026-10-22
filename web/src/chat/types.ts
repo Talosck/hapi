@@ -42,6 +42,10 @@ export type RoundSummary = {
 export type AgentEvent =
     | { type: 'switch'; mode: 'local' | 'remote' }
     | { type: 'message'; message: string }
+    // The agent refused to start the turn and the message stays queued. This
+    // is HAPI talking about the queue, not the agent speaking: it has its own
+    // type so a client can render it as a system notice.
+    | { type: 'queue-notice'; reason: 'busy' | 'compacting' | 'mutating'; message: string; waitingSeconds?: number }
     | { type: 'error'; message: string }
     | { type: 'title-changed'; title: string }
     | { type: 'limit-reached'; endsAt: number; limitType: string }

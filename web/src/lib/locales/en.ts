@@ -684,6 +684,12 @@ export default {
   'queuedMessages.steeredBadge': '↳ Steered',
   'queuedMessages.steeredBadgeTitle': 'Steered into the active turn',
 
+  // The agent holds a turn HAPI never started (a background task delivery),
+  // so the session looks idle while the message waits.
+  'agentWaiting.title': 'The agent is busy',
+  'agentWaiting.body': 'Your message is queued and goes out as soon as the current turn finishes.',
+  'agentWaiting.elapsed': 'Waiting for {seconds}s',
+
   // Scratchlist (per-session workbench, issue #11)
   'scratchlist.title': 'Scratchlist',
   'scratchlist.heldLabel': 'held — not sent',
@@ -761,6 +767,8 @@ export default {
   // Send blocked
   'send.blocked.title': 'Cannot send message',
   'send.blocked.noConnection': 'Not connected to server',
+  'send.duplicatePending.title': 'Already waiting',
+  'send.duplicatePending.body': 'That message is already queued for the agent — sending it again would deliver it twice.',
   'resume.failed.title': 'Resume failed',
   'toast.ready.title': 'Ready for input',
   'toast.ready.body': '{agent} is waiting in {session}',

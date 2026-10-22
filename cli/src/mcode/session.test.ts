@@ -52,3 +52,57 @@ describe('McodeSession context usage', () => {
         }
     });
 });
+
+describe('McodeSession repeated usage reports', () => {
+    const emptyCount = {
+        type: 'token_count',
+        info: {
+            total: { inputTokens: 0, outputTokens: 0 },
+            contextTokens: 133_965
+        }
+    };
+
+    it('drops a repeated count that carries no tokens', () => {
+        const { session, client } = createSession();
+        try {
+            session.sendAgentMessage(emptyCount);
+            session.sendAgentMessage(emptyCount);
+            session.sendAgentMessage(emptyCount);
+            // A refused turn makes the agent write a transcript line without
+            // tokens in it, so the watcher reports the same count once per
+            // refusal. Only the first one carries information.
+            expect(client.sendAgentMessage).toHaveBeenCalledTimes(1);
+        } finally {
+            session.stopKeepAlive();
+        }
+    });
+
+    it('keeps a count that carries tokens, even when it repeats', () => {
+        const { session, client } = createSession();
+        try {
+            const count = {
+                type: 'token_count',
+                info: { total: { inputTokens: 12, outputTokens: 3 } }
+            };
+            session.sendAgentMessage(count);
+            session.sendAgentMessage(count);
+            expect(client.sendAgentMessage).toHaveBeenCalledTimes(2);
+        } finally {
+            session.stopKeepAlive();
+        }
+    });
+
+    it('keeps a first empty count that differs from the one before it', () => {
+        const { session, client } = createSession();
+        try {
+            session.sendAgentMessage(emptyCount);
+            session.sendAgentMessage({
+                ...emptyCount,
+                info: { ...emptyCount.info, contextTokens: 140_000 }
+            });
+            expect(client.sendAgentMessage).toHaveBeenCalledTimes(2);
+        } finally {
+            session.stopKeepAlive();
+        }
+    });
+});

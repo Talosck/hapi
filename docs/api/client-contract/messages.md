@@ -183,6 +183,7 @@ A visible `data.type` not matched above ⇒ stringified agent text fallback (unl
 |---|---|
 | `switch` | `mode: 'local' \| 'remote'` |
 | `message` | `message: string` |
+| `queue-notice` | `reason: 'busy' \| 'compacting' \| 'mutating'`, `message: string`, `waitingSeconds?` — the agent refused to start the turn and the message stays queued; a system notice about the queue, **not** agent speech (render it as a status line, not as a reply) |
 | `error` | `message: string` |
 | `title-changed` | `title: string` |
 | `limit-reached` | `endsAt: number`, `limitType: string` |
@@ -243,6 +244,8 @@ Pending tool approvals never appear in the message stream. They live on the sess
 
 ```ts
 session.agentState = {
+  waitingForAgent?:  boolean                            // the agent holds a turn it did not start (a background-task delivery): the session looks idle, but it is not
+  waitingSinceMs?:   number                            // epoch ms — when that wait started
   requests?:          Record<requestId, { tool: string, toolCallId?: string, arguments: unknown, createdAt?: number | null }>
   completedRequests?: Record<requestId, {
     tool, toolCallId?: string, arguments, createdAt?, completedAt?,
@@ -256,6 +259,8 @@ session.agentState = {
 ```
 
 `agentState` updates arrive as a versioned SSE patch — apply it under the version gate described in [sse.md](./sse.md#versioned-patch-algorithm). Render pending `requests` as approval cards interleaved with the chat (the web reducer keys them to the matching `tool_use` when one exists); on resolution the entry moves to `completedRequests`, whose `status`/`answers` back-fill the tool card's permission state. Decide via `POST /api/sessions/:id/permissions/:requestId/approve` (`{mode?, allowTools?, decision?, answers?}`) or `…/deny` (`{decision?}`) — see [rest.md](./rest.md). Session-list badges come precomputed on `SessionSummary.pendingRequestsCount` / `pendingRequests` (≤ 5 entries).
+
+`waitingForAgent` is the counterpart of a `queue-notice` event: the agent holds a turn it did not start, so from the client's side the session looks idle while the last message is still waiting. Surface it (a status line with the elapsed time from `waitingSinceMs`) — an operator who cannot see it will assume the message was lost and send it again.
 
 `resolved` means native completion is known, but the winning answer/decision
 is not. Render it neutrally; never infer approval or fill answers from an

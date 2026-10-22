@@ -349,3 +349,27 @@ describe('formatMessageTimestamp', () => {
         expect(result).toContain('2025')
     })
 })
+
+describe('getEventPresentation — queue-notice', () => {
+    it('marks the notice as a wait, not as something the agent said', () => {
+        const result = getEventPresentation({
+            type: 'queue-notice',
+            reason: 'busy',
+            message: 'MiniMax Code is busy and refused your message.',
+            waitingSeconds: 12
+        })
+        expect(result.icon).toBe('⏳')
+        expect(result.text).toContain('MiniMax Code is busy and refused your message.')
+        expect(result.text).toContain('12s')
+    })
+
+    it('omits the elapsed time when the notice carries none', () => {
+        const result = getEventPresentation({
+            type: 'queue-notice',
+            reason: 'busy',
+            message: 'Your message is waiting.'
+        })
+        expect(result.icon).toBe('⏳')
+        expect(result.text).toBe('Your message is waiting.')
+    })
+})

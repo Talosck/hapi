@@ -192,7 +192,7 @@ const MATERIALIZATION_RETRY_MAX_MS = 30_000
  * (delegation snapshot, thread goal) the newest one is the only one that
  * matters.
  */
-const LOSSLESS_SESSION_EVENT_TYPES = new Set(['message', 'error', 'compact-summary', 'plan-removed'])
+const LOSSLESS_SESSION_EVENT_TYPES = new Set(['message', 'error', 'queue-notice', 'compact-summary', 'plan-removed'])
 
 function isTransientMaterializationError(error: unknown): boolean {
     if (!axios.isAxiosError(error)) {
@@ -1174,6 +1174,16 @@ export class ApiSessionClient extends EventEmitter {
     } | {
         type: 'message'
         message: string
+    } | {
+        // The agent refused to start the turn (it still holds one) and the
+        // message stays queued. This is a system notice, not agent speech:
+        // it carries its own reason so a client can render it as "your message
+        // is waiting" instead of as something the agent said.
+        type: 'queue-notice'
+        reason: 'busy' | 'compacting' | 'mutating'
+        message: string
+        /** How long the session has been refusing, in seconds. */
+        waitingSeconds?: number
     } | {
         type: 'error'
         message: string

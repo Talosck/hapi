@@ -32,7 +32,7 @@ export type SendMessageSettlement = {
     status: 'success' | 'error'
 }
 
-type BlockedReason = 'no-api' | 'no-session' | 'pending'
+type BlockedReason = 'no-api' | 'no-session' | 'pending' | 'duplicate-pending'
 
 /**
  * Information about a send that the underlying mutation rejected.
@@ -104,6 +104,54 @@ type UseSendMessageOptions = {
     onSuccess?: (sessionId: string) => void
     onError?: (info: SendErrorInfo) => void
     isSessionThinking?: boolean
+    /**
+     * True while the agent holds a turn it did not start (a background task
+     * delivery), so a message HAPI already handed over is still waiting.
+     */
+    isWaitingForAgent?: boolean
+}
+
+/**
+ * The text of a stored user message, or null when the row is not a plain
+ * text message.
+ */
+function getMessageText(message: DecryptedMessage): string | null {
+    const content = message.content as unknown
+    if (typeof content !== 'object' || content === null) return null
+    const outer = content as { role?: unknown; content?: unknown }
+    if (outer.role !== 'user') return null
+    const inner = outer.content as { type?: unknown; text?: unknown } | null
+    if (!inner || inner.type !== 'text') return null
+    return typeof inner.text === 'string' ? inner.text : null
+}
+
+/**
+ * True when the last user message of the session carries the same text and
+ * has not been answered yet.
+ *
+ * A message the agent refused ("Session already has an active Turn") is
+ * already handed over, so it is not in the queued bar - but it is still
+ * waiting. Sending the same text again puts that text in front of the agent
+ * twice, and the second copy is what made an operator believe the first one
+ * was lost.
+ *
+ * A message that was answered does not count: repeating yourself after an
+ * answer is a normal thing to do.
+ */
+function hasIdenticalPendingMessage(
+    sessionId: string,
+    text: string,
+    isWaitingForAgent: boolean,
+): boolean {
+    const state = getMessageWindowState(sessionId)
+    const lastUser = [...state.messages].reverse().find((m) => getMessageText(m) !== null)
+    if (!lastUser) return false
+    const lastText = getMessageText(lastUser)
+    if (lastText === null || lastText.trim() !== text.trim()) return false
+    if (lastUser.status === 'failed') return false
+    // Either still waiting to be picked up, or already handed over and
+    // waiting for the agent to free its turn.
+    return lastUser.invokedAt === null || isWaitingForAgent
 }
 
 /** Create an optimistic message for display. Extracted as an extension point
@@ -292,6 +340,13 @@ export function useSendMessage(
         }
         if (mutation.isPending || resolveGuardRef.current) {
             options?.onBlocked?.('pending')
+            return false
+        }
+        if (hasIdenticalPendingMessage(sessionId, text, options?.isWaitingForAgent ?? false)) {
+            // The same text is already on its way to the agent. Sending it
+            // again would hand the agent the message twice.
+            options?.onBlocked?.('duplicate-pending')
+            haptic.notification('warning')
             return false
         }
         const localId = makeClientSideId('local')

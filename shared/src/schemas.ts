@@ -246,6 +246,18 @@ export const AgentStateSchema = z.object({
     // True while the CLI is delivering a queued message into the active turn
     // (Steer). Surfaced so the web can reflect the inject in progress.
     steeringActive: z.boolean().nullish(),
+    // True while the CLI waits for the agent to release a turn it refused to
+    // start ("Session already has an active Turn").
+    //
+    // The agent can hold a turn HAPI never started - MiniMax Code opens one of
+    // its own to deliver a finished background task - so from HAPI's side the
+    // session looks idle while it is not. Without this flag a client has no
+    // way to tell "the agent is busy" from "the agent is idle and ignoring
+    // me", which is what makes an operator send the same message again.
+    waitingForAgent: z.boolean().nullish(),
+    // When the wait started (epoch milliseconds), so a client can show how
+    // long the message has been waiting.
+    waitingSinceMs: z.number().nullish(),
     // The mode the session was started in. Persisted so reopen/resume can
     // re-spawn in the same mode — notably 'pty', which has no agent terminal
     // otherwise (a reopened PTY session would silently fall back to 'remote').

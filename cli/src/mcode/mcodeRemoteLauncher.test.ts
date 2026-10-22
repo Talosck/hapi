@@ -1697,6 +1697,75 @@ describe('mcodeRemoteLauncher refused turn', () => {
             typeof event?.message === 'string' && event.message.includes('prompt failed'))).toHaveLength(0)
         queue.close()
     })
+
+    it('sends the refusal as a queue notice, not as something the agent said', async () => {
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    throw new Error(BUSY_ERROR)
+                }
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 5_000 })
+
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0]) as Array<{
+            type?: string
+            reason?: string
+            message?: string
+            waitingSeconds?: number
+        }>
+        // The notice has its own type: it is HAPI talking about the queue,
+        // and a client has to be able to tell it apart from agent speech.
+        const notices = events.filter((event) => event?.type === 'queue-notice')
+        expect(notices).toHaveLength(1)
+        expect(notices[0].reason).toBe('busy')
+        expect(notices[0].message).toContain('Your message is kept')
+        expect(typeof notices[0].waitingSeconds).toBe('number')
+        // It is not an agent message.
+        expect(events.filter((event) =>
+            event?.type === 'message' && typeof event.message === 'string' && event.message.includes('busy'))).toHaveLength(0)
+        queue.close()
+    })
+
+    it('publishes that the session waits for the agent while the message waits', async () => {
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    throw new Error(BUSY_ERROR)
+                }
+            })
+        })
+        const { session, queue, client } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 5_000 })
+
+        // The agent holds a turn HAPI never started, so the session looks idle
+        // from HAPI's side. The state has to say so, or a client cannot tell
+        // "the agent is busy" from "the agent ignored me".
+        const states = client.updateAgentState.mock.calls.map((call) =>
+            (call[0] as (state: Record<string, unknown>) => Record<string, unknown>)({})
+        )
+        expect(states.some((state) => state.waitingForAgent === true)).toBe(true)
+        // The flag is cleared once the turn starts again.
+        expect(states.some((state) => state.waitingForAgent === false)).toBe(true)
+        const waiting = states.find((state) => state.waitingForAgent === true)
+        expect(typeof waiting?.waitingSinceMs).toBe('number')
+        queue.close()
+    })
 })
 
 describe('mcodeRemoteLauncher local handoff', () => {

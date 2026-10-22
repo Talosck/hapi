@@ -686,6 +686,12 @@ export default {
   'queuedMessages.steeredBadge': '↳ Направлено',
   'queuedMessages.steeredBadgeTitle': 'Направлено в активный ход',
 
+  // Агент держит ход, который HAPI не запускал (доставка фоновой задачи),
+  // поэтому сессия выглядит простаивающей, хотя сообщение ждёт.
+  'agentWaiting.title': 'Агент занят',
+  'agentWaiting.body': 'Сообщение в очереди — оно уйдёт, как только текущий ход закончится.',
+  'agentWaiting.elapsed': 'Ожидание: {seconds} с',
+
   // Блокнот (рабочее пространство сессии)
   'scratchlist.title': 'Блокнот',
   'scratchlist.heldLabel': 'отложено — не отправлено',
@@ -763,6 +769,8 @@ export default {
   // Отправка заблокирована
   'send.blocked.title': 'Не удаётся отправить сообщение',
   'send.blocked.noConnection': 'Нет соединения с сервером',
+  'send.duplicatePending.title': 'Уже в ожидании',
+  'send.duplicatePending.body': 'Это сообщение уже в очереди — повторная отправка доставит его дважды.',
   'resume.failed.title': 'Не удалось возобновить',
   'toast.ready.title': 'Готово к вводу',
   'toast.ready.body': '{agent} ожидает в {session}',

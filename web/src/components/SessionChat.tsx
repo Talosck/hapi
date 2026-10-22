@@ -43,6 +43,7 @@ import { codexModelAdvertisesFastTier, getEffectiveCodexServiceTier } from '@/co
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { HappyThread } from '@/components/AssistantChat/HappyThread'
+import { AgentWaitingNotice } from '@/components/AssistantChat/AgentWaitingNotice'
 import { QueuedMessagesBar } from '@/components/AssistantChat/QueuedMessagesBar'
 import { ScratchlistDrawer } from '@/components/AssistantChat/ScratchlistPanel'
 import { useHubScratchlist } from '@/lib/use-hub-scratchlist'
@@ -2122,6 +2123,11 @@ function SessionChatInner(props: SessionChatProps) {
                                     disabled={props.isSending || isScratchlistParking}
                                 />
                             ) : null}
+                            <AgentWaitingNotice
+                                waitingSinceMs={props.session.agentState?.waitingForAgent === true
+                                    ? props.session.agentState?.waitingSinceMs ?? null
+                                    : null}
+                            />
                             <QueuedMessagesBar
                                 sessionId={props.session.id}
                                 api={props.api}

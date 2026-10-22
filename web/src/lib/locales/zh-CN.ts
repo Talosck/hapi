@@ -688,6 +688,12 @@ export default {
   'queuedMessages.steeredBadge': '↳ 已介入',
   'queuedMessages.steeredBadgeTitle': '已介入当前进行中的回合',
 
+  // 代理持有 HAPI 并未发起的回合（后台任务回填），会话看起来是空闲的，
+  // 消息其实在等待。
+  'agentWaiting.title': '代理正忙',
+  'agentWaiting.body': '消息已进入队列，当前回合结束后会自动发出。',
+  'agentWaiting.elapsed': '已等待 {seconds} 秒',
+
   // Scratchlist (per-session workbench, issue #11)
   'scratchlist.title': '草稿夹',
   'scratchlist.heldLabel': '暂存 · 未发送',
@@ -765,6 +771,8 @@ export default {
   // Send blocked
   'send.blocked.title': '无法发送消息',
   'send.blocked.noConnection': '未连接到服务器',
+  'send.duplicatePending.title': '消息已在等待',
+  'send.duplicatePending.body': '这条消息已经在队列里了 —— 再发一次会让代理收到两遍。',
   'resume.failed.title': '恢复会话失败',
   'toast.ready.title': '等待输入',
   'toast.ready.body': '{agent} 正在 {session} 等待你的输入',

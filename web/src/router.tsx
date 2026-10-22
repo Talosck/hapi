@@ -566,6 +566,7 @@ function SessionPage() {
         sendSettlement,
     } = useSendMessage(api, sessionId, {
         isSessionThinking: session?.thinking ?? false,
+        isWaitingForAgent: session?.agentState?.waitingForAgent === true,
         onSuccess: (sentSessionId) => {
             clearDraftsAfterSend(sentSessionId, sessionId)
             // 中文注释：一旦用户已经在 Hapi 内继续这个 Codex 会话，就清除"刚从 Codex 导入"的标记。
@@ -624,6 +625,16 @@ function SessionPage() {
                 addToast({
                     title: t('send.blocked.title'),
                     body: t('send.blocked.noConnection'),
+                    sessionId: sessionId ?? '',
+                    url: ''
+                })
+            }
+            if (reason === 'duplicate-pending') {
+                // The same text is already waiting for the agent. Sending it
+                // again would put it in front of the agent twice.
+                addToast({
+                    title: t('send.duplicatePending.title'),
+                    body: t('send.duplicatePending.body'),
                     sessionId: sessionId ?? '',
                     url: ''
                 })

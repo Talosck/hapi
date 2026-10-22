@@ -937,3 +937,122 @@ describe('useSendMessage', () => {
         })
     })
 })
+
+describe('useSendMessage duplicate guard', () => {
+    function userMessage(overrides: Record<string, unknown> = {}) {
+        return {
+            id: 'local-1',
+            seq: null,
+            localId: 'local-1',
+            content: { role: 'user', content: { type: 'text', text: 'run it again' } },
+            createdAt: 1_000,
+            invokedAt: 2_000,
+            scheduledAt: null,
+            status: 'sent',
+            originalText: 'run it again',
+            ...overrides,
+        }
+    }
+
+    it('blocks a send that repeats a message the agent is still holding', async () => {
+        const sendMock = vi.fn(async () => {})
+        const api = createMockApi(sendMock)
+        const onBlocked = vi.fn()
+        const { getMessageWindowState } = await import('@/lib/message-window-store')
+        // The message was handed over (invoked), but the agent refused the
+        // turn and is still holding it.
+        vi.mocked(getMessageWindowState).mockReturnValueOnce({
+            messages: [userMessage()],
+        } as never)
+
+        const { result } = renderHook(
+            () => useSendMessage(api, 'session-A', { onBlocked, isWaitingForAgent: true }),
+            { wrapper: createWrapper() },
+        )
+
+        let accepted: SendMessageAcceptance | false = false
+        await act(async () => {
+            accepted = await result.current.sendMessage('run it again')
+        })
+
+        expect(accepted).toBe(false)
+        expect(onBlocked).toHaveBeenCalledWith('duplicate-pending')
+        expect(sendMock).not.toHaveBeenCalled()
+    })
+
+    it('blocks a repeat of a message that is still queued', async () => {
+        const sendMock = vi.fn(async () => {})
+        const api = createMockApi(sendMock)
+        const onBlocked = vi.fn()
+        const { getMessageWindowState } = await import('@/lib/message-window-store')
+        vi.mocked(getMessageWindowState).mockReturnValueOnce({
+            messages: [userMessage({ invokedAt: null, status: 'queued' })],
+        } as never)
+
+        const { result } = renderHook(
+            () => useSendMessage(api, 'session-A', { onBlocked }),
+            { wrapper: createWrapper() },
+        )
+
+        let accepted: SendMessageAcceptance | false = false
+        await act(async () => {
+            accepted = await result.current.sendMessage('run it again')
+        })
+
+        expect(accepted).toBe(false)
+        expect(onBlocked).toHaveBeenCalledWith('duplicate-pending')
+        expect(sendMock).not.toHaveBeenCalled()
+    })
+
+    it('allows the same text once the agent has answered it', async () => {
+        const sendMock = vi.fn(async () => {})
+        const api = createMockApi(sendMock)
+        const onBlocked = vi.fn()
+        const { getMessageWindowState } = await import('@/lib/message-window-store')
+        vi.mocked(getMessageWindowState).mockReturnValueOnce({
+            messages: [userMessage()],
+        } as never)
+
+        const { result } = renderHook(
+            () => useSendMessage(api, 'session-A', { onBlocked, isWaitingForAgent: false }),
+            { wrapper: createWrapper() },
+        )
+
+        let accepted: SendMessageAcceptance | false = false
+        await act(async () => {
+            accepted = await result.current.sendMessage('run it again')
+        })
+
+        await waitFor(() => {
+            expect(sendMock).toHaveBeenCalled()
+        })
+        expect(accepted).not.toBe(false)
+        expect(onBlocked).not.toHaveBeenCalled()
+    })
+
+    it('allows a different message while the agent is waiting', async () => {
+        const sendMock = vi.fn(async () => {})
+        const api = createMockApi(sendMock)
+        const onBlocked = vi.fn()
+        const { getMessageWindowState } = await import('@/lib/message-window-store')
+        vi.mocked(getMessageWindowState).mockReturnValueOnce({
+            messages: [userMessage()],
+        } as never)
+
+        const { result } = renderHook(
+            () => useSendMessage(api, 'session-A', { onBlocked, isWaitingForAgent: true }),
+            { wrapper: createWrapper() },
+        )
+
+        let accepted: SendMessageAcceptance | false = false
+        await act(async () => {
+            accepted = await result.current.sendMessage('something else')
+        })
+
+        await waitFor(() => {
+            expect(sendMock).toHaveBeenCalled()
+        })
+        expect(accepted).not.toBe(false)
+        expect(onBlocked).not.toHaveBeenCalled()
+    })
+})

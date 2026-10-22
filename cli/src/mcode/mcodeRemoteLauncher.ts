@@ -60,8 +60,13 @@ import { McodeConversationHistory } from './conversationHistory';
 
 /** First wait before retrying a turn the agent refused because it was busy. */
 const MCODE_BUSY_RETRY_BASE_MS = 1_000;
-/** Longest wait between two attempts at a refused turn. */
-const MCODE_BUSY_RETRY_MAX_MS = 10_000;
+/**
+ * Longest wait between two attempts at a refused turn.
+ *
+ * The wait doubles with every refusal (1s, 2s, 4s, ...), so a turn the agent
+ * holds for minutes does not turn into a prompt-per-second loop.
+ */
+const MCODE_BUSY_RETRY_MAX_MS = 60_000;
 /** How many refusals pass before the user is told the wait is not ending. */
 const MCODE_BUSY_STUCK_REFUSALS = 12;
 
@@ -176,6 +181,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private busyRefusals = 0;
     /** When the agent started refusing turns, for the "still busy" notice. */
     private busySinceMs: number | null = null;
+    /**
+     * The last published "the agent holds a turn" value. `null` means it was
+     * never published for the current agent session.
+     */
+    private waitingForAgentPublished: boolean | null = null;
     /**
      * The local ids of the messages that are already in the display buffer.
      *
@@ -298,6 +308,9 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         }
         session.onSessionFound(acpSessionId);
         this.acpSessionId = acpSessionId;
+        // A new agent session: the next waiting flag has to be published even
+        // when it says the same thing the previous session said.
+        this.waitingForAgentPublished = null;
 
         this.permissionHandler = new McodePermissionHandler(
             session.client,
@@ -449,6 +462,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 text: batch.message
             }];
 
+            // A new attempt starts here: the session is not waiting for the
+            // agent any more.
+            this.setWaitingForAgent(false);
+
             // Publish the steerable flag before the thinking flag: a client
             // that offers Steer on "thinking" must never be ahead of the
             // agent's own "a turn is running" state.
@@ -501,6 +518,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     // deliver it once the session is ready again.
                     this.requeueRefusedBatch(batch);
                     this.reportRefusal(session, refusal, errorMessage);
+                    // The agent still holds a turn. Say so, so a client can
+                    // show that the message is waiting instead of looking
+                    // like it was lost.
+                    this.setWaitingForAgent(true);
                     refusedAsBusy = true;
                 } else {
                     logger.warn('[mcode-remote] prompt failed', { message: errorMessage });
@@ -543,9 +564,14 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * send to deliver the message after it.") names a mechanism the user
      * cannot reach, so the notice says what is actually going on: the
      * session is busy, and the message is not lost.
+     *
+     * The notice is its own event type, not an agent message: it is HAPI
+     * talking about the queue, and a client has to be able to tell that
+     * apart from something the agent said.
      */
     private reportRefusal(session: McodeSession, reason: McodeRefusalReason, errorMessage: string): void {
         this.busySinceMs ??= Date.now();
+        const waitingSeconds = Math.round((Date.now() - (this.busySinceMs ?? Date.now())) / 1000);
         if (this.busyRefusals === 1) {
             const what = reason === 'busy'
                 ? 'MiniMax Code is busy with another turn on this session - a task it is running, or another MiniMax Code window attached to it - and refused your message.'
@@ -553,17 +579,20 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     ? 'MiniMax Code is compacting this conversation and refused your message.'
                     : 'MiniMax Code is changing this conversation and refused your message.';
             session.sendSessionEvent({
-                type: 'message',
+                type: 'queue-notice',
+                reason,
+                waitingSeconds,
                 message: `${what} Your message is kept and goes out as soon as that finishes.`
             });
             logger.debug('[mcode-remote] session refused the turn', { reason, message: errorMessage });
             return;
         }
         if (this.busyRefusals === MCODE_BUSY_STUCK_REFUSALS) {
-            const waitedSeconds = Math.round((Date.now() - (this.busySinceMs ?? Date.now())) / 1000);
             session.sendSessionEvent({
-                type: 'message',
-                message: `MiniMax Code is still busy after ${waitedSeconds} seconds. Your message is still queued and goes out on its own as soon as the session frees up. If nothing is running, close any leftover MiniMax Code process, or start a new session.`
+                type: 'queue-notice',
+                reason,
+                waitingSeconds,
+                message: `MiniMax Code is still busy after ${waitingSeconds} seconds. Your message is still queued and goes out on its own as soon as the session frees up. If nothing is running, close any leftover MiniMax Code process, or start a new session.`
             });
         }
     }
@@ -636,12 +665,13 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      *
      * The lease the agent holds is released when the other turn ends, which
      * can take a while - a background task can hold the session for minutes.
-     * The wait grows with the number of refusals so a long-running turn does
-     * not turn into a prompt-per-second loop.
+     * The wait doubles with every refusal, so a long-running turn does not
+     * turn into a prompt-per-second loop that writes a usage row per
+     * attempt.
      */
     private async waitBeforeRetry(signal: AbortSignal): Promise<void> {
         const delay = Math.min(
-            MCODE_BUSY_RETRY_BASE_MS * this.busyRefusals,
+            MCODE_BUSY_RETRY_BASE_MS * 2 ** Math.min(Math.max(this.busyRefusals - 1, 0), 6),
             MCODE_BUSY_RETRY_MAX_MS
         );
         await new Promise<void>((resolve) => {
@@ -714,6 +744,9 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         // The flags are set to "off" rather than removed: the hub merges
         // metadata writes, so a removed key could survive the merge.
         this.extensionControl = null;
+        // The agent is gone: a client must not keep showing that it waits for
+        // a turn that no longer exists.
+        this.setWaitingForAgent(false);
         // The same goes for the history controls: the local TUI cannot fork
         // either, and the metadata merge would keep a stale "fork supported"
         // that leaves a dead Fork button on the last message.
@@ -914,6 +947,31 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private setSteeringActive(value: boolean): void {
         this.steeringActive = value;
         this.session.client.updateAgentState((state) => ({ ...state, steeringActive: value }));
+    }
+
+    /**
+     * Publishes whether the session is waiting for the agent to free its turn.
+     *
+     * The agent refuses a turn while it holds one, and it can hold a turn HAPI
+     * never started - MiniMax Code opens a turn of its own to deliver a
+     * finished background task. HAPI has no way to see that turn, so without
+     * this flag the session looks idle to every client while the message sits
+     * in the queue, and an operator sends it again.
+     */
+    private setWaitingForAgent(value: boolean): void {
+        // The flag is published on change only: the agent state write is a
+        // hub round trip, and a turn would otherwise publish it twice for a
+        // value nobody can see change.
+        if (this.waitingForAgentPublished === value) return;
+        this.waitingForAgentPublished = value;
+        // Captured now: the handler runs later, and the busy window can have
+        // moved on by then.
+        const sinceMs = value ? (this.busySinceMs ?? Date.now()) : undefined;
+        this.session.client.updateAgentState((state) => ({
+            ...state,
+            waitingForAgent: value,
+            waitingSinceMs: sinceMs
+        }));
     }
 
     /**

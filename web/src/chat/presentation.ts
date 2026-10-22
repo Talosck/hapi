@@ -257,6 +257,15 @@ export function getEventPresentation(event: AgentEvent): EventPresentation {
     if (event.type === 'message') {
         return { icon: null, text: typeof event.message === 'string' ? event.message : 'Message' }
     }
+    if (event.type === 'queue-notice') {
+        // A notice about the queue, not something the agent said. It gets its
+        // own icon so it cannot be mistaken for a reply.
+        const ev = event as { reason?: string; message?: string; waitingSeconds?: number }
+        const waited = typeof ev.waitingSeconds === 'number' && ev.waitingSeconds > 0
+            ? ` (${ev.waitingSeconds}s)`
+            : ''
+        return { icon: '⏳', text: `${ev.message ?? 'Your message is waiting for the agent'}${waited}` }
+    }
     if (event.type === 'turn-duration') {
         const ms = typeof event.durationMs === 'number' ? event.durationMs : 0
         return { icon: '⏱️', text: `Turn: ${formatDuration(ms)}` }
