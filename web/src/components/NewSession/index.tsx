@@ -108,6 +108,9 @@ export function NewSession(props: {
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
     const [isDirectoryFocused, setIsDirectoryFocused] = useState(false)
     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
+    // The agent the user came for. It is the one whose absence is worth
+    // explaining even when the reason is plain "not installed".
+    const [preferredAgent] = useState<AgentType>(loadPreferredAgent)
     // Snapshot taken once at mount, before any savePreferredAgent() call this
     // component makes can overwrite the stored agent. savePreferredAgent()
     // runs on every agent change (below), so reading loadPreferredAgent()
@@ -117,6 +120,10 @@ export function NewSession(props: {
         () => (loadPreferredYoloMode() ? loadPreferredAgent() : null)
     )
     const [model, setModel] = useState('auto')
+    // Whether the model the user picked was taken away by the machine. The
+    // form falls back to the default, but the user has to be told: a silent
+    // reset looks like the choice never took.
+    const [mcodeModelReset, setMcodeModelReset] = useState(false)
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const pendingCursorBaseRef = useRef<string | null>(null)
     const [effort, setEffort] = useState<LaunchEffort>('auto')
@@ -301,6 +308,20 @@ export function NewSession(props: {
             .filter((entry) => entry.available && entry.agent !== 'gemini')
             .map((entry) => entry.agent as AgentType),
         [agentAvailability.agents]
+    )
+    // The agents that are on the machine but cannot be used. They are not
+    // offered, but the reason is shown - "MiniMax Code is missing" and
+    // "MiniMax Code is not signed in" lead to different actions.
+    //
+    // Only the interesting ones are listed: an agent that is there but cannot
+    // run, and the agent the user came for. A machine without half the agents
+    // installed would otherwise list every one of them as missing.
+    const unavailableAgents = useMemo(
+        () => agentAvailability.agents
+            .filter((entry) => !entry.available && entry.agent !== 'gemini')
+            .filter((entry) => entry.reason !== 'not_found' || entry.agent === preferredAgent)
+            .map((entry) => ({ agent: entry.agent as AgentType, reason: entry.reason })),
+        [agentAvailability.agents, preferredAgent]
     )
     const selectedAgentAvailable = availableAgents.includes(agent)
 
@@ -1014,6 +1035,7 @@ export function NewSession(props: {
             model
         })) {
             setModel('auto')
+            setMcodeModelReset(true)
         }
     }, [
         agent,
@@ -1890,6 +1912,7 @@ export function NewSession(props: {
             <AgentSelector
                 agent={agent}
                 agents={availableAgents}
+                unavailableAgents={unavailableAgents}
                 isDisabled={isFormDisabled || agentAvailability.isLoading || Boolean(agentAvailability.error)}
                 onAgentChange={handleAgentChange}
             />
@@ -2053,15 +2076,32 @@ export function NewSession(props: {
                                         : agent === 'pi' && piModelsState.error
                                             ? `${t('newSession.model.loadFailed')}: ${piModelsState.error}`
                                     : null}
-                        onModelChange={setModel}
+                        onModelChange={(value) => {
+                            setMcodeModelReset(false)
+                            setModel(value)
+                        }}
+                        onRetry={agent === 'mcode' ? mcodeModelsState.refetch : undefined}
                     />
                 )
             )}
+            {agent === 'mcode' && mcodeModelReset ? (
+                <div className="px-3 pb-3 text-xs text-[var(--app-hint)]">
+                    {t('newSession.model.mcodeReset')}
+                </div>
+            ) : null}
             {agent === 'mcode' && mcodeAppsState.apps.length > 0 ? (
                 <div className="px-3 pb-3 text-xs text-[var(--app-hint)]">
                     {t('newSession.apps.connected', {
                         apps: mcodeAppsState.apps.map((app) => app.provider).join(', ')
                     })}
+                </div>
+            ) : null}
+            {agent === 'mcode' && mcodeAppsState.error ? (
+                // The apps could not be read. Saying so is better than showing
+                // an empty list, which reads as "nothing is connected".
+                <div className="flex flex-col gap-0.5 px-3 pb-3 text-xs text-[var(--app-hint)]">
+                    <span>{t('newSession.apps.unavailable')}</span>
+                    <span className="break-words opacity-80">{mcodeAppsState.error}</span>
                 </div>
             ) : null}
             {showPiLaunchConfig ? (

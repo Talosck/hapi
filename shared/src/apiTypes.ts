@@ -671,7 +671,7 @@ export const MachinePathsExistsRequestSchema = z.object({
 
 export type MachinePathsExistsRequest = z.infer<typeof MachinePathsExistsRequestSchema>
 
-export const AgentAvailabilityReasonSchema = z.enum(['not_found', 'invalid_configuration'])
+export const AgentAvailabilityReasonSchema = z.enum(['not_found', 'invalid_configuration', 'not_signed_in'])
 export type AgentAvailabilityReason = z.infer<typeof AgentAvailabilityReasonSchema>
 
 export const AgentAvailabilityEntrySchema = z.object({

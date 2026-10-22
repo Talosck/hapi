@@ -31,17 +31,49 @@ export type SpawnWithAbortOptions = {
     shell?: SpawnOptions['shell'];
     stdio?: StdioOptions;
     windowsHide?: SpawnOptions['windowsHide'];
+    /**
+     * Keeps the agent's own error output and puts it into the failure.
+     *
+     * The agent says why it refused to start ("the session does not exist",
+     * "you are not signed in"), and that sentence is the only thing the user
+     * can act on. The output is still written to the terminal, so nothing is
+     * hidden from the user.
+     */
+    captureStderr?: boolean;
 };
+
+/** How much of the agent's error output is kept. */
+const MAX_CAPTURED_STDERR_BYTES = 8 * 1024;
 
 export async function spawnWithAbort(options: SpawnWithAbortOptions): Promise<void> {
     const abortKillTimeoutMs = options.abortKillTimeoutMs ?? 5000;
     const abortExitCodes = options.abortExitCodes ?? DEFAULT_ABORT_EXIT_CODES;
     const abortSignals = options.abortSignals ?? DEFAULT_ABORT_SIGNALS;
-    const stdio = options.stdio ?? ['inherit', 'inherit', 'inherit'];
+    const stdio = options.stdio ?? (options.captureStderr
+        ? ['inherit', 'inherit', 'pipe']
+        : ['inherit', 'inherit', 'inherit']);
     const logPrefix = options.logLabel ? `[${options.logLabel}] ` : '';
 
     const logDebug = (message: string, ...args: unknown[]) => {
         logger.debug(`${logPrefix}${message}`, ...args);
+    };
+
+    /** The last thing the agent said before it gave up. */
+    let capturedStderr = '';
+    const captureStderrLine = (chunk: Buffer | string) => {
+        const text = chunk.toString();
+        // The user still sees everything the agent says.
+        process.stderr.write(text);
+        if (capturedStderr.length < MAX_CAPTURED_STDERR_BYTES) {
+            capturedStderr = (capturedStderr + text).slice(0, MAX_CAPTURED_STDERR_BYTES);
+        }
+    };
+    /** The agent's own words, on one line. */
+    const stderrSummary = () => {
+        const trimmed = capturedStderr.trim();
+        if (!trimmed) return '';
+        const lastLine = trimmed.split('\n').map((line) => line.trim()).filter(Boolean).pop() ?? '';
+        return lastLine.length > 300 ? `${lastLine.slice(0, 300)}…` : lastLine;
     };
 
     await new Promise<void>((resolve, reject) => {
@@ -58,6 +90,10 @@ export async function spawnWithAbort(options: SpawnWithAbortOptions): Promise<vo
         });
 
         let abortKillTimeout: NodeJS.Timeout | null = null;
+
+        if (options.captureStderr) {
+            child.stderr?.on('data', captureStderrLine);
+        }
 
         const abortHandler = () => {
             if (abortKillTimeout) {
@@ -144,7 +180,10 @@ export async function spawnWithAbort(options: SpawnWithAbortOptions): Promise<vo
                 return;
             }
             if (typeof code === 'number' && code !== 0) {
-                reject(new Error(`Process exited with code: ${code}`));
+                const said = stderrSummary();
+                reject(new Error(said
+                    ? `Process exited with code: ${code}. ${said}`
+                    : `Process exited with code: ${code}`));
                 return;
             }
             resolve();

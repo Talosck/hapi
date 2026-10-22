@@ -96,6 +96,8 @@ export class AcpStdioTransport {
     /** Only Cursor's `agent` CLI is single-process; other ACP backends must not block model probes. */
     private readonly shouldGuardAgentCli: boolean;
     private readonly command: string;
+    /** How the user signs in to this agent, for the authentication errors. */
+    private readonly authHint: string | null;
     private readonly process: ChildProcessWithoutNullStreams;
     private readonly pending = new Map<string | number, {
         resolve: (value: unknown) => void;
@@ -132,6 +134,8 @@ export class AcpStdioTransport {
         command: string;
         args?: string[];
         env?: Record<string, string>;
+        /** How the user signs in to this agent, for the authentication errors. */
+        authHint?: string | null;
     }): Promise<AcpStdioTransport> {
         const shouldGuardAgentCli = options.command === 'agent';
         if (shouldGuardAgentCli) {
@@ -144,7 +148,7 @@ export class AcpStdioTransport {
                         options.args ?? [],
                         buildAcpStdioSpawnOptions(options.env)
                     ) as ChildProcessWithoutNullStreams;
-                    return new AcpStdioTransport(process, true, options.command);
+                    return new AcpStdioTransport(process, true, options.command, options.authHint ?? null);
                 } catch (error) {
                     unregisterActiveAcpTransport();
                     throw error;
@@ -159,12 +163,18 @@ export class AcpStdioTransport {
             options.args ?? [],
             buildAcpStdioSpawnOptions(options.env)
         ) as ChildProcessWithoutNullStreams;
-        return new AcpStdioTransport(process, false, options.command);
+        return new AcpStdioTransport(process, false, options.command, options.authHint ?? null);
     }
 
-    private constructor(process: ChildProcessWithoutNullStreams, shouldGuardAgentCli: boolean, command: string) {
+    private constructor(
+        process: ChildProcessWithoutNullStreams,
+        shouldGuardAgentCli: boolean,
+        command: string,
+        authHint: string | null = null,
+    ) {
         this.shouldGuardAgentCli = shouldGuardAgentCli;
         this.command = command;
+        this.authHint = authHint;
         this.process = process;
 
         if (this.shouldGuardAgentCli) {
@@ -756,7 +766,11 @@ export class AcpStdioTransport {
             lowerText.includes('authentication')) {
             this.stderrErrorHandler({
                 type: 'authentication',
-                message: 'Authentication failed. Please check your credentials or run "gemini auth login".',
+                // The hint names the login command of the agent that failed -
+                // a MiniMax Code user is not sent to the Gemini CLI.
+                message: this.authHint
+                    ? `Authentication failed. Please check your credentials or ${this.authHint}.`
+                    : 'Authentication failed. Please check your credentials.',
                 raw: text
             });
             return 'reported-complete';

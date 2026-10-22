@@ -15,6 +15,8 @@ export function useMcodeModelsForCwd(args: {
     currentEffort: string | null
     isLoading: boolean
     error: string | null
+    /** Asks the machine again - a failed probe is worth another try. */
+    refetch: () => void
 } {
     const { api, machineId, cwd } = args
     const trimmedCwd = typeof cwd === 'string' ? cwd.trim() : ''
@@ -48,5 +50,8 @@ export function useMcodeModelsForCwd(args: {
                 : query.error
                     ? 'Failed to load MiniMax Code models'
                     : null,
+        refetch: () => {
+            void query.refetch()
+        },
     }
 }

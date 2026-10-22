@@ -9,6 +9,7 @@ import {
 import { getDefaultClaudeCodePath } from '@/claude/sdk/utils'
 import { resolveCodexCommand } from '@/codex/utils/codexExecutable'
 import { resolveDshAcpCommand } from '@/dsh/utils/dshBackend'
+import { readMcodeAuthState } from '@/mcode/utils/mcodeAuthState'
 import { getAgentLaunchCommand, resolveExecutable } from './agentLaunchCommand'
 
 type LaunchEnvironment = Record<string, string | undefined>
@@ -94,6 +95,15 @@ export function getAgentAvailability(
     }
 
     if (hasResolvableCommand(spec, env)) {
+        // An agent that is installed but has no account cannot work: the user
+        // has to sign in first, and the reason has to reach them - "not
+        // installed" would send them looking for the wrong thing.
+        if (agent === 'mcode') {
+            const auth = readMcodeAuthState({ home: env.HOME ?? env.USERPROFILE })
+            if (auth.status === 'unauthenticated' || auth.status === 'expired') {
+                return { agent, available: false, reason: 'not_signed_in' }
+            }
+        }
         return { agent, available: true }
     }
     return {
@@ -114,6 +124,13 @@ export function getAgentAvailabilityResponse(
 }
 
 export function agentUnavailableMessage(entry: AgentAvailabilityEntry): string {
+    if (entry.reason === 'not_signed_in') {
+        // Only MiniMax Code reports this today, and it has a login command.
+        // Another agent would get a phrase that is true for it as well.
+        return entry.agent === 'mcode'
+            ? `${entry.agent} is not signed in - run "mcode login" on the machine`
+            : `${entry.agent} is not signed in - sign in to it on the machine`;
+    }
     const detail = entry.reason === 'invalid_configuration'
         ? 'has invalid runner configuration'
         : 'is not installed or is not on PATH'

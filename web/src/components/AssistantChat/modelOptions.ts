@@ -1,4 +1,4 @@
-import { getAgyModelLabel } from '@hapi/protocol'
+import { formatMcodeModelLabel, getAgyModelLabel } from '@hapi/protocol'
 import { MODEL_OPTIONS } from '@/components/NewSession/types'
 import { CURSOR_AUTO_MODEL_LABEL } from '@/lib/cursorModelOptions'
 import { getClaudeComposerModelOptions, getNextClaudeComposerModel } from './claudeModelOptions'
@@ -124,6 +124,16 @@ export function getModelOptionsForFlavor(
     if (flavor === 'claude') {
         return getClaudeModelOptions(currentModel, customOptions)
     }
+    if (flavor === 'mcode') {
+        // The agent publishes its catalog through the ACP `model` config
+        // option. A model the machine stopped advertising stays selectable -
+        // the session may still be running it - but it gets a readable label
+        // instead of the wire id.
+        if (customOptions && customOptions.length > 0) {
+            return withCurrentModelOption(customOptions, currentModel, formatMcodeModelLabel)
+        }
+        return withCurrentModelOption([{ value: null, label: 'Default' }], currentModel, formatMcodeModelLabel)
+    }
     if (customOptions && customOptions.length > 0) {
         if (flavor === 'cursor') {
             const normalizedCurrent = normalizeCurrentModel(currentModel)
@@ -148,12 +158,6 @@ export function getModelOptionsForFlavor(
     }
     // Kimi has no predefined model list — show just the auto/default option.
     if (flavor === 'kimi') {
-        return withCurrentModelOption([{ value: null, label: 'Default' }], currentModel)
-    }
-    // MiniMax Code publishes its catalog through the ACP `model` config option;
-    // until those options arrive, show just the auto/default option rather
-    // than the Claude fallback.
-    if (flavor === 'mcode') {
         return withCurrentModelOption([{ value: null, label: 'Default' }], currentModel)
     }
     if (flavor === 'copilot') {

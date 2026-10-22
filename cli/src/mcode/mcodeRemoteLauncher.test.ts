@@ -1879,6 +1879,21 @@ describe('mcodeRemoteLauncher refused turn', () => {
         queue.close()
     }, 25_000)
 
+    it('says why the agent could not be started', async () => {
+        // "mcode is not installed" and "mcode is not signed in" lead to
+        // different actions, so the message has to name one of them.
+        const backend = createBackend({
+            initialize: vi.fn(async () => {
+                throw new Error('Failed to spawn mcode: spawn mcode ENOENT. Is it installed and on PATH?')
+            })
+        })
+        const { session } = createSteerSession()
+
+        // The failure carries the reason, so the runner can tell the user what
+        // to do instead of leaving a grey session behind.
+        await expect(mcodeRemoteLauncher(session as never, {})).rejects.toThrow(/not installed/)
+    })
+
     it('gives up on an agent that keeps dying instead of restarting forever', async () => {
         // An agent that dies on every start must not turn into a restart
         // loop: the session ends with a message that says so.

@@ -124,4 +124,56 @@ describe('agent executable resolution', () => {
 
         expect(resolveExecutable(appCommand, { pathValue: '' })).toBe(appCommand)
     })
+
+    it('reports a MiniMax Code install without an account as not signed in', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'hapi-agent-path-'))
+        const home = await mkdtemp(join(tmpdir(), 'hapi-agent-home-'))
+        await makeExecutable(directory, 'mcode')
+        const accountDir = join(home, '.minimax', 'auth', 'prod', 'cn', 'mcode-public')
+        await mkdir(accountDir, { recursive: true })
+        await writeFile(join(accountDir, 'auth-state.json'), JSON.stringify({
+            status: 'unauthenticated',
+            region: 'cn',
+        }))
+
+        expect(getAgentAvailability('mcode', {
+            PATH: directory,
+            HOME: home,
+        })).toEqual({
+            agent: 'mcode',
+            available: false,
+            reason: 'not_signed_in',
+        })
+    })
+
+    it('keeps a signed-in MiniMax Code install available', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'hapi-agent-path-'))
+        const home = await mkdtemp(join(tmpdir(), 'hapi-agent-home-'))
+        await makeExecutable(directory, 'mcode')
+        const accountDir = join(home, '.minimax', 'auth', 'prod', 'cn', 'mcode-public')
+        await mkdir(accountDir, { recursive: true })
+        await writeFile(join(accountDir, 'auth-state.json'), JSON.stringify({
+            status: 'authenticated',
+            region: 'cn',
+            expiresAtMs: Date.now() + 3_600_000,
+        }))
+
+        expect(getAgentAvailability('mcode', {
+            PATH: directory,
+            HOME: home,
+        })).toEqual({ agent: 'mcode', available: true })
+    })
+
+    it('keeps a MiniMax Code install without a readable account available', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'hapi-agent-path-'))
+        const home = await mkdtemp(join(tmpdir(), 'hapi-agent-home-'))
+        await makeExecutable(directory, 'mcode')
+
+        // The account may live somewhere the agent keeps to itself, so an
+        // unreadable state must not lock the agent out.
+        expect(getAgentAvailability('mcode', {
+            PATH: directory,
+            HOME: home,
+        })).toEqual({ agent: 'mcode', available: true })
+    })
 })

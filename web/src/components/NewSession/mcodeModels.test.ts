@@ -67,7 +67,9 @@ describe('MiniMax Code Create-session options', () => {
             { modelId: 'm:minimax:MiniMax-M3:v:thinking', name: 'M3 · thinking' }
         ])).toEqual([
             { value: 'auto', label: 'Default' },
-            { value: 'm:minimax:MiniMax-M3:v:', label: 'm:minimax:MiniMax-M3:v:' },
+            // A model without a name still gets a readable label - the wire id
+            // is never what the user reads.
+            { value: 'm:minimax:MiniMax-M3:v:', label: 'MiniMax-M3' },
             { value: 'm:minimax:MiniMax-M3:v:thinking', label: 'M3 · thinking' }
         ])
     })

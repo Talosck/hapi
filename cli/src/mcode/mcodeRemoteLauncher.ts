@@ -23,6 +23,7 @@ import type { MessageBuffer } from '@/ui/ink/messageBuffer';
 import type { McodeSession } from './session';
 import type { McodeMode, PermissionMode } from './types';
 import { createMcodeBackend } from './utils/mcodeBackend';
+import { classifyMcodeConnectFailure } from './utils/mcodeConnectFailure';
 import type { AcpSessionStateUpdate } from '@/agent/backends/acp';
 import { isAcpIndeterminateError } from '@/agent/backends/acp/AcpStdioTransport';
 import { McodePermissionHandler } from './utils/permissionHandler';
@@ -440,9 +441,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             return { acpSessionId, backend };
         } catch (error) {
             logger.warn('[mcode-remote] could not start MiniMax Code again', error);
+            // The failure already says what is wrong - it names the reason the
+            // agent gave ("not installed", "not signed in").
             session.sendSessionEvent({
                 type: 'message',
-                message: `MiniMax Code could not be started again: ${error instanceof Error ? error.message : String(error)}`
+                message: `MiniMax Code could not be started again. ${error instanceof Error ? error.message : String(error)}`
             });
             this.shouldExit = true;
             return null;
@@ -475,7 +478,18 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             messageBuffer.addMessage(error.message, 'status');
         });
 
-        await backend.initialize();
+        try {
+            await backend.initialize();
+        } catch (error) {
+            // The agent says why it cannot start - it knows the difference
+            // between "not installed" and "not signed in". The user needs that
+            // difference too: a session that goes quiet leaves them guessing.
+            // The message is sent by the caller, which knows whether this was
+            // the first start or a restart.
+            const failure = classifyMcodeConnectFailure(error);
+            logger.warn('[mcode-remote] MiniMax Code could not be started', failure.reason, failure.detail);
+            throw new Error(failure.message, { cause: error });
+        }
 
         // The agent advertises its extension surface (methods it accepts and
         // notifications it emits) in the initialize response. MiniMax Code

@@ -705,6 +705,9 @@ function SessionChatInner(props: SessionChatProps) {
         setRewindForkFallback(null)
     }, [onForkConversation, rewindForkFallback])
     const sessionInactive = !props.session.active
+    // Why the session ended. Without it, an agent that could not start at all
+    // is just a grey screen with a hint to type a message.
+    const sessionArchiveReason = props.session.metadata?.archiveReason ?? null
     const inactiveCanResume = inactiveSessionCanResume(
         props.session,
         props.messages.length,
@@ -2068,6 +2071,9 @@ function SessionChatInner(props: SessionChatProps) {
                     {inactiveCanResume
                         ? t('session.inactive.autoResume')
                         : t('session.inactive.cannotResume')}
+                    {sessionArchiveReason ? (
+                        <div className="mt-1 text-xs opacity-80">{sessionArchiveReason}</div>
+                    ) : null}
                 </div>
             ) : null}
 

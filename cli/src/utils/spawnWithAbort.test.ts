@@ -112,6 +112,34 @@ describe('spawnWithAbort', () => {
             await expect(p).resolves.toBeUndefined();
         });
 
+        it('puts the agent\'s own words into the failure when stderr is captured', async () => {
+            // The agent says why it refused to start; that sentence is the
+            // only thing the user can act on.
+            const stderrEmitter = new EventEmitter();
+            spawnMock.mockImplementationOnce(() => {
+                childEmitter = Object.assign(new EventEmitter(), {
+                    exitCode: null,
+                    killed: false,
+                    pid: 12345,
+                    stderr: stderrEmitter,
+                });
+                return childEmitter;
+            });
+            const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+            try {
+                const { opts } = makeOptions({ captureStderr: true });
+                const p = spawnWithAbort(opts);
+                await waitForExitListener();
+                stderrEmitter.emit('data', Buffer.from('Session not found\n'));
+                childEmitter.emit('exit', 1, null);
+                await expect(p).rejects.toThrow('Process exited with code: 1. Session not found');
+                // The user still sees everything the agent says.
+                expect(stderrWrite).toHaveBeenCalled();
+            } finally {
+                stderrWrite.mockRestore();
+            }
+        });
+
         it('rejects when process exits with non-zero code', async () => {
             const { opts } = makeOptions();
             const p = spawnWithAbort(opts);

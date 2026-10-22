@@ -407,4 +407,15 @@ describe('getModelOptionsForFlavor — pi normalize filter', () => {
             { value: 'custom-model', label: 'custom-model' }
         ])
     })
+    it('labels a MiniMax Code model the machine no longer publishes readably', () => {
+        const live = [{ value: 'm:minimax:MiniMax-M3:v:thinking', label: 'M3 · thinking' }]
+
+        const options = getModelOptionsForFlavor('mcode', 'm:minimax:MiniMax-M3:v:', live)
+
+        // The model stays selectable, but the user does not read a wire id.
+        expect(options.some((option) => option.value === 'm:minimax:MiniMax-M3:v:')).toBe(true)
+        const kept = options.find((option) => option.value === 'm:minimax:MiniMax-M3:v:')
+        expect(kept?.label).toBe('MiniMax-M3')
+        expect(options.some((option) => option.label === 'm:minimax:MiniMax-M3:v:')).toBe(false)
+    })
 })

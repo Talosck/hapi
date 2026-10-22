@@ -32,6 +32,8 @@ const mocks = vi.hoisted(() => ({
     mcodeModelsError: null as string | null,
     mcodeEffortOptions: [] as Array<{ value: string; name?: string }>,
     mcodeApps: [] as Array<{ provider: string; toolCount: number; tools: unknown[] }>,
+    mcodeAppsError: null as string | null,
+    refetchMcodeModels: vi.fn(),
     opencodeModels: [] as Array<{ modelId: string; name?: string }>,
     opencodeCurrentModelId: null as string | null,
     opencodeModelsLoading: false,
@@ -190,7 +192,8 @@ vi.mock('@/hooks/queries/useMcodeModelsForCwd', () => ({
         effortOptions: mocks.mcodeEffortOptions,
         currentEffort: null,
         isLoading: mocks.mcodeModelsLoading,
-        error: mocks.mcodeModelsError
+        error: mocks.mcodeModelsError,
+        refetch: mocks.refetchMcodeModels
     })
 }))
 vi.mock('@/hooks/queries/useMcodeApps', () => ({
@@ -198,7 +201,7 @@ vi.mock('@/hooks/queries/useMcodeApps', () => ({
         apps: mocks.mcodeApps,
         auth: null,
         isLoading: false,
-        error: null
+        error: mocks.mcodeAppsError
     })
 }))
 vi.mock('@/hooks/queries/usePiModelsForMachine', () => ({
@@ -355,6 +358,7 @@ describe('NewSession launch preferences', () => {
         mocks.mcodeModelsError = null
         mocks.mcodeEffortOptions = []
         mocks.mcodeApps = []
+        mocks.mcodeAppsError = null
         mocks.opencodeModels = [{ modelId: 'provider/current', name: 'Current' }]
         mocks.opencodeCurrentModelId = 'provider/current'
         mocks.opencodeModelsLoading = false
@@ -612,6 +616,67 @@ describe('NewSession launch preferences', () => {
 
         await waitFor(() => {
             expect(screen.getByTestId('mcode-efforts')).toHaveTextContent('Low,Max')
+        })
+    })
+
+    it('tells the user when the machine takes away the model they picked', async () => {
+        mocks.mcodeModels = [{ modelId: 'm:minimax:MiniMax-M3:v:', name: 'M3' }]
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory={'C:\\repo'}
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByDisplayValue('mcode'))
+
+        await waitFor(() => {
+            expect(screen.getByTestId('model-options')).toHaveTextContent('Default,M3')
+        })
+
+        mocks.nextModelValue = 'm:minimax:MiniMax-M3:v:'
+        fireEvent.click(screen.getByTestId('model'))
+        await waitFor(() => {
+            expect(screen.getByTestId('model')).toHaveTextContent('m:minimax:MiniMax-M3:v:')
+        })
+
+        // The machine stops offering that model. The form falls back to the
+        // default, and the user has to be told: a silent reset looks like the
+        // choice never took.
+        mocks.mcodeModels = [{ modelId: 'm:minimax:MiniMax-M3:v:thinking', name: 'M3 · thinking' }]
+        fireEvent.click(screen.getByTestId('reasoning'))
+
+        await waitFor(() => {
+            expect(screen.getByText('newSession.model.mcodeReset')).toBeTruthy()
+        })
+    })
+
+    it('says that the connected apps could not be read instead of showing an empty list', async () => {
+        // An empty list reads as "nothing is connected". The reason tells the
+        // user whether the machine has no apps or HAPI could not look.
+        mocks.mcodeAppsError = 'No MiniMax Code host is running, so the connected apps cannot be read.'
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory={'C:\\repo'}
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByDisplayValue('mcode'))
+
+        await waitFor(() => {
+            expect(screen.getByText('newSession.apps.unavailable')).toBeTruthy()
+            expect(screen.getByText(/No MiniMax Code host is running/)).toBeTruthy()
         })
     })
 

@@ -48,6 +48,9 @@ export async function mcodeLocal(opts: McodeLocalOptions): Promise<void> {
         spawnName: 'mcode',
         installHint: 'MiniMax Code CLI (https://agent.minimax.io/docs/cli/quick-start)',
         includeCause: true,
-        logExit: true
+        logExit: true,
+        // The TUI says why it refuses to open a session that is gone; keeping
+        // that sentence is what turns "exit code 1" into an answer.
+        captureStderr: true,
     });
 }

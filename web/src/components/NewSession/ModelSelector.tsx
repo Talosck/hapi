@@ -11,6 +11,8 @@ export function ModelSelector(props: {
     isDisabled: boolean
     isLoading?: boolean
     error?: string | null
+    /** Asks the machine again - a failed catalog is worth another try. */
+    onRetry?: () => void
     onModelChange: (value: string) => void
 }) {
     const { t } = useTranslation()
@@ -49,8 +51,19 @@ export function ModelSelector(props: {
                 )))}
             </SelectControl>
             {props.error ? (
-                <div className="text-xs text-red-600">
-                    {props.error}
+                <div className="flex flex-col gap-1.5">
+                    <div className="text-xs text-red-600">
+                        {props.error}
+                    </div>
+                    {props.onRetry ? (
+                        <button
+                            type="button"
+                            onClick={props.onRetry}
+                            className="self-start rounded border border-[var(--app-divider)] px-2 py-1 text-xs text-[var(--app-link)] hover:bg-[var(--app-secondary-bg)]"
+                        >
+                            {t('button.retry')}
+                        </button>
+                    ) : null}
                 </div>
             ) : null}
         </div>

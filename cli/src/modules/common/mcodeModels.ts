@@ -28,7 +28,24 @@ interface CacheEntry {
  * for an answer that had not changed.
  */
 const CACHE_TTL_MS = 30 * 60_000;
-const PROBE_TIMEOUT_MS = 30_000;
+/**
+ * The budget of one probe, in total.
+ *
+ * The probe sends up to three requests (initialize, session/load,
+ * session/new), and each of them may wait for its own timeout - a probe of a
+ * broken agent would keep a client waiting for a minute and a half. The
+ * requests share one budget instead, so the probe gives up in a time the user
+ * can wait through.
+ */
+const PROBE_DEADLINE_MS = 20_000;
+/**
+ * A failed probe is kept for a short while.
+ *
+ * A probe that fails usually fails because the agent is missing or has no
+ * account - the same answer for every request. Without this, every request
+ * paid for another process spawn.
+ */
+const FAILURE_CACHE_TTL_MS = 60_000;
 /**
  * The catalog comes from the provider configuration, not from the workspace:
  * the probe runs in a fixed directory, so every cwd shares one answer. The
@@ -227,6 +244,11 @@ async function runMcodeProbe(_cwd: string): Promise<ListMcodeModelsForCwdRespons
         args: ['acp']
     });
 
+    // Every request of the probe shares one budget: the time that is left is
+    // what a request may take.
+    const deadline = Date.now() + PROBE_DEADLINE_MS;
+    const remainingBudget = () => Math.max(1_000, deadline - Date.now());
+
     let probeSessionId: string | null = null;
     try {
         const initResponse = await transport.sendRequest('initialize', {
@@ -239,7 +261,7 @@ async function runMcodeProbe(_cwd: string): Promise<ListMcodeModelsForCwdRespons
                 name: 'hapi-mcode-models',
                 version: packageJson.version
             }
-        }, { timeoutMs: PROBE_TIMEOUT_MS });
+        }, { timeoutMs: remainingBudget() });
 
         if (!isObject(initResponse) || typeof initResponse.protocolVersion !== 'number') {
             return { success: false, error: 'Invalid initialize response from mcode acp' };
@@ -253,7 +275,7 @@ async function runMcodeProbe(_cwd: string): Promise<ListMcodeModelsForCwdRespons
                     sessionId: previousSessionId,
                     cwd: probeCwd,
                     mcpServers: []
-                }, { timeoutMs: PROBE_TIMEOUT_MS });
+                }, { timeoutMs: remainingBudget() });
                 probeSessionId = previousSessionId;
             } catch (error) {
                 logger.debug('MiniMax Code probe session is no longer loadable; creating a new one:', error);
@@ -265,7 +287,7 @@ async function runMcodeProbe(_cwd: string): Promise<ListMcodeModelsForCwdRespons
             response = await transport.sendRequest('session/new', {
                 cwd: probeCwd,
                 mcpServers: []
-            }, { timeoutMs: PROBE_TIMEOUT_MS });
+            }, { timeoutMs: remainingBudget() });
             probeSessionId = isObject(response) ? asString(response.sessionId) : null;
             if (probeSessionId) await writeProbeSessionId(probeSessionId);
         }
@@ -342,6 +364,15 @@ export async function listMcodeModelsForCwd(
                 };
                 cache.set(PROBE_CACHE_KEY, entry);
                 await writeDiskCache(entry);
+            } else {
+                // The failure is kept for a moment: a broken agent answers the
+                // same way every time, and every request would otherwise pay
+                // for another process spawn. It is not written to disk - the
+                // next runner should try again.
+                cache.set(PROBE_CACHE_KEY, {
+                    expiresAt: Date.now() + FAILURE_CACHE_TTL_MS,
+                    response
+                });
             }
             return response;
         } catch (error) {

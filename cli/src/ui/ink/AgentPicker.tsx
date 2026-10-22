@@ -13,7 +13,11 @@ export function formatAgentChoice(entry: AgentAvailabilityEntry): string {
     if (entry.available) return label
     const reason = entry.reason === 'invalid_configuration'
         ? 'invalid configuration'
-        : 'not installed or not on PATH'
+        : entry.reason === 'not_signed_in'
+            ? (entry.agent === 'mcode'
+                ? 'not signed in - run "mcode login" on the machine'
+                : 'not signed in - sign in to it on the machine')
+            : 'not installed or not on PATH'
     return `${label} — ${reason}`
 }
 

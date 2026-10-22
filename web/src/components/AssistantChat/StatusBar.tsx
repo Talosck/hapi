@@ -1,7 +1,6 @@
 import {
     getCodexCollaborationModeLabel,
     getCopilotAgentModeLabel,
-    getPermissionModeLabel,
     getPermissionModeTone,
     isPermissionModeAllowedForFlavor
 } from '@hapi/protocol'
@@ -11,6 +10,7 @@ import { useMemo } from 'react'
 import type { AgentState, CodexCollaborationMode, PermissionMode } from '@/types/api'
 import type { ConversationStatus } from '@/realtime/types'
 import { getContextBudgetTokens } from '@/chat/modelConfig'
+import { permissionModeLabelForAgent } from '@/lib/permissionModeLabels'
 import {
     formatReasoningLabel,
     formatCompactReasoningLabel,
@@ -265,7 +265,9 @@ export function StatusBar(props: {
         ? permissionMode
         : null
 
-    const permissionModeLabel = displayPermissionMode ? getPermissionModeLabel(displayPermissionMode) : null
+    const permissionModeLabel = displayPermissionMode
+        ? permissionModeLabelForAgent({ mode: displayPermissionMode, agent: props.agentFlavor, t })
+        : null
     const permissionModeTone = displayPermissionMode ? getPermissionModeTone(displayPermissionMode) : null
     const permissionModeColor = permissionModeTone ? PERMISSION_TONE_CLASSES[permissionModeTone] : 'text-[var(--app-hint)]'
     const displayCollaborationMode = props.agentFlavor === 'codex' && props.collaborationMode === 'plan'

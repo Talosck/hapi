@@ -288,6 +288,12 @@ mcode login --region global
 You can also bring your own key through the CLI's own provider configuration
 (`mcode provider add ...`). HAPI never stores MiniMax credentials.
 
+HAPI reads the sign-in state the CLI keeps on the machine. When the agent is
+installed but has no account, the create-session form says so ("not signed in -
+run `mcode login` on this machine") instead of leaving MiniMax Code out of the
+agent list without a reason. A session that cannot start for that reason says
+the same thing in the chat.
+
 ### Start a session
 
 ```bash

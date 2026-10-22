@@ -34,4 +34,41 @@ describe('AgentSelector', () => {
     it('renders only Agents reported available by the machine', () => {
         expect(renderedAgentValues(['claude', 'codex'])).toEqual(['claude', 'codex'])
     })
+
+    it('tells the user why an Agent is missing instead of dropping it silently', () => {
+        const { container } = render(
+            <AgentSelector
+                agent={'claude' as AgentType}
+                agents={['claude']}
+                unavailableAgents={[{ agent: 'mcode' as AgentType, reason: 'not_signed_in' }]}
+                isDisabled={false}
+                onAgentChange={() => {}}
+            />
+        )
+
+        // The missing agent is not offered as a choice...
+        const values = Array.from(container.querySelectorAll('input[type="radio"]'))
+            .map((el) => (el as HTMLInputElement).value)
+        expect(values).toEqual(['claude'])
+        // ...but the reason is on screen, because it is what the user acts on.
+        expect(container.textContent).toContain('newSession.agentUnavailable.notSignedIn')
+    })
+
+    it('names the reason an Agent is unavailable', () => {
+        const { container } = render(
+            <AgentSelector
+                agent={'claude' as AgentType}
+                agents={['claude']}
+                unavailableAgents={[
+                    { agent: 'mcode' as AgentType, reason: 'not_found' },
+                    { agent: 'codex' as AgentType, reason: 'invalid_configuration' },
+                ]}
+                isDisabled={false}
+                onAgentChange={() => {}}
+            />
+        )
+
+        expect(container.textContent).toContain('newSession.agentUnavailable.notFound')
+        expect(container.textContent).toContain('newSession.agentUnavailable.invalidConfiguration')
+    })
 })

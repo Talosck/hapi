@@ -1,3 +1,4 @@
+import { formatMcodeModelLabel } from '@hapi/protocol'
 import type { McodeModelSummary } from '@/types/api'
 import type { AgentType } from './types'
 
@@ -53,7 +54,10 @@ export function buildMcodeModelOptions(
         { value: 'auto', label: defaultLabel },
         ...availableModels.map((model) => ({
             value: model.modelId,
-            label: model.name ?? model.modelId
+            // The name the agent publishes is the one the user knows. A model
+            // without a name still gets a readable label - the wire id is
+            // never shown as one.
+            label: model.name ?? formatMcodeModelLabel(model.modelId) ?? model.modelId
         }))
     ]
 }

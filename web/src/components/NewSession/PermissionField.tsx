@@ -1,12 +1,12 @@
 import {
     getAgentConfigDescriptor,
-    getPermissionModeLabel,
     getLaunchPermissionModesForFlavor,
     resolveHapiYoloPermissionMode,
     type PermissionMode
 } from '@hapi/protocol'
 import { useTranslation } from '@/lib/use-translation'
 import { usesNativePermissionSelect } from '@/lib/codexFamilyPermissionAgents'
+import { permissionModeLabelForAgent } from '@/lib/permissionModeLabels'
 import type { AgentType } from './types'
 import { SelectControl } from '@/components/ui/select-control'
 import { YoloToggle } from './YoloToggle'
@@ -78,7 +78,7 @@ export function PermissionField(props: PermissionFieldProps) {
                             && props.autoPermissionModeSupported === false
                         return (
                             <option key={mode} value={mode} disabled={unavailable}>
-                                {getPermissionModeLabel(mode)}{unavailable ? ` (${t('newSession.grokAutoUnavailable')})` : ''}
+                                {permissionModeLabelForAgent({ mode, agent: props.agent, t })}{unavailable ? ` (${t('newSession.grokAutoUnavailable')})` : ''}
                             </option>
                         )
                     })}
@@ -101,7 +101,7 @@ export function PermissionField(props: PermissionFieldProps) {
             yoloMode={props.yoloMode}
             isDisabled={props.isDisabled}
             onToggle={props.onYoloToggle}
-            nativeHint={nativeHint ? getPermissionModeLabel(nativeHint) : undefined}
+            nativeHint={nativeHint ? permissionModeLabelForAgent({ mode: nativeHint, agent: props.agent, t }) : undefined}
         />
     )
 }

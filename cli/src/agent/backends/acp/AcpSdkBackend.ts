@@ -2,6 +2,7 @@ import type { AgentFlavor } from '@hapi/protocol';
 import type { AgentBackend, AgentMessage, AgentSessionConfig, PermissionRequest, PermissionResponse, PromptContent } from '@/agent/types';
 import { asString, isObject } from '@hapi/protocol';
 import { AcpStdioTransport, type AcpStderrError } from './AcpStdioTransport';
+import { authHintForFlavor } from './acpAuthHint';
 import { AcpMessageHandler, type AcpTextChunkMode } from './AcpMessageHandler';
 import { ACP_SESSION_UPDATE_TYPES } from './constants';
 import { ACP_MODEL_CONFIG_ID, extractModelCatalog, findModelConfigOption, findThinkingEffortConfigOption } from './acpConfigOptions';
@@ -229,7 +230,10 @@ export class AcpSdkBackend implements AgentBackend {
         const transport = await AcpStdioTransport.create({
             command: this.options.command,
             args: this.options.args,
-            env: this.options.env
+            env: this.options.env,
+            // The transport reads the standard error of every agent, so the
+            // hint has to name the agent that is actually running.
+            authHint: authHintForFlavor(this.options.flavor),
         });
 
         if (this.transport) {

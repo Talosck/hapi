@@ -13,6 +13,7 @@ import { registerSessionConfigRpc } from '@/agent/sessionConfigRpc';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import { registerMcodeSessionModelHandlers } from '@/modules/common/handlers/mcodeModels';
+import { classifyMcodeConnectFailure, mcodeConnectFailureArchiveReason } from './utils/mcodeConnectFailure';
 
 export async function runMcode(opts: {
     startedBy?: 'runner' | 'terminal';
@@ -194,6 +195,13 @@ export async function runMcode(opts: {
     } catch (error) {
         crashed = true;
         lifecycle.markCrash(error);
+        // A session that ends because the agent could not start says why, so
+        // the client can tell the user what to do about it.
+        const failure = classifyMcodeConnectFailure(error);
+        if (failure.reason !== 'unknown') {
+            lifecycle.setArchiveReason(mcodeConnectFailureArchiveReason(failure));
+            session.sendSessionEvent({ type: 'message', message: failure.message });
+        }
         logger.debug('[mcode] Loop error:', error);
     } finally {
         const localFailure = sessionWrapperRef.current?.localLaunchFailure;
