@@ -5,7 +5,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
 import { AssistantRuntimeProvider, useAui, useAuiState } from '@assistant-ui/react'
 import { DragDropZone } from '@/components/AssistantChat/DragDropZone'
-import { ApiError, type ApiClient } from '@/api/client'
+import { ApiError, apiErrorMessage, type ApiClient } from '@/api/client'
 import type {
     AgyModelSummary,
     AttachmentMetadata,
@@ -47,6 +47,7 @@ import { AgentWaitingNotice } from '@/components/AssistantChat/AgentWaitingNotic
 import { QueuedMessagesBar } from '@/components/AssistantChat/QueuedMessagesBar'
 import { ScratchlistDrawer } from '@/components/AssistantChat/ScratchlistPanel'
 import { useHubScratchlist } from '@/lib/use-hub-scratchlist'
+import { useToast } from '@/lib/toast-context'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { formatSessionMentionTooltip } from '@/lib/sessionReference'
@@ -131,19 +132,36 @@ import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
 type SessionModelSelection = { provider: string; modelId: string } | string | null
 
 /**
- * Query key to invalidate after a successful model switch on an opencode
- * session, or null for other flavors. The effort-options query caches per
- * session (not per model), so without invalidation a stale option list from
- * the previous model survives the switch.
+ * Whether the agent accepts a steer.
+ *
+ * A MiniMax Code build that does not advertise `mcode/session/steer` refuses
+ * the call, and a CLI that predates the capability bit says nothing about it
+ * - so only an explicit "no" turns the action off.
  */
-export function opencodeEffortOptionsInvalidationKey(
+export function isSteerExtensionSupported(metadata: Session['metadata'] | null | undefined): boolean {
+    if (metadata?.flavor !== 'mcode') return true
+    return metadata.capabilities?.mcodeExtensions?.steer !== false
+}
+
+/**
+ * Query key to invalidate after a model switch, or null for other flavors.
+ *
+ * These queries cache per session (not per model), so without invalidation a
+ * stale option list from the previous model survives the switch. A model can
+ * also change outside HAPI - the agent switches it, or the local TUI does - so
+ * the invalidation follows `session.model` rather than the web's own action.
+ */
+export function modelOptionsInvalidationKey(
     agentFlavor: string | null | undefined,
     sessionId: string
 ): readonly unknown[] | null {
-    if (agentFlavor !== 'opencode') {
-        return null
+    if (agentFlavor === 'opencode') {
+        return queryKeys.sessionOpencodeReasoningEffortOptions(sessionId)
     }
-    return queryKeys.sessionOpencodeReasoningEffortOptions(sessionId)
+    if (agentFlavor === 'mcode') {
+        return queryKeys.sessionMcodeModels(sessionId)
+    }
+    return null
 }
 
 export function isRewindForkFallbackError(error: unknown): boolean {
@@ -639,6 +657,7 @@ export function SessionChat(props: SessionChatProps) {
 function SessionChatInner(props: SessionChatProps) {
     const { haptic } = usePlatform()
     const { t } = useTranslation()
+    const { addToast } = useToast()
     const { codexExplorationCollapsed } = useCodexExplorationCollapse()
     const navigate = useNavigate()
     const [historyActionPending, setHistoryActionPending] = useState(false)
@@ -992,11 +1011,12 @@ function SessionChatInner(props: SessionChatProps) {
     const sessionModel = props.session.model
     const sessionId = props.session.id
     useEffect(() => {
-        const effortInvalidationKey = opencodeEffortOptionsInvalidationKey(agentFlavor, sessionId)
+        const effortInvalidationKey = modelOptionsInvalidationKey(agentFlavor, sessionId)
         if (!effortInvalidationKey || sessionModel === undefined) return
         void queryClient.resetQueries({ queryKey: effortInvalidationKey, exact: true })
     }, [agentFlavor, sessionId, sessionModel, queryClient])
     const controlledByUser = props.session.agentState?.controlledByUser === true && !props.session.metadata?.capabilities?.concurrentClients
+    const mcodeSteerSupported = isSteerExtensionSupported(props.session.metadata)
     const codexCollaborationModeSupported = agentFlavor === 'codex' && !controlledByUser
     const codexModelsState = useCodexModels({
         api: props.api,
@@ -1069,14 +1089,14 @@ function SessionChatInner(props: SessionChatProps) {
     const grokModelOptions = useMemo(() => (
         agentFlavor === 'grok'
             ? [
-                { value: null, label: 'Default' },
+                { value: null, label: t('newSession.model.default') },
                 ...grokModelsState.availableModels.map((model) => ({
                     value: model.modelId,
                     label: model.name ?? model.modelId
                 }))
             ]
             : undefined
-    ), [agentFlavor, grokModelsState.availableModels])
+    ), [agentFlavor, grokModelsState.availableModels, t])
     const copilotModelsState = useCopilotModels({
         api: props.api,
         sessionId: props.session.id,
@@ -1124,14 +1144,14 @@ function SessionChatInner(props: SessionChatProps) {
     const mcodeModelOptions = useMemo(() => (
         agentFlavor === 'mcode' && mcodeModelsState.availableModels.length > 0
             ? [
-                { value: null, label: 'Default' },
+                { value: null, label: t('newSession.model.default') },
                 ...mcodeModelsState.availableModels.map((model) => ({
                     value: model.modelId,
                     label: model.name ?? model.modelId
                 }))
             ]
             : undefined
-    ), [agentFlavor, mcodeModelsState.availableModels])
+    ), [agentFlavor, mcodeModelsState.availableModels, t])
     const mcodeEffortOptions = useMemo(() => (
         agentFlavor === 'mcode'
             ? mcodeModelsState.effortOptions
@@ -1517,6 +1537,9 @@ function SessionChatInner(props: SessionChatProps) {
             tasks: props.session.todos,
             blocks: reconciled.blocks,
             messages: normalizedMessages,
+            // The delegation tree is session state: it has to survive paging
+            // into the history, so it is read from the full message list.
+            snapshotMessages: normalizedGoalStateMessages,
             backgroundTaskCount: props.session.backgroundTaskCount,
             // The MiniMax Code goal controls live in this panel, so it has to
             // render even when the session has no status to show yet —
@@ -1525,6 +1548,9 @@ function SessionChatInner(props: SessionChatProps) {
             // of the agent's connector tools.
             alwaysVisible: props.session.metadata?.capabilities?.mcodeExtensions?.goalCreate === true
                 || (mcodeAppsState?.apps.length ?? 0) > 0
+                // The panel is where the probe failure is reported, so it has
+                // to stay when the probe failed.
+                || Boolean(mcodeAppsState?.error)
         }),
         [
             reduced.latestGoal,
@@ -1532,8 +1558,10 @@ function SessionChatInner(props: SessionChatProps) {
             props.session.backgroundTaskCount,
             reconciled.blocks,
             normalizedMessages,
+            normalizedGoalStateMessages,
             props.session.metadata?.capabilities?.mcodeExtensions?.goalCreate,
-            mcodeAppsState?.apps.length
+            mcodeAppsState?.apps.length,
+            mcodeAppsState?.error
         ]
     )
 
@@ -1684,6 +1712,17 @@ function SessionChatInner(props: SessionChatProps) {
         } catch (e) {
             haptic.notification('error')
             console.error('Failed to set model:', e)
+            // A model switch that fails silently looks like a switch that
+            // worked: the picker shows the new model while the agent kept
+            // running the old one.
+            addToast({
+                title: t('session.modelChange.failed'),
+                // The body is the reason; when there is none, the title says
+                // it again rather than leaving an empty toast.
+                body: apiErrorMessage(e, '') || t('session.modelChange.failed'),
+                sessionId: props.session.id,
+                url: window.location.href
+            })
         }
     }, [
         agentFlavor,
@@ -1692,7 +1731,10 @@ function SessionChatInner(props: SessionChatProps) {
         setModelReasoningEffort,
         setModel,
         props.onRefresh,
-        haptic
+        haptic,
+        addToast,
+        t,
+        props.session.id
     ])
 
     const handleCursorBaseModelChange = useCallback(async (baseKey: string | null) => {
@@ -2012,6 +2054,7 @@ function SessionChatInner(props: SessionChatProps) {
                     data={sessionStatus}
                     goalControls={mcodeGoalControls}
                     apps={mcodeAppsState}
+                    active={props.session.active}
                 />
             ) : null}
 
@@ -2141,7 +2184,11 @@ function SessionChatInner(props: SessionChatProps) {
                                     && (agentFlavor === 'pi'
                                         ? props.session.thinking
                                         : props.session.agentState?.steeringActive === true)
-                                    && !controlledByUser}
+                                    && !controlledByUser
+                                    // An agent that does not advertise the
+                                    // steer extension refuses the call, so the
+                                    // button would be a dead one.
+                                    && mcodeSteerSupported}
                             />
                         </div>
 

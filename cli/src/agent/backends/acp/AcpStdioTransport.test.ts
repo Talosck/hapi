@@ -242,6 +242,30 @@ describe('AcpStdioTransport plain-text stdout', () => {
         await transport.close();
     });
 
+    test('keeps the agent\'s own answer on the error', async () => {
+        const transport = await AcpStdioTransport.create({ command: 'mcode', args: ['acp'] });
+
+        const pending = transport.sendRequest('session/prompt', { sessionId: 'mvs_1' });
+
+        emitStdout(`${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            error: {
+                code: -32603,
+                message: 'Internal error',
+                data: { details: 'Session already has an active Turn.' }
+            }
+        })}\n`);
+
+        // A caller has to be able to tell the agent's refusal from a broken
+        // transport: the code says the agent answered.
+        const error = await pending.catch((reason: unknown) => reason) as { code?: number; data?: unknown };
+        expect(error.code).toBe(-32603);
+        expect(error.data).toEqual({ details: 'Session already has an active Turn.' });
+
+        await transport.close();
+    });
+
     test('ignores non-object JSON lines without killing the session', async () => {
         const transport = await AcpStdioTransport.create({ command: 'gemini' });
         const pending = transport.sendRequest('initialize');

@@ -451,6 +451,37 @@ describe('reduceChatBlocks', () => {
         expect(reduced.latestGoal).toBeNull()
     })
 
+    it('keeps the goal of another thread when a scoped clear names one thread', () => {
+        // A clear event that names a thread only takes that thread's goal.
+        const otherThread = goalMessage('goal-other', 'active', 3)
+        const otherGoal = (otherThread.content as { goal: ThreadGoal }).goal
+        otherThread.content = {
+            type: 'thread-goal-updated',
+            threadId: 'thread-2',
+            goal: { ...otherGoal, threadId: 'thread-2' }
+        }
+
+        const reduced = reduceChatBlocks([
+            goalMessage('goal-one', 'active', 1),
+            otherThread,
+            goalClearedMessage('goal-cleared', 4)
+        ], null)
+
+        expect(reduced.latestGoal).toMatchObject({ threadId: 'thread-2' })
+    })
+
+    it('clears the goal when the clear event names no thread', () => {
+        const cleared = goalClearedMessage('goal-cleared', 4)
+        cleared.content = { type: 'thread-goal-cleared' }
+
+        const reduced = reduceChatBlocks([
+            goalMessage('goal-one', 'active', 1),
+            cleared
+        ], null)
+
+        expect(reduced.latestGoal).toBeNull()
+    })
+
     it('does not treat later goal slash commands as non-goal activity', () => {
         const reduced = reduceChatBlocks([
             goalMessage('goal-complete', 'complete', 1),

@@ -135,6 +135,7 @@ type ApiClientOptions = {
 type ErrorPayload = {
     error?: unknown
     code?: unknown
+    message?: unknown
 }
 
 function parseErrorCode(bodyText: string): string | undefined {
@@ -146,6 +147,36 @@ function parseErrorCode(bodyText: string): string | undefined {
     } catch {
         return undefined
     }
+}
+
+/**
+ * The message the hub meant, without the transport around it.
+ *
+ * A failed request carries the whole response body in its message
+ * (`HTTP 400 Bad Request: {"success":false,"error":"A goal needs an objective"}`),
+ * which is not something to show a user. The hub always answers with a JSON
+ * body that names the reason, so the reason is extracted here.
+ *
+ * A body that is not such an answer - an HTML error page from a proxy, say -
+ * is not shown either: the caller knows better than the transport what the
+ * user should be told.
+ */
+export function apiErrorMessage(error: unknown, fallback: string): string {
+    if (error instanceof ApiError) {
+        const body = error.body
+        if (body) {
+            try {
+                const parsed = JSON.parse(body) as ErrorPayload
+                if (typeof parsed.error === 'string' && parsed.error.trim()) return parsed.error
+                if (typeof parsed.message === 'string' && parsed.message.trim()) return parsed.message
+            } catch {
+                // Not a JSON body: fall through to the fallback.
+            }
+        }
+        return fallback
+    }
+    if (error instanceof Error && error.message.trim()) return error.message
+    return fallback
 }
 
 export class ApiError extends Error {

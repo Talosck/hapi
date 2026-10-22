@@ -24,6 +24,25 @@ describe('goal tool results', () => {
         expect(parseGoalToolResult(result)).toEqual({ kind: 'goal', goal })
     })
 
+    it('reads the agent timestamps as seconds', () => {
+        // The agent counts goal timestamps in epoch milliseconds; the goal
+        // card renders epoch seconds.
+        const result = parseGoalToolResult({
+            objective: 'Ship it',
+            status: 'active',
+            created_at: 1704067200000,
+            updated_at: 1704067260000
+        })
+
+        expect(result).toEqual({
+            kind: 'goal',
+            goal: expect.objectContaining({
+                createdAt: 1704067200,
+                updatedAt: 1704067260
+            })
+        })
+    })
+
     it('keeps an explicit empty goal distinct from missing results', () => {
         expect(parseGoalToolResult({ goal: null })).toEqual({ kind: 'empty' })
         expect(parseGoalToolResult(undefined)).toBeNull()

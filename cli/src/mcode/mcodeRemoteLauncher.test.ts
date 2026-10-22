@@ -80,6 +80,9 @@ type QueuedMessage = { message: string; mode: McodeMode }
 function createBackend(overrides: Record<string, unknown> = {}) {
     const backend = {
         initialize: vi.fn(async () => {}),
+        // The launcher asks whether the agent process is still there before
+        // it treats a failure as "the agent died".
+        isClosed: vi.fn(() => false),
         newSession: vi.fn(async () => 'mcode-session-1'),
         loadSession: vi.fn(async () => 'mcode-session-1'),
         setModel: vi.fn(async (_sessionId: string, _model: string) => {}),
@@ -166,7 +169,9 @@ function createSession(messages: QueuedMessage[] = [], permissionMode: 'default'
         sendClaudeSessionMessage: vi.fn(),
         updateAgentState: vi.fn(),
         updateMetadata: vi.fn(),
-        emitMessagesConsumed: vi.fn()
+        emitMessagesConsumed: vi.fn(),
+        emitMessagesReleased: vi.fn(),
+        emitMessagesIndeterminate: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -215,7 +220,9 @@ function createScriptedSession() {
         sendClaudeSessionMessage: vi.fn(),
         updateAgentState: vi.fn(),
         updateMetadata: vi.fn(),
-        emitMessagesConsumed: vi.fn()
+        emitMessagesConsumed: vi.fn(),
+        emitMessagesReleased: vi.fn(),
+        emitMessagesIndeterminate: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -262,7 +269,9 @@ function createBlockingSession() {
         sendClaudeSessionMessage: vi.fn(),
         updateAgentState: vi.fn(),
         updateMetadata: vi.fn(),
-        emitMessagesConsumed: vi.fn()
+        emitMessagesConsumed: vi.fn(),
+        emitMessagesReleased: vi.fn(),
+        emitMessagesIndeterminate: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -301,7 +310,9 @@ function createSteerSession() {
         updateMetadata: vi.fn(),
         emitMessagesConsumed: vi.fn(),
         setSteerDeliveryState: vi.fn(async () => true),
-        emitSteerIndeterminate: vi.fn()
+        emitSteerIndeterminate: vi.fn(),
+        emitMessagesReleased: vi.fn(),
+        emitMessagesIndeterminate: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -815,7 +826,12 @@ describe('mcodeRemoteLauncher ACP extensions', () => {
 
         await mcodeRemoteLauncher(session as never, {})
 
-        expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'thread-goal-cleared' })
+        // The thread id tells the web which goal disappeared: without it, a
+        // session that runs several threads drops the goal of all of them.
+        expect(session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'thread-goal-cleared',
+            threadId: 'mcode-session-1'
+        })
     })
 })
 
@@ -1525,7 +1541,9 @@ describe('mcodeRemoteLauncher abort handling', () => {
             sendClaudeSessionMessage: vi.fn(),
             updateAgentState: vi.fn(),
             updateMetadata: vi.fn(),
-            emitMessagesConsumed: vi.fn()
+            emitMessagesConsumed: vi.fn(),
+            emitMessagesReleased: vi.fn(),
+        emitMessagesIndeterminate: vi.fn()
         }
         const session = {
             path: '/tmp/mcode-test',
@@ -1598,6 +1616,50 @@ describe('mcodeRemoteLauncher refused turn', () => {
         queue.close()
     })
 
+    it('gives a refused message back to the hub', async () => {
+        // The batch was acknowledged when it was handed to the agent, and the
+        // agent refused the turn: it never took the message. The hub has to
+        // learn that, or a runner that dies before the retry loses the
+        // message for good - the re-queued copy only lives in this process.
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) throw new Error(BUSY_ERROR)
+            })
+        })
+        const { session, queue, client } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null }, 'local-refused')
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 10_000 })
+
+        expect(client.emitMessagesReleased).toHaveBeenCalledWith(['local-refused'])
+        queue.close()
+    })
+
+    it('does not give a fatally refused message back to the hub', async () => {
+        // The agent will never accept this request, so the message is
+        // dropped. Releasing it would send it round the loop forever.
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                throw new Error('Internal error: MiniMax Code Runtime failed: turn input is invalid')
+            })
+        })
+        const { session, queue, client } = createSteerSession()
+        queue.push('broken', { permissionMode: 'default', model: null }, 'local-broken')
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(1)
+        }, { timeout: 10_000 })
+
+        expect(client.emitMessagesReleased).not.toHaveBeenCalled()
+        queue.close()
+    })
+
     it('keeps the message through several refusals in a row', async () => {
         let promptCalls = 0
         const backend = createBackend({
@@ -1626,6 +1688,202 @@ describe('mcodeRemoteLauncher refused turn', () => {
             typeof event?.message === 'string' && event.message.includes('busy'))).toHaveLength(1)
         queue.close()
     }, 25_000)
+
+    it('keeps a message the agent refused because its queue is paused', async () => {
+        // Another refusal of the same family: the session is not ready, so
+        // the message must not be lost.
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    throw new Error('Internal error: MiniMax Code Runtime failed: The session Queue is paused')
+                }
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 10_000 })
+
+        const promptMock = backend.prompt as ReturnType<typeof vi.fn>
+        expect(promptMock.mock.calls[1][1]).toEqual([{ type: 'text', text: 'first' }])
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('paused'))).toHaveLength(1)
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('prompt failed'))).toHaveLength(0)
+        queue.close()
+    }, 15_000)
+
+    it('keeps a message the agent refused for a reason it did not name', async () => {
+        // The agent answered with an error of its own, but the wording is one
+        // HAPI has not seen. That is still a refusal - the agent is not ready
+        // - and the message stays.
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    const error = new Error('Internal error: MiniMax Code Runtime failed: something new') as Error & { code?: number }
+                    error.code = -32603
+                    throw error
+                }
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 10_000 })
+
+        const promptMock = backend.prompt as ReturnType<typeof vi.fn>
+        expect(promptMock.mock.calls[1][1]).toEqual([{ type: 'text', text: 'first' }])
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('Your message is kept'))).toHaveLength(1)
+        queue.close()
+    }, 15_000)
+
+    it('starts the agent again when its process died, and keeps the message', async () => {
+        // The agent process died mid-turn. The message is not lost: it goes
+        // back into the queue, a new agent is started for it, and the
+        // conversation continues where the dead one left it.
+        let promptCalls = 0;
+        let agentDead = false;
+        const backend = createBackend({
+            isClosed: vi.fn(() => agentDead),
+            initialize: vi.fn(async () => {
+                agentDead = false;
+            }),
+            prompt: vi.fn(async () => {
+                promptCalls += 1;
+                if (promptCalls === 1) {
+                    agentDead = true;
+                    throw new Error('ACP transport is closed');
+                }
+            })
+        });
+        const { session, queue } = createSteerSession();
+        queue.push('first', { permissionMode: 'default', model: null });
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 20_000 })
+
+        // The same message goes out once the agent is back.
+        const promptMock = backend.prompt as ReturnType<typeof vi.fn>
+        expect(promptMock.mock.calls[1][1]).toEqual([{ type: 'text', text: 'first' }])
+        // The user is told what happened instead of watching the message
+        // disappear.
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('starting it again'))).toHaveLength(1)
+        queue.close()
+    }, 25_000)
+
+    it('holds a message the agent died on instead of sending it again', async () => {
+        // The agent was handed the message and then died: it may have
+        // consumed it, and nothing can prove which. Sending the message
+        // again would let the agent run the same work twice, so the message
+        // waits for the user instead.
+        let promptCalls = 0
+        let agentDead = false
+        const backend = createBackend({
+            isClosed: vi.fn(() => agentDead),
+            initialize: vi.fn(async () => {
+                agentDead = false
+            }),
+            prompt: vi.fn(async (
+                _sessionId: string,
+                _content: unknown,
+                _onUpdate: unknown,
+                options?: { onPromptSent?: () => void }
+            ) => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    options?.onPromptSent?.()
+                    agentDead = true
+                    throw new Error('ACP transport is closed')
+                }
+            })
+        })
+        const { session, queue, client } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null }, 'local-unknown')
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(client.emitMessagesIndeterminate).toHaveBeenCalledWith(['local-unknown'])
+        }, { timeout: 20_000 })
+
+        // It is not sent again on its own, and it is not acked either: the
+        // hub holds it until the user retries or cancels it.
+        expect(backend.prompt).toHaveBeenCalledTimes(1)
+        expect(client.emitMessagesReleased).not.toHaveBeenCalled()
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('cannot tell what it did with it'))).toHaveLength(1)
+        queue.close()
+    }, 25_000)
+
+    it('gives up on an agent that keeps dying instead of restarting forever', async () => {
+        // An agent that dies on every start must not turn into a restart
+        // loop: the session ends with a message that says so.
+        let agentDead = false;
+        const backend = createBackend({
+            isClosed: vi.fn(() => agentDead),
+            initialize: vi.fn(async () => {
+                agentDead = false;
+            }),
+            prompt: vi.fn(async () => {
+                agentDead = true;
+                throw new Error('ACP transport is closed');
+            })
+        });
+        const { session, queue } = createSteerSession();
+        queue.push('first', { permissionMode: 'default', model: null });
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+            expect(events.filter((event: { message?: string } | undefined) =>
+                typeof event?.message === 'string' && event.message.includes('ending this session'))).toHaveLength(1)
+        }, { timeout: 30_000 })
+
+        // The agent was started again a bounded number of times.
+        expect((backend.initialize as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(5)
+        queue.close()
+    }, 35_000)
+
+    it('drops a message the agent can never accept', async () => {
+        // The request itself is wrong: asking again produces the same answer.
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                throw new Error('Internal error: MiniMax Code Runtime failed: Turn input is invalid')
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(1)
+        }, { timeout: 5_000 })
+
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('prompt failed'))).toHaveLength(1)
+        // A request that can never work is not retried.
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        expect(backend.prompt).toHaveBeenCalledTimes(1)
+        queue.close()
+    })
 
     it('still reports a failure that is not a busy session', async () => {
         const backend = createBackend({
@@ -1790,19 +2048,26 @@ describe('mcodeRemoteLauncher local handoff', () => {
 
     it('restores the probe handlers and clears the remote state when the session ends', async () => {
         createBackend()
-        harness.restoredHandlers.model = 0
-        harness.restoredHandlers.slashCommands = 0
+        // The counters are shared with the other tests in this file, and a
+        // launcher from an earlier test can still be shutting down: the
+        // restore that belongs to *this* launcher is the one that happens
+        // after it started.
+        const modelsBefore = harness.restoredHandlers.model
+        const commandsBefore = harness.restoredHandlers.slashCommands
         const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
 
         await mcodeRemoteLauncher(session as never, {})
 
         // The live catalog died with the backend: the local mode has to be
         // able to answer the model picker again.
-        expect(harness.restoredHandlers.model).toBe(1)
-        expect(harness.restoredHandlers.slashCommands).toBe(1)
+        expect(harness.restoredHandlers.model).toBeGreaterThan(modelsBefore)
+        expect(harness.restoredHandlers.slashCommands).toBeGreaterThan(commandsBefore)
 
         // The goal and the delegation tree belong to the remote session.
-        expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'thread-goal-cleared' })
+        expect(session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'thread-goal-cleared',
+            threadId: 'mcode-session-1'
+        })
         expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'subagent-snapshot', members: [] })
     })
 

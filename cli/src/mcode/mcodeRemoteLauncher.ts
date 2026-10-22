@@ -82,10 +82,18 @@ const MCODE_TURN_LEASE_POLL_MS = 400;
 const MCODE_TURN_LEASE_STUCK_MS = 60_000;
 
 /**
- * Why the agent refused the turn, if it refused it for a transient reason.
+ * How often the agent may be started again in a row before the session ends.
+ *
+ * An agent that keeps dying (a broken build, a missing dependency) must not
+ * turn into a restart loop.
+ */
+const MCODE_MAX_AGENT_RESTARTS = 3;
+
+/**
+ * Why the agent refused the turn.
  *
  * MiniMax Code refuses a `session/prompt` while the session is not ready to
- * take a turn, and it answers with 409 in three shapes:
+ * take a turn, and it answers with 409 in a handful of shapes:
  *
  * - `local_session_busy`: the session's turn lease is held. The lease is held
  *   for the whole turn, and the common case inside HAPI is the agent's own
@@ -96,24 +104,146 @@ const MCODE_TURN_LEASE_STUCK_MS = 60_000;
  * - `local_session_compacting`: the session is compacting its context.
  * - `local_session_mutating`: the conversation is being changed (a fork, a
  *   clear).
+ * - and the rest: the session's own queue has an earlier message, the queue
+ *   is paused, the turn is waiting for an answer, a plan review is in the way.
  *
- * All three end when the agent finishes what it is doing, so the message can
- * simply be delivered later. Every other error is a real failure and is
- * reported as it is.
+ * All of them end when the agent finishes what it is doing, so the message can
+ * simply be delivered later. Only a request the agent can never accept (the
+ * session is gone, the input is invalid) is a real failure.
  */
-type McodeRefusalReason = 'busy' | 'compacting' | 'mutating';
+/**
+ * Why the agent refused the turn.
+ *
+ * MiniMax Code refuses a turn for a handful of reasons, and only one of
+ * them means "this request is wrong". The rest say "not right now": the
+ * session is busy, compacting, waiting for the user, or something else is in
+ * the way. The message can be delivered later, so it is kept.
+ *
+ * `fatal` is the exception: the request itself cannot be delivered (the
+ * session is gone, the input is invalid), and retrying it would only produce
+ * the same answer.
+ */
+/** The ACP backend of the running MiniMax Code process. */
+type McodeBackend = ReturnType<typeof createMcodeBackend>;
 
-function classifyMcodeRefusal(message: string): McodeRefusalReason | null {
-    if (/session already has an active turn/i.test(message)) {
-        return 'busy';
+type McodeRefusalReason =
+    | 'busy'
+    | 'compacting'
+    | 'mutating'
+    | 'queued'
+    | 'paused'
+    | 'conflict'
+    | 'waiting'
+    | 'unavailable'
+    | 'plan'
+    | 'duplicate'
+    | 'fatal'
+    | 'unknown';
+
+/**
+ * The refusals MiniMax Code can answer a turn with.
+ *
+ * The table is the agent's own wording (`local_runtime` maps every refusal
+ * reason to one of these messages). A refusal HAPI does not know is not a
+ * failure - it is "not right now" with a wording HAPI has not seen yet - so
+ * the unknown case keeps the message instead of dropping it.
+ */
+const MCODE_REFUSAL_PATTERNS: ReadonlyArray<readonly [McodeRefusalReason, RegExp]> = [
+    ['busy', /session already has an active turn/i],
+    ['compacting', /session compaction is active/i],
+    ['mutating', /session conversation is being changed/i],
+    ['queued', /an earlier queued message has priority/i],
+    ['paused', /the session queue is paused/i],
+    ['conflict', /turn ingress conflicts/i],
+    ['waiting', /the current turn is waiting for user input/i],
+    ['unavailable', /the current turn is already complete or cannot be continued/i],
+    ['plan', /plan review processing must finish before this request can run/i],
+    ['plan', /resolve the pending questionnaire before entering plan mode/i],
+    ['plan', /new plan mode entry is temporarily disabled/i],
+    ['plan', /session mode changed before plan mode entry/i],
+    ['duplicate', /turn was already accepted/i],
+    // The request cannot be delivered at all.
+    ['fatal', /session not found/i],
+    ['fatal', /session is being deleted/i],
+    ['fatal', /turn input is invalid/i],
+    ['fatal', /queue message is invalid/i],
+    ['fatal', /validation_error/i]
+];
+
+/**
+ * Whether the error is the agent's own answer.
+ *
+ * A refusal comes back as a JSON-RPC error, and the transport keeps its code
+ * on the error. An error without one is a broken transport or a bug in HAPI:
+ * asking again would fail the same way.
+ */
+function isAgentError(error: unknown): boolean {
+    return typeof error === 'object'
+        && error !== null
+        && typeof (error as { code?: unknown }).code === 'number';
+}
+
+/**
+ * Why the agent refused the turn, or null when the turn did not fail at all.
+ */
+function classifyMcodeRefusal(error: unknown): McodeRefusalReason | null {
+    const message = error instanceof Error ? error.message : String(error);
+    for (const [reason, pattern] of MCODE_REFUSAL_PATTERNS) {
+        if (pattern.test(message)) {
+            return reason;
+        }
     }
-    if (/session compaction is active/i.test(message)) {
-        return 'compacting';
+    // An answer from the agent that HAPI does not recognize is still a
+    // refusal: the agent refused for a reason it did not name. The agent
+    // refuses a turn it cannot start yet, and every refusal it knows ends on
+    // its own, so a wording HAPI has not seen is far more likely to be
+    // another "not right now" than a broken request.
+    return isAgentError(error) ? 'unknown' : null;
+}
+
+/**
+ * The reasons a client is told about while the message waits.
+ *
+ * A refusal that means "later" keeps the message: it goes back to the queue
+ * and is delivered when the session is ready again. A fatal one is not a
+ * notice - nothing is waiting.
+ */
+type McodeQueueNoticeReason = Exclude<McodeRefusalReason, 'fatal'>;
+
+function isRetryableMcodeRefusal(reason: McodeRefusalReason): reason is McodeQueueNoticeReason {
+    return reason !== 'fatal';
+}
+
+/**
+ * What the user is told while the message waits.
+ */
+function describeMcodeRefusal(reason: McodeRefusalReason): string {
+    switch (reason) {
+        case 'busy':
+            return 'MiniMax Code is busy with another turn on this session - a task it is running, or another MiniMax Code window attached to it.';
+        case 'compacting':
+            return 'MiniMax Code is compacting this conversation and refused your message.';
+        case 'mutating':
+            return 'MiniMax Code is changing this conversation and refused your message.';
+        case 'queued':
+            return 'MiniMax Code still has an earlier queued message to deliver and refused yours.';
+        case 'paused':
+            return 'The MiniMax Code message queue is paused, so your message was not taken.';
+        case 'conflict':
+            return 'MiniMax Code refused your message because another turn is starting at the same time.';
+        case 'waiting':
+            return 'MiniMax Code is waiting for an answer to something it asked, and refused your message until then.';
+        case 'unavailable':
+            return 'MiniMax Code just finished a turn and could not take your message yet.';
+        case 'plan':
+            return 'MiniMax Code is still working through a plan review and refused your message until that is done.';
+        case 'duplicate':
+            return 'MiniMax Code had already accepted this turn.';
+        case 'fatal':
+            return 'MiniMax Code refused the message itself.';
+        default:
+            return 'MiniMax Code refused the message for a reason it did not explain, and will be asked again.';
     }
-    if (/session conversation is being changed/i.test(message)) {
-        return 'mutating';
-    }
-    return null;
 }
 
 export type McodeRemoteLauncherOptions = {
@@ -169,6 +299,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private readonly backgroundTasks = new BackgroundTaskAggregator();
     /** ACP session id of the running MiniMax Code session. */
     private acpSessionId: string | null = null;
+    /** The MCP servers handed to the agent, kept for a restart. */
+    private acpMcpServers: McpServerStdio[] | null = null;
+    /**
+     * How often the agent process was started again in a row.
+     *
+     * An agent that keeps dying must not start a restart loop: the counter
+     * is reset by a turn that actually ran, and a session that cannot keep an
+     * agent alive ends with a clear message instead of spinning.
+     */
+    private agentRestarts = 0;
     /** Last delegation snapshot forwarded to the hub (state dedupe). */
     private lastDelegationSignature: string | null = null;
     /** Last goal lifecycle state rendered as a chat card. */
@@ -244,15 +384,69 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         return React.createElement(McodeDisplay, context);
     }
 
-    protected async runMainLoop(): Promise<void> {
+    /**
+     * Starts the agent again after its process died.
+     *
+     * Returns the new ACP session id and backend, or null when the agent
+     * could not be started again - in that case the session ends with a
+     * message that says why, instead of spinning on a dead agent.
+     */
+    private async restartAgent(): Promise<{
+        acpSessionId: string;
+        backend: McodeBackend;
+    } | null> {
+        const session = this.session;
+        this.agentRestarts += 1;
+        if (this.agentRestarts > MCODE_MAX_AGENT_RESTARTS) {
+            session.sendSessionEvent({
+                type: 'message',
+                message: `MiniMax Code stopped ${this.agentRestarts - 1} times in a row; ending this session.`
+            });
+            this.shouldExit = true;
+            return null;
+        }
+        const acpMcpServers = this.acpMcpServers;
+        if (!acpMcpServers) {
+            this.shouldExit = true;
+            return null;
+        }
+        try {
+            const acpSessionId = await this.connectAgent(acpMcpServers, { isRespawn: true });
+            const backend = this.backend;
+            if (!backend) {
+                throw new Error('the agent backend is not connected');
+            }
+            logger.info('[mcode-remote] the agent is back', { sessionId: acpSessionId });
+            // The session is usable again: say so, so a client that showed
+            // the session as not ready picks it up.
+            session.sendSessionEvent({ type: 'ready' });
+            return { acpSessionId, backend };
+        } catch (error) {
+            logger.warn('[mcode-remote] could not start MiniMax Code again', error);
+            session.sendSessionEvent({
+                type: 'message',
+                message: `MiniMax Code could not be started again: ${error instanceof Error ? error.message : String(error)}`
+            });
+            this.shouldExit = true;
+            return null;
+        }
+    }
+
+    /**
+     * Starts the agent and opens the ACP session.
+     *
+     * Split out of the main loop because it has to run again: when the agent
+     * process dies, the session is brought back by starting a new agent and
+     * loading the native session again. The conversation lives in the agent's
+     * own session store, so a new process picks it up where the dead one
+     * left it.
+     */
+    private async connectAgent(
+        acpMcpServers: McpServerStdio[],
+        options: { isRespawn: boolean }
+    ): Promise<string> {
         const session = this.session;
         const messageBuffer = this.messageBuffer;
-
-        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
-            enableChangeTitle: false,
-            skillLookup: { workingDirectory: session.path, flavor: 'mcode' }
-        });
-        this.happyServer = happyServer;
 
         const backend = createMcodeBackend();
         this.backend = backend;
@@ -313,7 +507,6 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             }
         );
 
-        const acpMcpServers = toAcpMcpServers(mcpServers);
         let acpSessionId: string;
         if (session.sessionId) {
             try {
@@ -365,7 +558,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         const effectiveModel = await this.applyInitialModel(acpSessionId, this.opts.model);
         this.currentBackendModel = effectiveModel;
         this.defaultBackendModel = effectiveModel;
-        if (effectiveModel) {
+        if (effectiveModel && !options.isRespawn) {
             this.displayModel = effectiveModel;
             messageBuffer.addMessage(`[MODEL:${effectiveModel}]`, 'system');
         }
@@ -389,6 +582,30 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         // otherwise show no goal even though the agent is still running one.
         await this.restoreGoalState(acpSessionId);
         await this.restoreDelegationState(acpSessionId);
+
+        return acpSessionId;
+    }
+
+    protected async runMainLoop(): Promise<void> {
+        const session = this.session;
+        const messageBuffer = this.messageBuffer;
+
+        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
+            enableChangeTitle: false,
+            skillLookup: { workingDirectory: session.path, flavor: 'mcode' }
+        });
+        this.happyServer = happyServer;
+
+        const acpMcpServers = toAcpMcpServers(mcpServers);
+        this.acpMcpServers = acpMcpServers;
+        let acpSessionId = await this.connectAgent(acpMcpServers, { isRespawn: false });
+        // The backend is replaced when the agent process dies and the session
+        // is brought back, so the loop always reads the current one.
+        const connectedBackend = this.backend;
+        if (!connectedBackend) {
+            throw new Error('MiniMax Code backend is not connected');
+        }
+        let backend: McodeBackend = connectedBackend;
 
         this.setupAbortHandlers(session.client.rpcHandlerManager, {
             onAbort: () => this.handleAbort(),
@@ -526,7 +743,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // Publish the steerable flag before the thinking flag: a client
             // that offers Steer on "thinking" must never be ahead of the
             // agent's own "a turn is running" state.
-            this.setSteeringActive(true);
+            //
+            // Only an agent that advertises `mcode/session/steer` can be
+            // steered into; offering the action on a build without it is a
+            // dead button.
+            this.setSteeringActive(this.canSteerIntoTurn());
             session.onThinkingChange(true);
             // The agent can only be forked at the end of a finished turn, so the
             // fork control has to know that a turn is running.
@@ -536,6 +757,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // busy: the batch is back in the queue and the loop has to wait
             // before it tries again.
             let refusedAsBusy = false;
+
+            // Set when the request reached the agent. From that point the
+            // agent may have consumed the message, so nothing can prove the
+            // outcome any more - which decides what a crash of the agent
+            // means for this batch.
+            let promptSent = false;
 
             try {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
@@ -552,6 +779,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     // order, so the agent registers the turn and then
                     // cancels it before it does any work.
                     onPromptSent: () => {
+                        promptSent = true;
                         // The message is the agent's from here: the runner
                         // hands it over and owns the delivery from now on,
                         // so the hub can mark it delivered. A message that
@@ -568,10 +796,47 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 this.busySinceMs = null;
                 this.busyNoticePublished = false;
                 this.busyStuckNoticePublished = false;
+                // The agent is alive and working: a restart that happens
+                // later starts from a clean count.
+                this.agentRestarts = 0;
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                const refusal = classifyMcodeRefusal(errorMessage);
-                if (refusal && !waitSignal.aborted && !this.shouldExit) {
+                const refusal = classifyMcodeRefusal(error);
+                if (this.backend?.isClosed() && !waitSignal.aborted && !this.shouldExit) {
+                    // The agent process is gone.
+                    if (promptSent) {
+                        // The agent was handed the message and then stopped:
+                        // it may have consumed it, and nothing can prove
+                        // which. The message is held instead of being sent
+                        // again - the agent could run the same work twice.
+                        // The user resolves it (retry or cancel).
+                        this.holdBatchIndeterminate(session, batch);
+                        logger.warn('[mcode-remote] the agent stopped mid-turn; the message outcome is unknown', error);
+                        session.sendSessionEvent({
+                            type: 'message',
+                            message: 'MiniMax Code stopped while it was working on your message. We cannot tell what it did with it - retry it or discard it.'
+                        });
+                    } else {
+                        // The agent died before the request went out: it never
+                        // saw the message. Give it back to the queue - and to
+                        // the hub, so a runner that dies before the retry
+                        // cannot lose it.
+                        this.requeueRefusedBatch(batch);
+                        this.releaseBatchToHub(session, batch);
+                        logger.warn('[mcode-remote] the agent stopped, starting it again', error);
+                        session.sendSessionEvent({
+                            type: 'message',
+                            message: 'MiniMax Code stopped; starting it again. Your message goes out as soon as it is back.'
+                        });
+                    }
+                    const restarted = await this.restartAgent();
+                    if (restarted) {
+                        acpSessionId = restarted.acpSessionId;
+                        backend = restarted.backend;
+                        // Give the new agent a moment before the retry.
+                        refusedAsBusy = true;
+                    }
+                } else if (refusal && isRetryableMcodeRefusal(refusal) && !waitSignal.aborted && !this.shouldExit) {
                     // The agent refused the turn for a transient reason: the
                     // session still has an active one - the common case is the
                     // agent's own background task running as a turn on this
@@ -581,7 +846,14 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     // acknowledged when it left the queue, so dropping it
                     // would lose the message - put it back and let the loop
                     // deliver it once the session is ready again.
+                    //
+                    // Every refusal the agent knows means "not right now", and
+                    // a refusal HAPI does not recognize means the same: the
+                    // agent is not ready, it just said so in a wording HAPI
+                    // has not seen. Only a request it can never accept is
+                    // dropped.
                     this.requeueRefusedBatch(batch);
+                    this.releaseBatchToHub(session, batch);
                     this.reportBusyNotice(session, refusal);
                     logger.debug('[mcode-remote] session refused the turn', { refusal, message: errorMessage });
                     // The agent still holds a turn. Say so, so a client can
@@ -645,16 +917,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * when the session is found to be busy and ends when the agent takes
      * the turn again.
      */
-    private reportBusyNotice(session: McodeSession, reason: McodeRefusalReason): void {
+    private reportBusyNotice(session: McodeSession, reason: McodeQueueNoticeReason): void {
         this.busySinceMs ??= Date.now();
         const waitingSeconds = Math.round((Date.now() - (this.busySinceMs ?? Date.now())) / 1000);
         if (!this.busyNoticePublished) {
             this.busyNoticePublished = true;
-            const what = reason === 'busy'
-                ? 'MiniMax Code is busy with another turn on this session - a task it is running, or another MiniMax Code window attached to it.'
-                : reason === 'compacting'
-                    ? 'MiniMax Code is compacting this conversation and refused your message.'
-                    : 'MiniMax Code is changing this conversation and refused your message.';
+            const what = describeMcodeRefusal(reason);
             session.sendSessionEvent({
                 type: 'queue-notice',
                 reason,
@@ -711,10 +979,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * to run alone) goes back isolated, and an ordinary batch goes back as an
      * ordinary batch, so the messages are still delivered together.
      *
-     * The re-queued message lives in this process only: the hub already
-     * marked it as delivered, so a runner that dies while it waits loses it.
-     * The alternative - leaving it unacknowledged in the hub - would change
-     * the delivery contract for every MiniMax Code message.
+     * The re-queued message lives in this process only, so the caller also
+     * has to give it back to the hub - see {@link releaseBatchToHub}.
      */
     private requeueRefusedBatch(batch: {
         message: string;
@@ -725,6 +991,53 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         this.requeueBatch(batch);
         this.busyRefusals += 1;
         logger.debug('[mcode-remote] Refused turn re-queued', { messages: batch.items?.length ?? 1 });
+    }
+
+    /**
+     * Gives the message back to the hub.
+     *
+     * The batch was acknowledged when it was handed to the agent, and the
+     * agent refused the turn - it did not take the message. The hub has to
+     * learn that: it believes the message was delivered, and a runner that
+     * dies while the retry waits would lose it. Releasing the rows puts
+     * them back into the hub's durable queue, where the replay path picks
+     * them up: this runner gets them again through the replay (and drops
+     * them, because it already holds them), the next runner gets them for
+     * real.
+     */
+    private releaseBatchToHub(
+        session: McodeSession,
+        batch: { items?: Array<{ localId?: string }> }
+    ): void {
+        const localIds = this.batchLocalIds(batch);
+        if (localIds.length === 0) return;
+        session.client.emitMessagesReleased(localIds);
+    }
+
+    /**
+     * Holds a message whose delivery cannot be proven.
+     *
+     * The agent was handed the message and then stopped, so it may have
+     * consumed it - but nothing can tell. The message must not be sent
+     * again (the agent could run the same work twice), and it must not be
+     * acked (nobody proved a delivery). It waits for the user: the hub
+     * keeps the row out of the automatic replay and shows it as "outcome
+     * unknown", with a retry and a cancel.
+     */
+    private holdBatchIndeterminate(
+        session: McodeSession,
+        batch: { items?: Array<{ localId?: string }> }
+    ): void {
+        const localIds = this.batchLocalIds(batch);
+        if (localIds.length === 0) return;
+        session.client.emitMessagesIndeterminate(localIds);
+    }
+
+    /** The local ids of a batch, in the order the batch holds them. */
+    private batchLocalIds(batch: { items?: Array<{ localId?: string }> }): string[] {
+        return (batch.items ?? [])
+            .map((item) => item.localId)
+            .filter((localId): localId is string => Boolean(localId));
     }
 
     /**
@@ -740,9 +1053,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         session: McodeSession,
         batch: { items?: Array<{ localId?: string }> }
     ): void {
-        const localIds = (batch.items ?? [])
-            .map((item) => item.localId)
-            .filter((localId): localId is string => Boolean(localId));
+        const localIds = this.batchLocalIds(batch);
         if (localIds.length === 0) return;
         session.client.emitMessagesConsumed(localIds);
     }
@@ -915,7 +1226,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         // The goal and the delegation tree belong to the remote session: the
         // local TUI has its own state, so the web must not keep showing them
         // after the handoff.
-        this.session.sendSessionEvent({ type: 'thread-goal-cleared' });
+        this.session.sendSessionEvent(this.goalClearedEvent());
         this.session.sendSessionEvent({ type: 'subagent-snapshot', members: [] });
         // The extension surface belongs to the agent process that just went
         // away, so the web must not offer controls the local TUI cannot honor.
@@ -939,7 +1250,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     goalPatch: false,
                     goalClear: false,
                     delegation: false,
-                    delegationStop: false
+                    delegationStop: false,
+                    steer: false
                 }
             }
         }));
@@ -1128,6 +1440,28 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     }
 
     /**
+     * The event that says "this session has no goal any more".
+     *
+     * The thread id tells the web which goal disappeared: without it, a
+     * session that runs several threads drops the goal of all of them.
+     */
+    private goalClearedEvent(): { type: 'thread-goal-cleared'; threadId?: string } {
+        const threadId = this.acpSessionId;
+        return threadId ? { type: 'thread-goal-cleared', threadId } : { type: 'thread-goal-cleared' };
+    }
+
+    /**
+     * Whether a message can be steered into the running turn.
+     *
+     * Steering is an optional part of the agent's extension surface: a build
+     * that does not advertise `mcode/session/steer` refuses the call, so the
+     * clients must not be told that steering is possible.
+     */
+    private canSteerIntoTurn(): boolean {
+        return this.extensionControl?.supportsMethod(MCODE_METHOD_STEER) === true;
+    }
+
+    /**
      * Publishes whether the session is waiting for the agent to free its turn.
      *
      * The agent refuses a turn while it holds one, and it can hold a turn HAPI
@@ -1171,11 +1505,14 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 if (!localId) {
                     return { steered: false, error: 'A steer needs a message local id' };
                 }
-                if (!this.steeringActive) {
-                    return { steered: false, error: 'MiniMax Code has no running turn to steer' };
-                }
+                // The agent's own answer first: a build without the steer
+                // extension cannot be steered into at all, whatever the
+                // session state says.
                 if (!this.extensionControl?.supportsMethod(MCODE_METHOD_STEER)) {
                     return { steered: false, error: 'MiniMax Code did not advertise the steer extension' };
+                }
+                if (!this.steeringActive) {
+                    return { steered: false, error: 'MiniMax Code has no running turn to steer' };
                 }
                 const backend = this.backend;
                 if (!backend) {
@@ -1309,7 +1646,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 const response = await control.clearGoal(sessionId);
                 if (response.success && response.cleared) {
                     this.lastGoalLifecycleSignature = null;
-                    this.session.sendSessionEvent({ type: 'thread-goal-cleared' });
+                    this.session.sendSessionEvent(this.goalClearedEvent());
                 }
                 return response;
             }
@@ -1635,7 +1972,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
 
         if (update.kind === 'cleared') {
             this.lastGoalLifecycleSignature = null;
-            this.session.sendSessionEvent({ type: 'thread-goal-cleared' });
+            this.session.sendSessionEvent(this.goalClearedEvent());
             return;
         }
 

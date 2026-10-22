@@ -1102,14 +1102,14 @@ export function HappyComposer(props: {
             ? getPiThinkingLevelOptions(effort, selectedPiModel?.thinkingLevelMap)
             : (agentFlavor === 'grok' || agentFlavor === 'mcode') && availableEffortOptions && availableEffortOptions.length > 0
                 ? [
-                    { value: null, label: 'Default' },
+                    { value: null, label: t('newSession.model.default') },
                     ...availableEffortOptions.map((option) => ({
                         value: option.value,
                         label: option.name ?? option.value
                     }))
                 ]
             : getClaudeComposerEffortOptions(effort),
-        [agentFlavor, effort, selectedPiModel, availableEffortOptions]
+        [agentFlavor, effort, selectedPiModel, availableEffortOptions, t]
     )
     const permissionModes = useMemo(
         () => permissionModeOptions.map((option) => option.mode),

@@ -289,7 +289,10 @@ describe('toMcodeExtensionCapabilities', () => {
             goalPatch: true,
             goalClear: true,
             delegation: true,
-            delegationStop: true
+            delegationStop: true,
+            // The agent did not advertise the steer method, so the clients
+            // must not offer to steer into its turns.
+            steer: false
         });
     });
 

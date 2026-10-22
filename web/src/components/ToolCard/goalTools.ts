@@ -30,6 +30,17 @@ function readField(record: Record<string, unknown>, camel: string, snake: string
     return Object.prototype.hasOwnProperty.call(record, camel) ? record[camel] : record[snake]
 }
 
+/**
+ * The agent counts goal timestamps in epoch milliseconds; HAPI's goal card
+ * renders epoch seconds.
+ *
+ * The two units are three orders of magnitude apart, so the unit of a value
+ * is unambiguous.
+ */
+function toEpochSeconds(value: number): number {
+    return value > 1e11 ? Math.floor(value / 1000) : value
+}
+
 function parseSnapshot(value: unknown): GoalSnapshot | null {
     if (!isObject(value) || typeof value.objective !== 'string' || !value.objective.trim()
         || typeof value.status !== 'string' || !value.status.trim()) return null
@@ -51,7 +62,11 @@ function parseSnapshot(value: unknown): GoalSnapshot | null {
     for (const [camel, snake] of fields) {
         const number = readField(value, camel, snake)
         if (camel === 'tokenBudget' && number === null) goal.tokenBudget = null
-        else if (typeof number === 'number' && Number.isFinite(number) && number >= 0) goal[camel] = number
+        else if (typeof number === 'number' && Number.isFinite(number) && number >= 0) {
+            goal[camel] = camel === 'createdAt' || camel === 'updatedAt'
+                ? toEpochSeconds(number)
+                : number
+        }
     }
     return goal
 }

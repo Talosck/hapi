@@ -683,8 +683,8 @@ export function NewSession(props: {
         enabled: agent === 'mcode' && Boolean(machineId)
     })
     const mcodeModelOptions = useMemo(
-        () => buildMcodeModelOptions(mcodeModelsState.availableModels),
-        [mcodeModelsState.availableModels]
+        () => buildMcodeModelOptions(mcodeModelsState.availableModels, t('newSession.model.default')),
+        [mcodeModelsState.availableModels, t]
     )
     const mcodeEffortOptions = useMemo(
         () => mcodeModelsState.effortOptions

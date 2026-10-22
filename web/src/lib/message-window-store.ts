@@ -1286,22 +1286,46 @@ export function markMessagesIndeterminate(sessionId: string, localIds: string[])
                 return message
             }
             changed = true
-            return { ...message, deliveryState: 'indeterminate' as const }
+            // The message may already have been acknowledged - the agent was
+            // handed it and then stopped, so the delivery cannot be proven.
+            // It has to lose the invocation again, or it would stay out of
+            // the queue bar and the user would never see that it needs a
+            // decision. An optimistic row was never acknowledged (it carries
+            // no invocation), so it keeps what it has.
+            const wasAcknowledged = message.invokedAt != null
+            return {
+                ...message,
+                deliveryState: 'indeterminate' as const,
+                ...(wasAcknowledged ? { status: 'queued' as MessageStatus, invokedAt: null } : {})
+            }
         })
         return changed ? buildState(previous, { messages }) : previous
     }, true)
 }
 
+/**
+ * Put messages back into the normal queue.
+ *
+ * Two ways a row comes back: an explicit Retry restores an indeterminate
+ * steer, and the agent refuses a turn - the message was acknowledged when it
+ * was handed to the agent, but the agent never took it. The second case
+ * arrives for a row that was already delivered, so it has to lose its
+ * invocation again: it is waiting, not sent.
+ */
 export function markMessagesRequeued(sessionId: string, localIds: string[]): void {
     if (localIds.length === 0) return
     const idSet = new Set(localIds)
     updateState(sessionId, (previous) => {
         let changed = false
         const messages = previous.messages.map((message) => {
+            // An acknowledged row was stamped with an invocation; an
+            // optimistic one was not. Only the acknowledged row has to lose
+            // that invocation again.
+            const wasAcknowledged = message.invokedAt != null
             if (
                 !message.localId
                 || !idSet.has(message.localId)
-                || (message.deliveryState === undefined && message.queueDismissed !== true)
+                || (message.deliveryState === undefined && message.queueDismissed !== true && !wasAcknowledged)
             ) {
                 return message
             }
@@ -1311,7 +1335,12 @@ export function markMessagesRequeued(sessionId: string, localIds: string[]): voi
                 queueDismissed: _queueDismissed,
                 ...requeued
             } = message
-            return requeued
+            if (!wasAcknowledged) {
+                return requeued
+            }
+            // The agent never took the message: it is queued again, so it
+            // has to lose the invocation the first delivery stamped.
+            return { ...requeued, status: 'queued' as MessageStatus, invokedAt: null }
         })
         return changed ? buildState(previous, { messages }) : previous
     }, true)

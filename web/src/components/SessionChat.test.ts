@@ -8,7 +8,8 @@ import {
     isScratchlistToggleHotkey,
     isSelectAllTargetBlocked,
     mergeStagedAttachmentsInOrder,
-    opencodeEffortOptionsInvalidationKey,
+    isSteerExtensionSupported,
+    modelOptionsInvalidationKey,
     resolvePiContextWindow,
     resolveLatestCompletedBoundaryIdForView,
     shouldAutoClearPendingSchedule,
@@ -95,19 +96,56 @@ describe('shouldClearReasoningEffortForModelChange', () => {
     })
 })
 
-describe('opencodeEffortOptionsInvalidationKey', () => {
+describe('isSteerExtensionSupported', () => {
+    const mcodeMetadata = (steer?: boolean) => ({
+        path: '/tmp/project',
+        host: 'localhost',
+        flavor: 'mcode' as const,
+        capabilities: steer === undefined ? {} : { mcodeExtensions: { steer } }
+    })
+
+    it('turns the action off when the agent does not advertise the steer extension', () => {
+        expect(isSteerExtensionSupported(mcodeMetadata(false))).toBe(false)
+    })
+
+    it('keeps the action when the agent advertises it', () => {
+        expect(isSteerExtensionSupported(mcodeMetadata(true))).toBe(true)
+    })
+
+    it('keeps the action when the CLI says nothing about it', () => {
+        // A CLI that predates the capability bit must not take the action
+        // away from a session it still supports.
+        expect(isSteerExtensionSupported(mcodeMetadata(undefined))).toBe(true)
+    })
+
+    it('does not gate the other flavors', () => {
+        expect(isSteerExtensionSupported({ path: '/tmp/project', host: 'localhost', flavor: 'codex' })).toBe(true)
+        expect(isSteerExtensionSupported(null)).toBe(true)
+    })
+})
+
+describe('modelOptionsInvalidationKey', () => {
     it('returns the effort options query key for opencode sessions', () => {
-        expect(opencodeEffortOptionsInvalidationKey('opencode', 'session-1')).toEqual([
+        expect(modelOptionsInvalidationKey('opencode', 'session-1')).toEqual([
             'session-opencode-reasoning-effort-options',
             'session-1',
         ])
     })
 
+    it('returns the model catalog query key for mcode sessions', () => {
+        // The mcode catalog carries the effort levels of the model the
+        // session runs, so it has to be re-read after a model switch.
+        expect(modelOptionsInvalidationKey('mcode', 'session-1')).toEqual([
+            'session-mcode-models',
+            'session-1',
+        ])
+    })
+
     it('returns null for other flavors and missing flavor', () => {
-        expect(opencodeEffortOptionsInvalidationKey('codex', 'session-1')).toBeNull()
-        expect(opencodeEffortOptionsInvalidationKey('grok', 'session-1')).toBeNull()
-        expect(opencodeEffortOptionsInvalidationKey(null, 'session-1')).toBeNull()
-        expect(opencodeEffortOptionsInvalidationKey(undefined, 'session-1')).toBeNull()
+        expect(modelOptionsInvalidationKey('codex', 'session-1')).toBeNull()
+        expect(modelOptionsInvalidationKey('grok', 'session-1')).toBeNull()
+        expect(modelOptionsInvalidationKey(null, 'session-1')).toBeNull()
+        expect(modelOptionsInvalidationKey(undefined, 'session-1')).toBeNull()
     })
 })
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiClient, ApiError } from './client'
+import { ApiClient, ApiError, apiErrorMessage } from './client'
 
 describe('ApiClient error mapping', () => {
     let originalFetch: typeof globalThis.fetch
@@ -357,5 +357,48 @@ describe('ApiClient Kimi session model discovery', () => {
         const api = new ApiClient('test-token')
         await expect(api.getSessionKimiModels('session/1')).resolves.toEqual(catalog)
         expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/session%2F1/kimi-models')
+    })
+})
+
+describe('apiErrorMessage', () => {
+    it('reads the reason the hub gave instead of the raw response body', () => {
+        // The transport puts the whole body into the message: showing that
+        // to a user means showing them the transport.
+        const error = new ApiError(
+            'HTTP 400 Bad Request: {"success":false,"error":"A goal needs an objective"}',
+            400,
+            'A goal needs an objective',
+            '{"success":false,"error":"A goal needs an objective"}'
+        )
+
+        expect(apiErrorMessage(error, 'fallback')).toBe('A goal needs an objective')
+    })
+
+    it('never shows a body that is not a JSON answer', () => {
+        // An HTML error page from a proxy is not something to show a user
+        // either: the caller knows better than the transport.
+        const error = new ApiError(
+            'HTTP 502 Bad Gateway: <html><body>Bad Gateway</body></html>',
+            502,
+            undefined,
+            '<html><body>Bad Gateway</body></html>'
+        )
+
+        expect(apiErrorMessage(error, 'fallback')).toBe('fallback')
+    })
+
+    it('never shows a JSON body that names no reason', () => {
+        const error = new ApiError('HTTP 500 Internal Server Error', 500, undefined, '{"success":false}')
+
+        expect(apiErrorMessage(error, 'fallback')).toBe('fallback')
+    })
+
+    it('uses the given fallback when there is nothing to show', () => {
+        expect(apiErrorMessage(new Error(''), 'fallback')).toBe('fallback')
+        expect(apiErrorMessage(undefined, 'fallback')).toBe('fallback')
+    })
+
+    it('passes a plain error message through', () => {
+        expect(apiErrorMessage(new Error('boom'), 'fallback')).toBe('boom')
     })
 })

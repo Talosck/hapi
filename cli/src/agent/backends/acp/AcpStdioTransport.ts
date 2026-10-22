@@ -115,6 +115,8 @@ export class AcpStdioTransport {
     private guardReleased = false;
     private closed = false;
     private closeError: Error | null = null;
+    /** Called once when the agent process is gone. */
+    private closeHandler: ((error: Error) => void) | null = null;
     /** True after process 'exit'; blocks new writes until 'close' drains stderr. */
     private exited = false;
     private exitError: Error | null = null;
@@ -259,6 +261,35 @@ export class AcpStdioTransport {
                 { cause: error }
             ));
         });
+    }
+
+    /**
+     * Whether the agent process is gone.
+     *
+     * The transport is the only place that knows: once it is closed, every
+     * request fails with the same error, and the caller has to start a new
+     * agent instead of trying again.
+     */
+    isClosed(): boolean {
+        return this.closed || this.exited;
+    }
+
+    /**
+     * Notifies the owner that the agent process is gone.
+     *
+     * The owner needs to know without waiting for a request to fail: a
+     * session that keeps a message while its agent is dead looks like a
+     * session that is simply busy.
+     */
+    onClose(handler: ((error: Error) => void) | null): void {
+        this.closeHandler = handler;
+    }
+
+    /**
+     * The error that closed the transport, when there is one.
+     */
+    getCloseError(): Error | null {
+        return this.closeError ?? this.exitError;
     }
 
     onNotification(handler: ((method: string, params: unknown) => void) | null): void {
@@ -560,7 +591,18 @@ export class AcpStdioTransport {
         this.pending.delete(response.id);
 
         if (response.error) {
-            pending.reject(new Error(acpErrorMessage(response.error)));
+            const error = new Error(acpErrorMessage(response.error)) as Error & {
+                code?: number;
+                data?: unknown;
+            };
+            // The agent's own answer travels with the error: the JSON-RPC
+            // code says that the agent answered (and refused), and the
+            // payload carries the reason. A caller that only sees the
+            // message cannot tell a refusal from a broken transport, and the
+            // two need different handling.
+            error.code = response.error.code;
+            error.data = response.error.data;
+            pending.reject(error);
             return;
         }
 
@@ -589,6 +631,15 @@ export class AcpStdioTransport {
         this.closed = true;
         this.closeError = error;
         this.rejectAllPending(error);
+        const handler = this.closeHandler;
+        this.closeHandler = null;
+        if (handler) {
+            try {
+                handler(error);
+            } catch {
+                // The owner of the notification must not break the transport.
+            }
+        }
     }
 
     private rejectAllPending(error: Error): void {

@@ -179,7 +179,11 @@ export class Store {
         })()
     }
 
-    /** Persist an ambiguous agent steer without stamping it delivered. */
+    /**
+     * Persist a message whose delivery cannot be proven: an ambiguous steer,
+     * or a turn the agent never confirmed. The row keeps no invocation and
+     * stays out of the automatic replay, so the user resolves it explicitly.
+     */
     recordMessagesIndeterminate(
         sessionId: string,
         localIds: string[],
@@ -196,6 +200,32 @@ export class Store {
                 throw new Error('session not found after indeterminate transition')
             }
             return session.updatedAt
+        })()
+    }
+
+    /**
+     * Persist that the agent did not take these messages: the rows go back
+     * into the durable queue, so a runner that dies before the retry hands
+     * them to the next runner instead of losing them.
+     *
+     * Returns the local ids that were released.
+     */
+    recordMessagesReleased(
+        sessionId: string,
+        localIds: string[],
+        namespace: string
+    ): string[] {
+        return this.db.transaction(() => {
+            const released = this.messages.releaseInvokedMessages(sessionId, localIds)
+            const now = Date.now()
+            if (released.length > 0) {
+                this.sessions.touchSessionUpdatedAt(sessionId, now, namespace)
+            }
+            const session = this.sessions.getSessionByNamespace(sessionId, namespace)
+            if (!session) {
+                throw new Error('session not found after messages-released transition')
+            }
+            return released
         })()
     }
 

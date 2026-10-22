@@ -103,7 +103,8 @@ export function toMcodeExtensionCapabilities(support: McodeExtensionSupport): Mc
         goalPatch: hasMethod(MCODE_METHOD_GOAL_PATCH),
         goalClear: hasMethod(MCODE_METHOD_GOAL_CLEAR),
         delegation: hasNotification(MCODE_NOTIFICATION_DELEGATION_UPDATE),
-        delegationStop: hasMethod(MCODE_METHOD_DELEGATION_STOP)
+        delegationStop: hasMethod(MCODE_METHOD_DELEGATION_STOP),
+        steer: hasMethod(MCODE_METHOD_STEER)
     };
 }
 

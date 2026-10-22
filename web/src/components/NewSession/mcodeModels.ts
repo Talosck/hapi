@@ -46,10 +46,11 @@ export function shouldResetMcodeModel(args: {
  * model name.
  */
 export function buildMcodeModelOptions(
-    availableModels: McodeModelSummary[]
+    availableModels: McodeModelSummary[],
+    defaultLabel: string = 'Default'
 ): Array<{ value: string; label: string }> {
     return [
-        { value: 'auto', label: 'Default' },
+        { value: 'auto', label: defaultLabel },
         ...availableModels.map((model) => ({
             value: model.modelId,
             label: model.name ?? model.modelId

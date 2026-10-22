@@ -1179,8 +1179,23 @@ export class ApiSessionClient extends EventEmitter {
         // message stays queued. This is a system notice, not agent speech:
         // it carries its own reason so a client can render it as "your message
         // is waiting" instead of as something the agent said.
+        //
+        // The reasons are the ones MiniMax Code refuses a turn with. Every one
+        // of them means "later": the message is kept and goes out when the
+        // session is ready again.
         type: 'queue-notice'
-        reason: 'busy' | 'compacting' | 'mutating'
+        reason:
+            | 'busy'
+            | 'compacting'
+            | 'mutating'
+            | 'queued'
+            | 'paused'
+            | 'conflict'
+            | 'waiting'
+            | 'unavailable'
+            | 'plan'
+            | 'duplicate'
+            | 'unknown'
         message: string
         /** How long the session has been refusing, in seconds. */
         waitingSeconds?: number
@@ -1411,10 +1426,39 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    /** Persist a steer whose transport completed ambiguously; no consumed ACK. */
-    emitSteerIndeterminate(localIds: string[]): void {
+    /**
+     * Tell the hub that the outcome of these messages cannot be proven.
+     *
+     * The agent was handed the message but stopped before anything could
+     * tell whether it took it. The row keeps no invocation and stays out of
+     * the automatic replay: the user resolves it explicitly (retry or
+     * cancel) instead of the message being delivered twice.
+     */
+    emitMessagesIndeterminate(localIds: string[]): void {
         if (localIds.length === 0) return
         this.emitOrQueue(() => this.socket.emit('messages-indeterminate', {
+            sid: this.sessionId,
+            localIds
+        }))
+    }
+
+    /** Persist a steer whose transport completed ambiguously; no consumed ACK. */
+    emitSteerIndeterminate(localIds: string[]): void {
+        this.emitMessagesIndeterminate(localIds)
+    }
+
+    /**
+     * Tell the hub that the agent did not take these messages.
+     *
+     * The message was acknowledged when it was handed to the agent, and the
+     * agent refused the turn. The hub has to learn that: otherwise it
+     * believes the message was delivered, and a runner that dies before the
+     * retry loses it. The rows go back into the hub's durable queue, where
+     * the next runner - or this one, through the replay - picks them up.
+     */
+    emitMessagesReleased(localIds: string[]): void {
+        if (localIds.length === 0) return
+        this.emitOrQueue(() => this.socket.emit('messages-released', {
             sid: this.sessionId,
             localIds
         }))

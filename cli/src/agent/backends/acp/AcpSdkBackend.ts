@@ -101,6 +101,8 @@ type AcpInitializeResult = {
 
 export class AcpSdkBackend implements AgentBackend {
     private transport: AcpStdioTransport | null = null;
+    /** Whether the agent process behind this backend is gone. */
+    private agentClosed = false;
     private permissionHandler: ((request: PermissionRequest) => void) | null = null;
     private stderrErrorHandler: ((error: AcpStderrError) => void) | null = null;
     private readonly pendingPermissions = new Map<string, PendingPermission>();
@@ -236,6 +238,14 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         this.transport = transport;
+        this.agentClosed = false;
+
+        // The transport knows when the agent process is gone; the backend
+        // keeps the answer so a caller can ask without holding the
+        // transport.
+        this.transport.onClose(() => {
+            this.agentClosed = true;
+        });
 
         this.transport.onNotification((method, params) => {
             if (method === 'session/update') {
@@ -381,6 +391,16 @@ export class AcpSdkBackend implements AgentBackend {
      */
     getInitializeMeta(): Record<string, unknown> | null {
         return this.initializeMeta;
+    }
+
+    /**
+     * Whether the agent process behind this backend is gone.
+     *
+     * A closed transport cannot answer anything, so a caller that wants to
+     * keep the session alive has to start a new agent instead of retrying.
+     */
+    isClosed(): boolean {
+        return this.agentClosed;
     }
 
     getSessionConfigOptions(sessionId: string): AcpConfigOptionDescriptor[] | undefined {
@@ -837,6 +857,12 @@ export class AcpSdkBackend implements AgentBackend {
             this.promptRequestInFlight = true;
             let response: unknown;
             try {
+                // A closed transport cannot take the request: it would fail
+                // without ever reaching the agent. The caller has to know
+                // that the message was NOT handed over - it is still theirs.
+                if (this.agentClosed) {
+                    throw new Error('ACP transport is closed');
+                }
                 const request = this.transport.sendRequest('session/prompt', {
                     sessionId,
                     prompt: content

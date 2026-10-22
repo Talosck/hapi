@@ -242,4 +242,159 @@ describe('SessionStatusPanel', () => {
         renderWithProviders(<SessionStatusPanel data={emptyStatus} />)
         expect(screen.queryByText('Connected apps')).not.toBeInTheDocument()
     })
+
+    /**
+     * An app that is not signed in looks exactly like a working one until the
+     * agent calls it and fails, so the sign-in state belongs in the panel.
+     */
+    it('shows the sign-in state of the connector', () => {
+        renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                apps={{
+                    apps: [{ provider: 'matrix', toolCount: 13, tools: [] }],
+                    auth: { status: 'unauthenticated', authMode: null, scope: null, expiresAt: null },
+                    error: null
+                }}
+            />
+        )
+        expect(screen.getByText('Not signed in (unauthenticated)')).toBeInTheDocument()
+    })
+
+    it('shows a signed-in connector', () => {
+        renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                apps={{
+                    apps: [{ provider: 'matrix', toolCount: 13, tools: [] }],
+                    auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null },
+                    error: null
+                }}
+            />
+        )
+        expect(screen.getByText('Signed in')).toBeInTheDocument()
+    })
+
+    /**
+     * A partial stop is not a success: the receipt says which delegated
+     * sessions really stopped, and the user has to see the difference.
+     */
+    it('reports a partial delegation stop instead of a clean success', async () => {
+        const api = createApi()
+        ;(api.stopMcodeDelegation as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+            success: true,
+            receipt: {
+                schemaVersion: 1,
+                rootSessionId: 'root-1',
+                rootStopped: true,
+                stoppedSessionIds: ['child-1'],
+                activeSessionIds: ['child-2'],
+                failedSessionIds: ['child-3']
+            }
+        })
+
+        renderWithProviders(
+            <SessionStatusPanel
+                data={{ ...emptyStatus, subagents: [SUBAGENT] }}
+                goalControls={{
+                    api,
+                    sessionId: 's1',
+                    capabilities: { delegation: true, delegationStop: true }
+                }}
+            />
+        )
+
+        fireEvent.click(screen.getByText('Stop subagents'))
+
+        expect(await screen.findByText(/Stopped 1/)).toBeInTheDocument()
+        expect(screen.getByText(/1 still running/)).toBeInTheDocument()
+        expect(screen.getByText(/1 could not be stopped/)).toBeInTheDocument()
+    })
+
+    /**
+     * A rejected goal must not cost the user the objective they wrote.
+     */
+    it('keeps the objective when the goal could not be created', async () => {
+        const api = createApi()
+        ;(api.createMcodeGoal as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+            success: false,
+            error: 'MiniMax Code did not advertise the goal extension'
+        })
+
+        renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                goalControls={{
+                    api,
+                    sessionId: 's1',
+                    capabilities: { goal: true, goalCreate: true }
+                }}
+            />
+        )
+
+        fireEvent.click(screen.getByText('Set goal'))
+        const objective = screen.getByLabelText('What should the agent work on?')
+        fireEvent.change(objective, { target: { value: 'Ship the feature' } })
+        fireEvent.click(screen.getByText('Start'))
+
+        expect(await screen.findByText('MiniMax Code did not advertise the goal extension')).toBeInTheDocument()
+        expect((objective as HTMLInputElement).value).toBe('Ship the feature')
+    })
+
+    /**
+     * The agent counts the budget in whole tokens, so a fraction never
+     * reaches it.
+     */
+    it('refuses a fractional token budget before it reaches the agent', async () => {
+        const api = createApi()
+        renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                goalControls={{
+                    api,
+                    sessionId: 's1',
+                    capabilities: { goal: true, goalCreate: true }
+                }}
+            />
+        )
+
+        fireEvent.click(screen.getByText('Set goal'))
+        fireEvent.change(screen.getByLabelText('What should the agent work on?'), {
+            target: { value: 'Ship the feature' }
+        })
+        fireEvent.change(screen.getByLabelText('Token budget (optional)'), {
+            target: { value: '1.5' }
+        })
+        fireEvent.click(screen.getByText('Start'))
+
+        expect(await screen.findByText('The token budget must be a positive whole number')).toBeInTheDocument()
+        expect(api.createMcodeGoal).not.toHaveBeenCalled()
+    })
+
+    it('submits the goal with the form', async () => {
+        const api = createApi()
+        renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                goalControls={{
+                    api,
+                    sessionId: 's1',
+                    capabilities: { goal: true, goalCreate: true }
+                }}
+            />
+        )
+
+        fireEvent.click(screen.getByText('Set goal'))
+        fireEvent.change(screen.getByLabelText('What should the agent work on?'), {
+            target: { value: 'Ship the feature' }
+        })
+        fireEvent.change(screen.getByLabelText('Token budget (optional)'), {
+            target: { value: '5000' }
+        })
+        fireEvent.submit(screen.getByLabelText('What should the agent work on?').closest('form')!)
+
+        await vi.waitFor(() => {
+            expect(api.createMcodeGoal).toHaveBeenCalledWith('s1', 'Ship the feature', 5000)
+        })
+    })
 })

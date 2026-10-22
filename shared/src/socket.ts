@@ -281,6 +281,12 @@ export interface ClientToServerEvents {
     'background-task': (data: { sid: string; started?: number; completed?: number }) => void
     'messages-consumed': (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean; steered?: boolean }) => void
     'messages-indeterminate': (data: { sid: string; localIds: string[] }) => void
+    /**
+     * The agent did not take these messages: it refused the turn. They go
+     * back into the hub's durable queue so a runner that dies before the
+     * retry cannot lose them.
+     */
+    'messages-released': (data: { sid: string; localIds: string[] }) => void
     /** Native shared-engine queue projection. null = positively acknowledged removal. */
     'native-queue-message': (data: { sid: string; localId: string; text: string | null }) => void
     'messages-steer-state': (data: { sid: string; localIds: string[]; state: 'queued' | 'dispatching' }, cb: (response: { ok: boolean }) => void) => void

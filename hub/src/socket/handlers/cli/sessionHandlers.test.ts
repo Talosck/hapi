@@ -108,6 +108,51 @@ describe('cli session handlers', () => {
         ])
     })
 
+    it('puts a refused message back into the durable queue', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession('released-queue', {}, null, 'default')
+        store.messages.addMessage(session.id, { text: 'refused' }, 'local-refused')
+        store.messages.markMessagesInvoked(session.id, ['local-refused'], Date.now())
+        const socket = new FakeSocket()
+        const events: SyncEvent[] = []
+        registerSessionHandlers(socket as unknown as CliSocketWithData, {
+            store,
+            resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
+            emitAccessError: () => {},
+            onWebappEvent: event => events.push(event)
+        })
+
+        socket.trigger('messages-released', { sid: session.id, localIds: ['local-refused'] })
+
+        expect(store.messages.getImmediateQueuedLocalMessages(session.id).map(row => row.localId))
+            .toEqual(['local-refused'])
+        expect(events).toEqual([
+            { type: 'messages-requeued', sessionId: session.id, localIds: ['local-refused'] }
+        ])
+        store.close()
+    })
+
+    it('ignores a release for a message that was never acknowledged', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession('released-unacked', {}, null, 'default')
+        store.messages.addMessage(session.id, { text: 'waiting' }, 'local-waiting')
+        const socket = new FakeSocket()
+        const events: SyncEvent[] = []
+        registerSessionHandlers(socket as unknown as CliSocketWithData, {
+            store,
+            resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
+            emitAccessError: () => {},
+            onWebappEvent: event => events.push(event)
+        })
+
+        socket.trigger('messages-released', { sid: session.id, localIds: ['local-waiting'] })
+
+        expect(events).toEqual([])
+        expect(store.messages.getImmediateQueuedLocalMessages(session.id).map(row => row.localId))
+            .toEqual(['local-waiting'])
+        store.close()
+    })
+
     it('collapses a live reasoning stream into its settled message', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('reasoning-stream-session', {}, null, 'default')

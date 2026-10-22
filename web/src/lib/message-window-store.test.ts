@@ -14,6 +14,8 @@ import {
     ingestIncomingMessages,
     invalidateMessageWindow,
     markMessagesConsumed,
+    markMessagesIndeterminate,
+    markMessagesRequeued,
     reconcileQueuedLocalIds,
     removeOptimisticMessage,
     rewindMessageWindow,
@@ -1541,6 +1543,104 @@ describe('optimistic and queued-message operations', () => {
             invokedAt: 3_000
         })
         expect(getMessageWindowState(id).tailRevision).toBe(beforeConsumed + 1)
+    })
+
+    it('puts a released message back into the queue', () => {
+        // The agent refused the turn: the message was acknowledged when it
+        // was handed to the agent, but the agent never took it. It is
+        // waiting again, not sent.
+        const id = sessionId('released')
+        ingestIncomingMessages(id, [
+            makeUserMessage({
+                id: 'queued',
+                seq: 1,
+                localId: 'local-1',
+                createdAt: 1_000,
+                invokedAt: null,
+                status: 'queued'
+            })
+        ])
+        markMessagesConsumed(id, ['local-1'], 2_000)
+        expect(getMessageWindowState(id).messages[0]).toMatchObject({
+            status: 'sent',
+            invokedAt: 2_000
+        })
+
+        markMessagesRequeued(id, ['local-1'])
+
+        expect(getMessageWindowState(id).messages[0]).toMatchObject({
+            status: 'queued',
+            invokedAt: null
+        })
+    })
+
+    it('puts an acknowledged message back into the queue when it becomes indeterminate', () => {
+        // The agent was handed the message and then stopped, so the delivery
+        // cannot be proven. The row has to leave the thread state it was
+        // acknowledged into, or the user never sees that it needs a decision.
+        const id = sessionId('indeterminate-delivered')
+        ingestIncomingMessages(id, [
+            makeUserMessage({
+                id: 'queued',
+                seq: 1,
+                localId: 'local-1',
+                createdAt: 1_000,
+                invokedAt: null,
+                status: 'queued'
+            })
+        ])
+        markMessagesConsumed(id, ['local-1'], 2_000)
+
+        markMessagesIndeterminate(id, ['local-1'])
+
+        expect(getMessageWindowState(id).messages[0]).toMatchObject({
+            status: 'queued',
+            invokedAt: null,
+            deliveryState: 'indeterminate'
+        })
+    })
+
+    it('leaves an optimistic row alone when it is requeued', () => {
+        // The web marks a row 'sent' right after the POST, before the agent
+        // acknowledged anything. It was never acknowledged, so a requeue
+        // must not pull it back into the queue.
+        const id = sessionId('requeued-optimistic')
+        ingestIncomingMessages(id, [
+            makeUserMessage({
+                id: 'local-optimistic',
+                localId: 'local-optimistic',
+                invokedAt: null,
+                status: 'sent'
+            })
+        ])
+
+        markMessagesRequeued(id, ['local-optimistic'])
+
+        expect(getMessageWindowState(id).messages[0]).toMatchObject({
+            status: 'sent',
+            invokedAt: null
+        })
+    })
+
+    it('clears the indeterminate marker of a requeued steer without touching its delivery', () => {
+        const id = sessionId('requeued-indeterminate')
+        ingestIncomingMessages(id, [
+            makeUserMessage({
+                id: 'queued',
+                seq: 1,
+                localId: 'local-1',
+                createdAt: 1_000,
+                invokedAt: null,
+                status: 'queued'
+            })
+        ])
+        markMessagesIndeterminate(id, ['local-1'])
+        expect(getMessageWindowState(id).messages[0]?.deliveryState).toBe('indeterminate')
+
+        markMessagesRequeued(id, ['local-1'])
+
+        expect(getMessageWindowState(id).messages[0]?.deliveryState).toBeUndefined()
+        expect(getMessageWindowState(id).messages[0]?.invokedAt).toBeNull()
     })
 
     it('reconciles queued candidates without a secondary pending collection', () => {

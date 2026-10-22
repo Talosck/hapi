@@ -192,6 +192,132 @@ describe('recordMessagesConsumed', () => {
     })
 })
 
+describe('releaseInvokedMessages', () => {
+    it('puts an acknowledged message back into the durable queue', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'release-invoked')
+        const msg = store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'refused' } },
+            'local-refused'
+        )
+
+        store.messages.markMessagesInvoked(session.id, ['local-refused'], Date.now())
+        expect(store.messages.getImmediateQueuedLocalMessages(session.id)).toHaveLength(0)
+
+        expect(store.messages.releaseInvokedMessages(session.id, ['local-refused'])).toEqual(['local-refused'])
+
+        // The row is queued again: it is replayable and it is no longer invoked.
+        const queued = store.messages.getImmediateQueuedLocalMessages(session.id)
+        expect(queued.map((row) => row.localId)).toEqual(['local-refused'])
+        expect(store.messages.getMessages(session.id).find((row) => row.id === msg.id)?.invokedAt ?? null).toBeNull()
+        expect(store.messages.lookupQueuedMessage(session.id, msg.id)).toMatchObject({
+            status: 'queued',
+            localId: 'local-refused'
+        })
+    })
+
+    it('leaves a message that was never acknowledged alone', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'release-uninvoked')
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'waiting' } },
+            'local-waiting'
+        )
+
+        expect(store.messages.releaseInvokedMessages(session.id, ['local-waiting'])).toEqual([])
+        expect(store.messages.getImmediateQueuedLocalMessages(session.id)).toHaveLength(1)
+    })
+
+    it('does not resurrect a cancelled message', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'release-cancelled')
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'cancelled' } },
+            'local-cancelled'
+        )
+        // The user cancels it while it is still queued: the row is gone.
+        expect(store.messages.deleteQueuedMessageById(session.id, 'local-cancelled')).toBe(true)
+
+        expect(store.messages.releaseInvokedMessages(session.id, ['local-cancelled'])).toEqual([])
+        expect(store.messages.getImmediateQueuedLocalMessages(session.id)).toHaveLength(0)
+    })
+
+    it('is idempotent: a second release of the same row changes nothing', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'release-idempotent')
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'twice' } },
+            'local-twice'
+        )
+        store.messages.markMessagesInvoked(session.id, ['local-twice'], Date.now())
+
+        expect(store.messages.releaseInvokedMessages(session.id, ['local-twice'])).toEqual(['local-twice'])
+        expect(store.messages.releaseInvokedMessages(session.id, ['local-twice'])).toEqual([])
+        expect(store.messages.getImmediateQueuedLocalMessages(session.id)).toHaveLength(1)
+    })
+
+    it('holds an acknowledged message instead of claiming the delivery', () => {
+        // The agent was handed the message and then stopped: the delivery
+        // cannot be proven. The row loses the invocation and leaves the
+        // automatic replay, so nothing delivers it a second time.
+        const store = makeStore()
+        const session = makeSession(store, 'indeterminate-acknowledged')
+        const msg = store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'unknown' } },
+            'lid-unknown'
+        )
+        store.messages.markMessagesInvoked(session.id, ['lid-unknown'], Date.now())
+
+        expect(store.messages.markMessagesIndeterminate(session.id, ['lid-unknown'])).toBe(1)
+        // A second call changes nothing.
+        expect(store.messages.markMessagesIndeterminate(session.id, ['lid-unknown'])).toBe(0)
+
+        expect(store.messages.getImmediateQueuedLocalMessages(session.id)).toHaveLength(0)
+        expect(store.messages.getUninvokedLocalMessages(session.id)[0]).toMatchObject({
+            id: msg.id,
+            invokedAt: null,
+            deliveryState: 'indeterminate'
+        })
+    })
+
+    it('records the release through the session facade and touches the session', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'release-facade')
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'facade' } },
+            'local-facade'
+        )
+        store.messages.markMessagesInvoked(session.id, ['local-facade'], Date.now())
+        const originalUpdatedAt = store.sessions.getSession(session.id)?.updatedAt ?? 0
+
+        expect(store.recordMessagesReleased(session.id, ['local-facade'], 'default')).toEqual(['local-facade'])
+        expect(store.sessions.getSession(session.id)?.updatedAt).toBeGreaterThanOrEqual(originalUpdatedAt)
+        expect(store.messages.getImmediateQueuedLocalMessages(session.id)).toHaveLength(1)
+    })
+
+    it('rolls back the release when the session namespace cannot be verified', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'release-rollback')
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'rollback' } },
+            'local-rollback-2'
+        )
+        store.messages.markMessagesInvoked(session.id, ['local-rollback-2'], Date.now())
+
+        expect(() => store.recordMessagesReleased(session.id, ['local-rollback-2'], 'other-namespace'))
+            .toThrow('session not found after messages-released transition')
+        expect(store.messages.getLocalMessageStates(session.id, ['local-rollback-2']))
+            .toEqual([{ localId: 'local-rollback-2', invokedAt: expect.any(Number) }])
+    })
+})
+
 describe('position pagination and structural epochs', () => {
     it('returns rows strictly after a cursor and respects an inclusive snapshot head', () => {
         const store = makeStore()

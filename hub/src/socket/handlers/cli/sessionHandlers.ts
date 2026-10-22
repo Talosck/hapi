@@ -507,6 +507,34 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         onWebappEvent?.({ type: 'messages-indeterminate', sessionId: data.sid, localIds })
     })
 
+    socket.on('messages-released', (data: { sid: string; localIds: string[] }) => {
+        if (!data || typeof data.sid !== 'string' || !Array.isArray(data.localIds)) {
+            return
+        }
+        const localIds = data.localIds.filter((id): id is string => typeof id === 'string')
+        if (localIds.length === 0) return
+        const sessionAccess = resolveSessionAccess(data.sid)
+        if (!sessionAccess.ok) {
+            emitAccessError('session', data.sid, sessionAccess.reason)
+            return
+        }
+        let released: string[]
+        try {
+            released = store.recordMessagesReleased(
+                data.sid,
+                localIds,
+                sessionAccess.value.namespace
+            )
+        } catch (err) {
+            console.error('recordMessagesReleased failed', err)
+            return
+        }
+        if (released.length === 0) return
+        // The rows are back in the normal queue: the web shows them as
+        // waiting again instead of as delivered.
+        onWebappEvent?.({ type: 'messages-requeued', sessionId: data.sid, localIds: released })
+    })
+
     socket.on('messages-steer-state', (
         data: { sid: string; localIds: string[]; state: 'queued' | 'dispatching' },
         ack?: (response: { ok: boolean }) => void

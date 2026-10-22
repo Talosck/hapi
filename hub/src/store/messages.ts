@@ -909,6 +909,44 @@ export function markMessagesInvoked(
     ).run(invokedAt, sessionId, ...localIds).changes
 }
 
+/**
+ * Put an acknowledged message back into the durable queue.
+ *
+ * A message is acknowledged when the runner hands it to the agent, and the
+ * agent can still answer "not now" - it refuses the turn. The row was
+ * stamped invoked, so the hub believes the message was delivered, and a
+ * runner that dies before the retry loses it: the only copy left was in the
+ * runner's memory. Releasing the row clears the invocation and returns it
+ * to the queue, where the replay path picks it up again.
+ *
+ * Only rows that are actually invoked are released: a row that was never
+ * acknowledged is already queued, and a cancelled row no longer exists.
+ * Returns the local ids that were released.
+ */
+export function releaseInvokedMessages(
+    db: Database,
+    sessionId: string,
+    localIds: string[]
+): string[] {
+    if (localIds.length === 0) return []
+    const placeholders = localIds.map(() => '?').join(', ')
+    const rows = prepareCached(db, `
+        SELECT local_id FROM messages
+        WHERE session_id = ?
+          AND local_id IN (${placeholders})
+          AND invoked_at IS NOT NULL
+    `).all(sessionId, ...localIds) as Array<{ local_id: string }>
+    if (rows.length === 0) return []
+    prepareCached(db, `
+        UPDATE messages
+        SET invoked_at = NULL, delivery_state = 'queued'
+        WHERE session_id = ?
+          AND local_id IN (${placeholders})
+          AND invoked_at IS NOT NULL
+    `).run(sessionId, ...localIds)
+    return rows.map((row) => row.local_id)
+}
+
 /** Move an uninvoked steer through its durable delivery states. */
 export function setMessagesDeliveryState(
     db: Database,
@@ -933,13 +971,29 @@ export function setMessagesDeliveryState(
     ).run(state, sessionId, ...localIds).changes
 }
 
-/** Hold an ambiguous steer out of automatic replay without claiming delivery. */
+/**
+ * Hold a message whose delivery cannot be proven.
+ *
+ * The agent was handed the message, so it may have consumed it - but it
+ * stopped before anything could tell. The row loses its invocation (the
+ * delivery is not proven) and leaves the automatic replay, so nothing
+ * delivers it a second time: the user resolves it explicitly (retry or
+ * cancel). Rows that are already indeterminate are left alone.
+ */
 export function markMessagesIndeterminate(
     db: Database,
     sessionId: string,
     localIds: string[]
 ): number {
-    return setMessagesDeliveryState(db, sessionId, localIds, 'indeterminate')
+    if (localIds.length === 0) return 0
+    const placeholders = localIds.map(() => '?').join(', ')
+    return prepareCached(db, `
+        UPDATE messages
+        SET invoked_at = NULL, delivery_state = 'indeterminate'
+        WHERE session_id = ?
+          AND local_id IN (${placeholders})
+          AND delivery_state != 'indeterminate'
+    `).run(sessionId, ...localIds).changes
 }
 
 /** Settle immediate queued rows on an archived clear source without touching

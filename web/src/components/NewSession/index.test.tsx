@@ -48,7 +48,11 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/lib/use-translation', () => ({
-    useTranslation: () => ({ t: (key: string) => key })
+    // The key itself is the label everywhere else in this file; the model
+    // picker's "Default" is translated, so it needs a real word here.
+    useTranslation: () => ({
+        t: (key: string) => (key === 'newSession.model.default' ? 'Default' : key)
+    })
 }))
 vi.mock('@/lib/toast-context', () => ({
     useToast: () => ({ addToast: mocks.addToast })

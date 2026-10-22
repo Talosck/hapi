@@ -45,7 +45,25 @@ export type AgentEvent =
     // The agent refused to start the turn and the message stays queued. This
     // is HAPI talking about the queue, not the agent speaking: it has its own
     // type so a client can render it as a system notice.
-    | { type: 'queue-notice'; reason: 'busy' | 'compacting' | 'mutating'; message: string; waitingSeconds?: number }
+    // The reasons MiniMax Code refuses a turn with. Every one of them means
+    // "later": the message is kept and goes out when the session is ready.
+    | {
+        type: 'queue-notice'
+        reason:
+            | 'busy'
+            | 'compacting'
+            | 'mutating'
+            | 'queued'
+            | 'paused'
+            | 'conflict'
+            | 'waiting'
+            | 'unavailable'
+            | 'plan'
+            | 'duplicate'
+            | 'unknown'
+        message: string
+        waitingSeconds?: number
+    }
     | { type: 'error'; message: string }
     | { type: 'title-changed'; title: string }
     | { type: 'limit-reached'; endsAt: number; limitType: string }

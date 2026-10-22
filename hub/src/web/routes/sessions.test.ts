@@ -241,6 +241,24 @@ describe('mcode goal routes', () => {
         expect(((await res.json()) as { success?: boolean }).success).toBe(false)
     })
 
+    it('names the field that failed instead of blaming the objective', async () => {
+        // A budget of 1.5 tokens is not a missing objective: one message for
+        // every failure sends the user to the wrong field.
+        const session = mcodeSession()
+        const { app } = createApp(session)
+
+        const res = await app.request('/api/sessions/session-1/mcode/goal', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ objective: 'Ship it', tokenBudget: 1.5 })
+        })
+
+        expect(res.status).toBe(400)
+        const body = await res.json() as { error?: string }
+        expect(body.error).toContain('tokenBudget')
+        expect(body.error).not.toContain('needs an objective')
+    })
+
     it('refuses goal control for a session of another flavor', async () => {
         const session = mcodeSession('codex')
         const { app } = createApp(session)

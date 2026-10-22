@@ -66,7 +66,9 @@ describe('McodeExtensionControl', () => {
             goalPatch: true,
             goalClear: true,
             delegation: true,
-            delegationStop: true
+            delegationStop: true,
+            // The advertised surface has no steer method.
+            steer: false
         });
     });
 

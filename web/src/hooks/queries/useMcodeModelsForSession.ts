@@ -2,6 +2,39 @@ import { useQuery } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
 import type { McodeModelSummary } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
+import type { McodeModelsResponse } from '@hapi/protocol/apiTypes'
+
+/**
+ * How often the catalog is re-read while it is still empty.
+ *
+ * The agent publishes its catalog when it starts, so a session that is not
+ * connected yet answers with an empty list. Polling for a short while lets
+ * the picker fill in as soon as the agent is up, instead of waiting for an
+ * unrelated refresh.
+ */
+const MCODE_MODEL_DISCOVERY_POLL_MS = 1000
+const MAX_MCODE_MODEL_DISCOVERY_POLLS = 10
+
+export function shouldRetryMcodeModelsQuery(failureCount: number): boolean {
+    return failureCount < 3
+}
+
+export function getMcodeModelsRefetchInterval(
+    enabled: boolean,
+    data: McodeModelsResponse | undefined,
+    pollCount: number
+): 1000 | false {
+    if (!enabled || pollCount >= MAX_MCODE_MODEL_DISCOVERY_POLLS) {
+        return false
+    }
+    if (!data) {
+        return MCODE_MODEL_DISCOVERY_POLL_MS
+    }
+    if (data.success === false) {
+        return MCODE_MODEL_DISCOVERY_POLL_MS
+    }
+    return (data.availableModels?.length ?? 0) > 0 ? false : MCODE_MODEL_DISCOVERY_POLL_MS
+}
 
 export function useMcodeModelsForSession(args: {
     api: ApiClient | null
@@ -26,7 +59,12 @@ export function useMcodeModelsForSession(args: {
         },
         enabled,
         staleTime: 30_000,
-        retry: false,
+        retry: (failureCount) => shouldRetryMcodeModelsQuery(failureCount),
+        refetchInterval: (query) => getMcodeModelsRefetchInterval(
+            enabled,
+            query.state.data as McodeModelsResponse | undefined,
+            query.state.dataUpdateCount + query.state.errorUpdateCount
+        ),
     })
 
     return {

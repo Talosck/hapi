@@ -306,6 +306,13 @@ export function buildSessionStatusData(args: {
     tasks: readonly TodoItem[] | null | undefined
     blocks: readonly ChatBlock[]
     messages: readonly NormalizedMessage[]
+    /**
+     * The messages the delegation snapshot is read from.
+     *
+     * The snapshot is session state, not transcript: reading it from the
+     * visible window loses it as soon as the user pages into the history.
+     */
+    snapshotMessages?: readonly NormalizedMessage[]
     backgroundTaskCount?: number
     /**
      * Keep the panel rendered even when the session has no status to show.
@@ -329,7 +336,7 @@ export function buildSessionStatusData(args: {
     const possibleTerminalCommands = undiscoveredTerminalCount > 0
         ? detectedTerminals.uncertain.map((terminal) => terminal.command)
         : []
-    const snapshot = latestSubagentSnapshot(args.messages)
+    const snapshot = latestSubagentSnapshot(args.snapshotMessages ?? args.messages)
     const toolSubagents = tools
         .map(subagentFromBlock)
         .filter((subagent): subagent is SessionStatusSubagent => subagent !== null)

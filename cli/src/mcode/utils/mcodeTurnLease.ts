@@ -57,14 +57,52 @@ function readNumber(value: unknown): number | null {
 }
 
 /**
+ * The process that holds a lease, read out of its owner id.
+ *
+ * The agent writes `turn-lease:<pid>:<uuid>.<uuid>`, and the pid is the
+ * agent process. The agent itself reclaims a lease whose owner is gone by
+ * asking whether that process is alive, and HAPI can ask the same question.
+ */
+export function parseMcodeLeaseOwnerPid(ownerId: string): number | null {
+    const match = /^turn-lease:(\d+):/.exec(ownerId);
+    if (!match) return null;
+    const pid = Number(match[1]);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * Whether the process that holds the lease is still running.
+ *
+ * A lease whose owner died is a leftover: nobody will ever release it, and a
+ * session that waits for it waits forever.
+ */
+export function isMcodeLeaseOwnerAlive(ownerId: string): boolean {
+    const pid = parseMcodeLeaseOwnerPid(ownerId);
+    if (pid === null) return true;
+    try {
+        // Signal 0 tests for the process without touching it.
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        // EPERM means the process is there but belongs to someone else.
+        return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+}
+
+/**
  * Reads the turn lease of a session from an open runtime index.
  *
  * Split out from the file access so the reading rules can be tested without
  * a database.
+ *
+ * A lease that has expired, or whose owner is no longer running, is not a
+ * lease: the agent reclaims both itself, and a leftover row would keep the
+ * message waiting for a turn that will never end.
  */
 export function readMcodeTurnLeaseFromDatabase(
     database: McodeLeaseQuery,
-    sessionId: string
+    sessionId: string,
+    nowMs: number = Date.now()
 ): McodeTurnLeaseState {
     try {
         const row = database.query(LEASE_QUERY).get(sessionId) as
@@ -82,6 +120,11 @@ export function readMcodeTurnLeaseFromDatabase(
         // into a session that is busy.
         if (!ownerId || !ownerKind || acquiredAtMs === null || expiresAtMs === null) {
             return { status: 'unknown' };
+        }
+        if (expiresAtMs <= nowMs || !isMcodeLeaseOwnerAlive(ownerId)) {
+            // The lease is over: it expired, or the agent that held it is
+            // gone and nobody will ever release it.
+            return { status: 'free' };
         }
         return {
             status: 'held',

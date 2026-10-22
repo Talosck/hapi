@@ -29,6 +29,7 @@ import {
     UploadFileRequestSchema
 } from '@hapi/protocol'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
+import type { ZodError } from 'zod'
 import type { SlashCommand } from '@hapi/protocol/apiTypes'
 import { Hono, type Context } from 'hono'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
@@ -69,6 +70,21 @@ function estimateBase64Bytes(base64: string): number {
     if (len === 0) return 0
     const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
     return Math.floor((len * 3) / 4) - padding
+}
+
+/**
+ * What is wrong with a goal request, in the words of the request itself.
+ *
+ * One message for every validation failure sends the user to the wrong
+ * field: a budget of `1.5` tokens is reported as a missing objective. The
+ * schema knows which field failed, so the answer names it.
+ */
+export function describeGoalIssues(error: ZodError): string {
+    const issues = error.issues.map((issue) => {
+        const field = issue.path.join('.')
+        return field ? `${field}: ${issue.message}` : issue.message
+    })
+    return issues.length > 0 ? issues.join('; ') : 'The goal request is not valid'
 }
 
 export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
@@ -1582,7 +1598,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const body = await c.req.json().catch(() => null)
         const parsed = McodeGoalCreateRequestSchema.safeParse(body)
         if (!parsed.success) {
-            return c.json({ success: false, error: 'A goal needs an objective' }, 400)
+            return c.json({ success: false, error: describeGoalIssues(parsed.error) }, 400)
         }
         try {
             return c.json(await engine.createMcodeGoal(
@@ -1609,7 +1625,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const body = await c.req.json().catch(() => null)
         const parsed = McodeGoalPatchRequestSchema.safeParse(body)
         if (!parsed.success) {
-            return c.json({ success: false, error: 'Invalid goal update' }, 400)
+            return c.json({ success: false, error: describeGoalIssues(parsed.error) }, 400)
         }
         try {
             return c.json(await engine.patchMcodeGoal(sessionResult.sessionId, parsed.data))

@@ -3,8 +3,14 @@ import { formatDuration } from '@/chat/presentation'
 import type { SessionStatusData, SessionStatusSubagent } from '@/chat/sessionStatus'
 import { ChecklistList } from '@/components/ToolCard/checklist'
 import { useTranslation } from '@/lib/use-translation'
-import { ApiError, type ApiClient } from '@/api/client'
-import type { McodeConnectorApp, McodeConnectorAuth, McodeExtensionCapabilities, ThreadGoal } from '@hapi/protocol'
+import { ApiError, apiErrorMessage, type ApiClient } from '@/api/client'
+import type {
+    McodeConnectorApp,
+    McodeConnectorAuth,
+    McodeDelegationStopReceipt,
+    McodeExtensionCapabilities,
+    ThreadGoal
+} from '@hapi/protocol'
 
 function Section(props: { title: string; children: ReactNode }) {
     return (
@@ -43,16 +49,17 @@ export type McodeGoalControls = {
 
 function ControlButton(props: {
     label: string
-    onClick: () => void
+    onClick?: () => void
     disabled?: boolean
     tone?: 'default' | 'danger'
+    type?: 'button' | 'submit'
 }) {
     const tone = props.tone === 'danger'
         ? 'border-red-300 text-red-600 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/40'
         : 'border-[var(--app-border)] text-[var(--app-fg)] hover:bg-[var(--app-hover-bg)]'
     return (
         <button
-            type="button"
+            type={props.type ?? 'button'}
             onClick={props.onClick}
             disabled={props.disabled}
             className={`rounded border px-1.5 py-0.5 text-[11px] disabled:opacity-50 ${tone}`}
@@ -86,14 +93,16 @@ function GoalControls(props: {
     const canPatch = props.capabilities.goalPatch === true
     const canClear = props.capabilities.goalClear === true
 
-    const run = async (action: () => Promise<{ success: boolean; error?: string }>) => {
+    const run = async (action: () => Promise<{ success: boolean; error?: string }>): Promise<boolean> => {
         setBusy(true)
         setError(null)
         try {
             const result = await action()
             if (!result.success) {
                 setError(result.error ?? t('session.status.goal.actionFailed'))
+                return false
             }
+            return true
         } catch (e) {
             // The hub rejects goal changes on a session that is no longer
             // running. Its 409 carries a JSON body, which is not something to
@@ -101,8 +110,9 @@ function GoalControls(props: {
             setError(
                 e instanceof ApiError && e.status === 409 && e.code === 'session_inactive'
                     ? t('chat.sendError.sessionInactive')
-                    : e instanceof Error ? e.message : t('session.status.goal.actionFailed')
+                    : apiErrorMessage(e, t('session.status.goal.actionFailed'))
             )
+            return false
         } finally {
             setBusy(false)
         }
@@ -112,11 +122,14 @@ function GoalControls(props: {
         const trimmed = objective.trim()
         if (!trimmed) return
         const parsedBudget = budget.trim() ? Number(budget.trim()) : null
-        if (parsedBudget !== null && (!Number.isFinite(parsedBudget) || parsedBudget <= 0)) {
+        if (parsedBudget !== null && (!Number.isFinite(parsedBudget) || !Number.isInteger(parsedBudget) || parsedBudget <= 0)) {
             setError(t('session.status.goal.budgetInvalid'))
             return
         }
-        await run(() => props.api.createMcodeGoal(props.sessionId, trimmed, parsedBudget))
+        // A rejected goal keeps the text the user wrote: throwing it away
+        // makes a failed submit cost them the whole objective.
+        const created = await run(() => props.api.createMcodeGoal(props.sessionId, trimmed, parsedBudget))
+        if (!created) return
         setObjective('')
         setBudget('')
         setShowForm(false)
@@ -178,7 +191,18 @@ function GoalControls(props: {
     return (
         <div className="mt-1.5 flex flex-col gap-1.5">
             {showForm ? (
-                <div className="flex flex-col gap-1.5">
+                <form
+                    className="flex flex-col gap-1.5"
+                    // The browser's own validation answers in the browser's
+                    // language and blocks the submit before the app can say
+                    // anything: the messages below are the ones the user
+                    // reads.
+                    noValidate
+                    onSubmit={(e) => {
+                        e.preventDefault()
+                        void submitCreate()
+                    }}
+                >
                     <input
                         type="text"
                         value={objective}
@@ -190,6 +214,8 @@ function GoalControls(props: {
                     <input
                         type="number"
                         min={1}
+                        step={1}
+                        inputMode="numeric"
                         value={budget}
                         onChange={(e) => setBudget(e.target.value)}
                         placeholder={t('session.status.goal.budgetPlaceholder')}
@@ -198,9 +224,9 @@ function GoalControls(props: {
                     />
                     <div className="flex items-center gap-1.5">
                         <ControlButton
+                            type="submit"
                             label={t('session.status.goal.start')}
                             disabled={busy || objective.trim().length === 0}
-                            onClick={() => void submitCreate()}
                         />
                         <ControlButton
                             label={t('session.status.goal.cancel')}
@@ -211,14 +237,28 @@ function GoalControls(props: {
                     <div className="text-[11px] text-[var(--app-hint)]">
                         {t('session.status.goal.startsImmediately')}
                     </div>
-                </div>
+                </form>
             ) : null}
             {controls.length > 0 ? (
                 <div className="flex flex-wrap items-center gap-1.5">{controls}</div>
             ) : null}
-            {error ? <div className="text-[11px] text-red-600">{error}</div> : null}
+            {error ? <div role="alert" className="text-[11px] text-red-600">{error}</div> : null}
         </div>
     )
+}
+
+/**
+ * The sign-in state of the connector broker.
+ *
+ * An app that is not signed in looks exactly like a working one until the
+ * agent calls it and fails, so the state is part of the panel.
+ */
+function connectorAuthTone(status: string): 'ok' | 'warn' | 'error' {
+    const normalized = status.trim().toLowerCase()
+    if (normalized === 'authenticated') return 'ok'
+    if (normalized.includes('expir')) return 'error'
+    if (normalized.includes('unauth') || normalized.includes('missing')) return 'warn'
+    return 'warn'
 }
 
 /**
@@ -240,22 +280,40 @@ function ConnectedApps(props: {
             <div className="text-xs text-[var(--app-hint)]">{t('session.status.apps.unavailable')}</div>
         )
     }
-    if (props.apps.length === 0) {
-        return (
-            <div className="text-xs text-[var(--app-hint)]">{t('session.status.apps.none')}</div>
-        )
-    }
+
+    const auth = props.auth
+    const authTone = auth ? connectorAuthTone(auth.status) : null
 
     return (
         <div className="flex flex-col gap-1">
-            {props.apps.map((app) => (
-                <div key={app.provider} className="flex min-w-0 items-baseline gap-1.5">
-                    <span className="min-w-0 break-words text-sm text-[var(--app-fg)]">{app.provider}</span>
-                    <span className="ml-auto shrink-0 text-xs text-[var(--app-hint)]">
-                        {t('session.status.apps.toolCount', { count: app.toolCount })}
-                    </span>
+            {props.apps.length === 0 ? (
+                <div className="text-xs text-[var(--app-hint)]">{t('session.status.apps.none')}</div>
+            ) : (
+                props.apps.map((app) => (
+                    <div key={app.provider} className="flex min-w-0 items-baseline gap-1.5">
+                        <span className="min-w-0 break-words text-sm text-[var(--app-fg)]">{app.provider}</span>
+                        <span className="ml-auto shrink-0 text-xs text-[var(--app-hint)]">
+                            {t('session.status.apps.toolCount', { count: app.toolCount })}
+                        </span>
+                    </div>
+                ))
+            )}
+            {auth ? (
+                <div
+                    className={`text-[11px] ${authTone === 'ok'
+                        ? 'text-emerald-600'
+                        : authTone === 'error' ? 'text-red-600' : 'text-amber-600'}`}
+                >
+                    {authTone === 'ok'
+                        ? t('session.status.apps.auth.ok')
+                        : authTone === 'error'
+                            ? t('session.status.apps.auth.expired')
+                            : t('session.status.apps.auth.missing', { status: auth.status })}
+                    {auth.expiresAt ? ` · ${t('session.status.apps.auth.expiresAt', {
+                        date: new Date(auth.expiresAt).toLocaleString()
+                    })}` : ''}
                 </div>
-            ))}
+            ) : null}
         </div>
     )
 }
@@ -268,15 +326,24 @@ export function SessionStatusPanel(props: {
         auth: McodeConnectorAuth | null
         error: string | null
     } | null
+    /**
+     * Whether the session is still running.
+     *
+     * A session that ended leaves its subagents without an end time, so the
+     * elapsed clock would keep counting for a session nobody can act on any
+     * more.
+     */
+    active?: boolean
 }) {
     const { data } = props
     const { t } = useTranslation()
     const completedTasks = data.tasks.filter((task) => task.status === 'completed').length
-    const hasLiveElapsed = data.terminals.length > 0
-        || data.subagents.some((subagent) => subagent.endedAt === null && subagent.startedAt !== null)
+    const hasLiveElapsed = props.active !== false && (data.terminals.length > 0
+        || data.subagents.some((subagent) => subagent.endedAt === null && subagent.startedAt !== null))
     const [now, setNow] = useState(() => Date.now())
     const [stopping, setStopping] = useState(false)
     const [stopError, setStopError] = useState<string | null>(null)
+    const [stopReceipt, setStopReceipt] = useState<McodeDelegationStopReceipt | null>(null)
 
     useEffect(() => {
         if (!hasLiveElapsed) return
@@ -292,13 +359,19 @@ export function SessionStatusPanel(props: {
         if (!controls?.api) return
         setStopping(true)
         setStopError(null)
+        setStopReceipt(null)
         try {
             const result = await controls.api.stopMcodeDelegation(controls.sessionId)
             if (!result.success) {
                 setStopError(result.error ?? t('session.status.subagents.stopFailed'))
+                return
             }
+            // The receipt says which delegated sessions really stopped: a
+            // partial stop is not a success, and the user has to see the
+            // difference.
+            setStopReceipt(result.receipt ?? null)
         } catch (e) {
-            setStopError(e instanceof Error ? e.message : t('session.status.subagents.stopFailed'))
+            setStopError(apiErrorMessage(e, t('session.status.subagents.stopFailed')))
         } finally {
             setStopping(false)
         }
@@ -393,7 +466,18 @@ export function SessionStatusPanel(props: {
                                         onClick={() => void stopDelegation()}
                                     />
                                     {stopError ? (
-                                        <div className="text-[11px] text-red-600">{stopError}</div>
+                                        <div role="alert" className="text-[11px] text-red-600">{stopError}</div>
+                                    ) : null}
+                                    {stopReceipt ? (
+                                        <div className="text-[11px] text-[var(--app-hint)]">
+                                            {t('session.status.subagents.stopped', { count: stopReceipt.stoppedSessionIds.length })}
+                                            {stopReceipt.activeSessionIds.length > 0 ? ` · ${t('session.status.subagents.stillActive', {
+                                                count: stopReceipt.activeSessionIds.length
+                                            })}` : ''}
+                                            {stopReceipt.failedSessionIds.length > 0 ? ` · ${t('session.status.subagents.stopFailedCount', {
+                                                count: stopReceipt.failedSessionIds.length
+                                            })}` : ''}
+                                        </div>
                                     ) : null}
                                 </div>
                             ) : null}

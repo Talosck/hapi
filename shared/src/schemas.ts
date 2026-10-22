@@ -55,7 +55,16 @@ const McodeExtensionCapabilitiesSchema = z.object({
     /** The agent streams the delegation tree (`mcode/session/delegation_update`). */
     delegation: z.boolean().optional(),
     /** The agent can stop delegated sessions (`mcode/session/delegation/stop`). */
-    delegationStop: z.boolean().optional()
+    delegationStop: z.boolean().optional(),
+    /**
+     * The agent can steer a message into the running turn
+     * (`mcode/session/steer`).
+     *
+     * The method is part of the agent's optional extension surface: a build
+     * that does not advertise it cannot steer, and the clients must not offer
+     * the action there.
+     */
+    steer: z.boolean().optional()
 })
 
 export type McodeExtensionCapabilities = z.infer<typeof McodeExtensionCapabilitiesSchema>

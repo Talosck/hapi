@@ -4,6 +4,14 @@ import type { McodeConnectorApp, McodeConnectorAuth } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 
 /**
+ * How often the connected apps are re-read.
+ *
+ * The machine caches the catalog for the same span, so a faster poll would
+ * only ask for the answer it already has.
+ */
+const APPS_REFRESH_MS = 5 * 60_000
+
+/**
  * The apps connected to a machine's MiniMax Code installation.
  *
  * The connector tools are not part of the ACP surface: the agent reaches them
@@ -36,6 +44,12 @@ export function useMcodeApps(args: {
         // outside HAPI - a short stale time keeps the list honest without
         // re-running a subprocess on every render.
         staleTime: 60_000,
+        // The user comes back to the tab right after connecting an app, and
+        // the global query defaults do not re-read on focus.
+        refetchOnWindowFocus: true,
+        // The machine caches the catalog for the same span, so polling faster
+        // than that would only ask the machine for the answer it already has.
+        refetchInterval: APPS_REFRESH_MS,
         retry: false,
     })
 

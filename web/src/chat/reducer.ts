@@ -60,6 +60,10 @@ export type ReduceChatBlocksOptions = {
 
 function getLatestThreadGoal(normalized: NormalizedMessage[]): ThreadGoal | null {
     let sawNewerNonGoalUserMessage = false
+    // The threads whose goal a newer clear event took away. A clear that
+    // names a thread only takes that thread's goal, so the goal of another
+    // thread stays.
+    const clearedThreadIds: string[] = []
     for (let i = normalized.length - 1; i >= 0; i--) {
         const msg = normalized[i]
         if (msg.role === 'user') {
@@ -70,10 +74,17 @@ function getLatestThreadGoal(normalized: NormalizedMessage[]): ThreadGoal | null
         }
         if (msg.role !== 'event') continue
         const event = msg.content as AgentEvent
-        if (event.type === 'thread-goal-cleared') return null
+        if (event.type === 'thread-goal-cleared') {
+            const threadId = (event as { threadId?: string }).threadId
+            if (!threadId) return null
+            clearedThreadIds.push(threadId)
+            continue
+        }
         if (event.type === 'thread-goal-updated') {
             const goal = (event as { goal?: ThreadGoal }).goal ?? null
-            if (goal?.status === 'complete' && sawNewerNonGoalUserMessage) {
+            if (!goal) continue
+            if (goal.threadId && clearedThreadIds.includes(goal.threadId)) continue
+            if (goal.status === 'complete' && sawNewerNonGoalUserMessage) {
                 return null
             }
             return goal
