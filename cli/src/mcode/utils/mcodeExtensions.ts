@@ -392,38 +392,12 @@ export function toHapiThreadGoal(goal: McodeGoal, threadId: string): ThreadGoal 
 }
 
 /**
- * The statuses the agent accepts in a `mcode/session/goal/patch` call.
- *
- * `usage_limited` is a runtime-derived state the user cannot set, so it is
- * not part of the patchable set.
+ * The statuses the agent accepts in a `mcode/session/goal/patch` call, and
+ * the translation from HAPI's spelling, live in the protocol package: the
+ * REST schema validates against the same list, so the request contract and
+ * the CLI cannot drift apart.
  */
-export const MCODE_GOAL_PATCH_STATUSES = [
-    'active',
-    'paused',
-    'blocked',
-    'complete',
-    'budget_limited'
-] as const;
-
-export type McodeGoalPatchStatus = (typeof MCODE_GOAL_PATCH_STATUSES)[number];
-
-const HAPI_TO_MCODE_GOAL_STATUS: Partial<Record<ThreadGoal['status'], McodeGoalPatchStatus>> = {
-    active: 'active',
-    paused: 'paused',
-    blocked: 'blocked',
-    complete: 'complete',
-    budgetLimited: 'budget_limited'
-};
-
-/**
- * Maps HAPI's thread-goal status onto a status the agent accepts in a patch.
- *
- * Returns null for a status the agent cannot be told to enter (for example
- * `usageLimited`, which the agent derives from its own usage counters).
- */
-export function toMcodeGoalPatchStatus(status: ThreadGoal['status']): McodeGoalPatchStatus | null {
-    return HAPI_TO_MCODE_GOAL_STATUS[status] ?? null;
-}
+export { toMcodeGoalPatchStatus } from '@hapi/protocol';
 
 /**
  * Parses the receipt a `mcode/session/delegation/stop` call returns.

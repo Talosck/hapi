@@ -10,6 +10,7 @@ import {
     isPermissionModeAllowedForFlavor,
     isSteeringSupportedForFlavor,
     isSteeringSupportedForSession,
+    STEERING_SUPPORTED_FLAVORS,
 } from './modes'
 
 describe('Gemini CLI sunset (read-only, not creatable)', () => {
@@ -199,5 +200,16 @@ describe('isSteeringSupportedForSession', () => {
     it('rejects non-steerable flavors', () => {
         expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(false)
         expect(isSteeringSupportedForSession(null)).toBe(false)
+    })
+
+    it('follows the flavor whitelist instead of a second list', () => {
+        // The session gate used to hardcode 'codex' | 'pi' | 'mcode', so a
+        // flavor added to the whitelist did nothing. Now every flavor on the
+        // whitelist steers, except the ones with a per-session condition.
+        for (const flavor of STEERING_SUPPORTED_FLAVORS) {
+            if (flavor === 'cursor') continue
+            expect(isSteeringSupportedForSession({ flavor })).toBe(true)
+        }
+        expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(false)
     })
 })

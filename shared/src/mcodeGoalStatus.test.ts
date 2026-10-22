@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'bun:test'
-import { MCODE_GOAL_STATUS_MAP, toHapiGoalStatus } from './mcodeGoalStatus'
+import {
+    HAPI_TO_MCODE_GOAL_STATUS,
+    MCODE_GOAL_PATCHABLE_STATUSES,
+    MCODE_GOAL_STATUS_MAP,
+    toHapiGoalStatus,
+    toMcodeGoalPatchStatus
+} from './mcodeGoalStatus'
 
 describe('mcode goal status', () => {
     it('maps the agent spelling onto HAPI spelling', () => {
@@ -31,5 +37,25 @@ describe('mcode goal status', () => {
             'paused',
             'usage_limited',
         ])
+    })
+})
+
+describe('mcode goal patch statuses', () => {
+    it('maps HAPI status spellings onto the agent spellings', () => {
+        expect(toMcodeGoalPatchStatus('active')).toBe('active')
+        expect(toMcodeGoalPatchStatus('paused')).toBe('paused')
+        expect(toMcodeGoalPatchStatus('blocked')).toBe('blocked')
+        expect(toMcodeGoalPatchStatus('complete')).toBe('complete')
+        expect(toMcodeGoalPatchStatus('budgetLimited')).toBe('budget_limited')
+    })
+
+    it('refuses a status a client may not set', () => {
+        // `usage_limited` is derived by the agent from its own counters. The
+        // agent would accept it in a patch; HAPI refuses to fabricate it.
+        expect(toMcodeGoalPatchStatus('usageLimited')).toBeNull()
+    })
+
+    it('keeps the patchable set and the map in step', () => {
+        expect(Object.keys(HAPI_TO_MCODE_GOAL_STATUS).sort()).toEqual([...MCODE_GOAL_PATCHABLE_STATUSES].sort())
     })
 })

@@ -86,48 +86,79 @@
 
 ## P1 — 契约不一致（不改就会持续长出新 bug）
 
-### B5. patch 目标状态里有一个 agent 拒绝的值
+### B5. patch 目标状态里有一个 HAPI 自己拒绝的值 ✅ 已修（第 5 轮）
 
-`shared/src/apiTypes.ts:1001-1012` 的 `McodeGoalPatchRequestSchema` 允许 `status: 'usageLimited'`，但：
+`shared/src/apiTypes.ts` 的 `McodeGoalPatchRequestSchema` 允许 `status: 'usageLimited'`，但 HAPI 自己的 CLI 明确拒绝：
+`cli/src/mcode/mcodeRemoteLauncher.ts` → `MiniMax Code cannot be asked to enter the "usageLimited" goal status`。
 
-- agent 的 patchable 集合没有它：`cli/src/mcode/utils/mcodeExtensions.ts:395-405`（`usage_limited` 是运行时派生状态）。
-- CLI 明确拒绝：`cli/src/mcode/mcodeRemoteLauncher.ts:1049-1054` → `MiniMax Code cannot be asked to enter the "usageLimited" goal status`。
+**症状**：REST 返回 HTTP **200** + `{success:false}`，而不是 400。schema 说合法、管道说非法。
 
-**症状**：REST 返回 HTTP **200** + `{success:false}`，而不是 400。schema 说合法、agent 说非法。
+> **⚠️ 更正（本轮回查 agent 源码后）**：原文写的是「agent 的 patchable 集合没有它」——**这是错的**。
+> agent 的 patch 归一化 `HRe` 用 `iKt = new Set(["active","paused","complete","blocked","budget_limited","usage_limited"])`
+> 校验状态，**`usage_limited` 是接受的**（agent 源码 `chunk-QEPCDCRA.js`）。
+> 挡它的是 **HAPI 自己的**映射表（当时在 `cli/src/mcode/utils/mcodeExtensions.ts`）。
+> 结论不变（schema 与管道不一致），但**理由要改**：这是 HAPI 的契约决定，不是 agent 的拒绝 ——
+> `usage_limited` 是 agent 从自己的用量计数派生出来的状态（provider 配额 / 限流），
+> 不该由客户端伪造。把目标**移出**该状态（`active`）不受影响。
 
-**附带**：shared 的测试把这个错误值钉住了 —— `shared/src/schemas.mcodeExtensions.test.ts:60`。修的时候要连测试一起改。
+**附带**：shared 的测试把这个错误值钉住了 —— `shared/src/schemas.mcodeExtensions.test.ts`。修的时候要连测试一起改。
 
-### B6. patch 允许空 patch
+### B6. patch 允许空 patch ✅ 已修（第 5 轮）
 
-`McodeGoalPatchRequestSchema.safeParse({}).success === true`，但 CLI 晚一步才拒（「A goal update needs at least one field」，`cli/src/mcode/mcodeRemoteLauncher.ts:1062-1064`）。同样该在 schema 层用 `.refine()` 挡掉，让 hub 返 400。
+`McodeGoalPatchRequestSchema.safeParse({}).success === true`，但 CLI 晚一步才拒（「A goal update needs at least one field」）。同样该在 schema 层用 `.refine()` 挡掉，让 hub 返 400。
 
-### B7. `tokenBudget: null` 在 create 被丢弃、在 patch 被透传
+> agent 自己的行为与修完的契约一致：patch 归一化 `HRe` 在没有任何改动时抛
+> `400 "PATCH body must include status, objective, or token_budget."`。
 
-- create：`cli/src/mcode/utils/mcodeExtensionControl.ts:121-123` —— `tokenBudget === null` 时**整个字段不发**。
-- patch：`cli/src/mcode/utils/mcodeExtensionControl.ts:143` —— `null` 原样发给 agent。
+### B7. `tokenBudget: null` 在 create 被丢弃、在 patch 被透传 ❌ 误报（第 5 轮更正）
 
-「不限额」在 create 时永远到不了 agent，两个动词语义不一致。
-（这一条上一篇文档 §7.4 已经提过，**仍未修**。）
+- create：`cli/src/mcode/utils/mcodeExtensionControl.ts` —— `tokenBudget === null` 时**整个字段不发**。
+- patch：同文件 —— `null` 原样发给 agent。
 
-**建议**：统一编码 —— 推荐「省略 = 不限额，`null` 视为非法」，在 shared schema + 两个 CLI 调用点同时执行。
+原判断：「不限额」在 create 时永远到不了 agent，两个动词语义不一致。
+
+**回查 agent 源码后：两个动词语义其实是一致的，这是误报。**
+
+| 动词 | agent 的归一化 | `null` 的含义 |
+|---|---|---|
+| create | `GRe`：`cKt(t)` 把「非数字 / 非正数」归一成 `null`，然后 `...s!==null?{tokenBudget:s}:{}` —— `null` **与省略完全等价**（字段都不出现） | 不限额 |
+| patch | `HRe`：`t.tokenBudget!==void 0 && (r={...r, tokenBudget: t.tokenBudget>0?Math.floor(t.tokenBudget):null})` | `null` = 清掉额度 = 不限额 |
+
+两边的终点都是「不限额」，所以 CLI 在 create 侧丢 `null` **没有丢信息**。
+真正剩下的差异只有一处：HAPI 的 schema 要求 `tokenBudget` 是正整数（`0` 直接 400），
+而 agent 会把 `0` 也归一成「无额度」。本轮保持 HAPI 侧的严格解释 ——
+客户端传 `0` 会被明确拒绝，而不是悄悄变成「不限额」。
+
+**本轮对 tokenBudget 的处理**：shared schema 保持「正整数或 null」，并在注释里写清 `null` 的含义
+（create = 不限额，patch = 清空额度），没有改 create 侧的丢字段行为 —— 因为丢不丢是等价的。
 
 ### B8. REST 目标响应是 snake_case，事件路径是 camelCase
 
 `shared/src/apiTypes.ts:938-942` 的 `McodeGoalState.status` 直接带 agent 的 `budget_limited`；而事件路径经过 `shared/src/mcodeGoalStatus.ts` 翻译成 `budgetLimited`。web 今天只读 `success` 所以没炸，但 native / 第三方客户端会拿到未翻译的值。**建议**：REST 也返回 `ThreadGoal` 形状。
 
-### B9. goal 状态枚举一共有 5 份
+### B9. goal 状态枚举一共有 5 份 ✅ 已修（第 5 轮，词表部分）
 
-- `shared/src/schemas.ts:310-317`（`ThreadGoalStatusSchema`）
-- `shared/src/mcodeGoalStatus.ts:17-24`（agent → HAPI 映射）
-- `shared/src/apiTypes.ts:1002-1009`（patch 枚举，含 B5 的错值）
-- `web/src/chat/normalizeAgent.ts:126-133`（web 内联复制）
-- `web/src/components/ToolCard/views/GoalView.tsx:8-15` + `web/src/chat/presentation.ts:129-137`（状态 → 文案/色调）
+- `shared/src/schemas.ts`（`ThreadGoalStatusSchema`）—— canonical
+- `shared/src/mcodeGoalStatus.ts`（agent → HAPI 映射）—— canonical
+- `shared/src/apiTypes.ts`（patch 枚举，含 B5 的错值）—— ✅ 已并入 `mcodeGoalStatus.ts`
+- `web/src/chat/normalizeAgent.ts`（web 内联复制）—— ✅ 已改成直接用 shared 的 `ThreadGoalStatusSchema`
+- `web/src/components/ToolCard/views/GoalView.tsx` + `web/src/chat/presentation.ts`（状态 → 文案/色调）—— **保持独立**（这是展示映射，不是词表）
 
-加一个状态要改 5 处，漏一处就是「目标静默消失」（`web/src/chat/normalizeAgent.ts:39` 解析失败直接丢事件）。
+另外还有两份**没进这张表**的重复，这一轮一起收了：
 
-### B10. steering 白名单有两份不同源的列表
+- `cli/src/mcode/utils/mcodeExtensions.ts` 的 `MCODE_GOAL_PATCH_STATUSES` + `HAPI_TO_MCODE_GOAL_STATUS` —— ✅ 已删，改用 shared 的映射
+- shared 里 patch 枚举与 CLI 映射各写一份 —— ✅ 现在都由 `shared/src/mcodeGoalStatus.ts` 的
+  `MCODE_GOAL_PATCHABLE_STATUSES` + `HAPI_TO_MCODE_GOAL_STATUS` 一处生成（`satisfies` 保证两者同步）
 
-`shared/src/modes.ts:220` 定义了 `STEERING_SUPPORTED_FLAVORS = ['codex','cursor','pi','mcode']`，但 `isSteeringSupportedForSession()`（同文件 `:238`）**硬编码**了 `'codex' | 'pi' | 'mcode'`。生产代码读的是后者 → 往常量里加 flavor 不会生效。建议从常量派生。
+加一个状态现在要改的地方：从 5 处降到 2 处（canonical 词表 + 展示映射）。
+漏一处的后果没变（`web/src/chat/normalizeAgent.ts` 解析失败直接丢事件），但 web 那份已经不会再漏了。
+
+### B10. steering 白名单有两份不同源的列表 ✅ 已修（第 5 轮）
+
+`shared/src/modes.ts` 定义了 `STEERING_SUPPORTED_FLAVORS = ['codex','cursor','pi','mcode']`，但 `isSteeringSupportedForSession()` **硬编码**了 `'codex' | 'pi' | 'mcode'`。生产代码读的是后者 → 往常量里加 flavor 不会生效。
+
+现在 session 闸门从常量派生（`STEERING_UNCONDITIONAL_FLAVORS`），
+`cursor` 的 legacy 特判（stream-json 不能 steer）原样保留。行为逐条对齐过，没变。
 
 ### B11. 清空目标事件不携带 threadId，web 收到就无脑丢目标
 
@@ -184,6 +215,10 @@
 3. **B5 / B6 / B7**（shared schema 三处收紧 + 改 shared 测试）—— 一次改动，避免后面继续长错。
 4. **B8 / B9 / B10 / B11**（契约收敛）—— 属于「改一次省半年」。
 5. **P2 整表**（B12–B21）—— 可以拆成独立 PR。
+
+> **进度（第 5 轮）**：第 3 项的 **B5 / B6** 已做（**B7 是误报**，见上面 B7 的更正）；
+> 第 4 项的 **B9（词表部分）/ B10** 已做。
+> **B8**（REST 目标响应仍是 snake_case）没做 —— 它要改的是 hub 的响应形状，影响 native / 第三方客户端，属于「改一次省半年」里换契约的那半，单独做。
 
 ---
 
@@ -445,3 +480,92 @@ abort 会清空队列（`queue.reset()`）。不清的话那些行在 hub 里还
 - **refusal 之后仍是进程内重入队**：被拒的消息已经 ack 了，runner 挂掉仍会丢。
   这条路现在很少走到（租约门控挡住了大部分），但没有根治。
 - **native 端**：`queue-notice` 与排队浮条都还没有 native 的原生呈现。
+
+---
+
+# 追加：收紧 shared 契约（B5 / B6 / B9 / B10，第 5 轮）
+
+这一轮按上面「建议的动手顺序」的第 3、4 项做：**shared 契约收紧**。
+改动不碰投递语义，只碰「客户端问什么、hub 答什么、CLI 怎么翻译」这一层。
+
+## 一句话说清这轮改了什么
+
+**同一个词，现在只有一处说了算。** 目标状态的可设置集合、HAPI 拼写到 agent 拼写的映射、
+steering 白名单，都从「各自写一份」改成「一处定义、其余引用」。
+
+## 改了什么
+
+| # | 改动 | 位置 |
+|---|---|---|
+| 1 | patch 请求的 status 枚举收窄到可设置的那 5 个（去掉 `usageLimited`） | `shared/src/apiTypes.ts` |
+| 2 | patch 请求加 `.refine()`：至少要有一个字段，空 patch 直接 400 | 同上 |
+| 3 | 可设置状态集合 + HAPI→agent 映射收进协议包，用 `satisfies` 保证两者同步 | `shared/src/mcodeGoalStatus.ts` |
+| 4 | CLI 删掉自己那份映射与状态表，改用协议包的 | `cli/src/mcode/utils/mcodeExtensions.ts` |
+| 5 | `ThreadGoalStatusSchema` 作为**值**导出（之前只导出了类型） | `shared/src/index.ts` |
+| 6 | web 的目标状态内联列表换成协议包的 schema | `web/src/chat/normalizeAgent.ts` |
+| 7 | steering 的 session 闸门从 `STEERING_SUPPORTED_FLAVORS` 派生 | `shared/src/modes.ts` |
+
+## 三处「收紧」的语义
+
+**① `usageLimited` 不再是可设置状态。**
+它是 agent 从自己的用量计数（provider 配额 / 限流）派生出来的状态，客户端不该伪造。
+现在 REST 直接回 **400**（`Invalid goal update`），而不是像以前那样回 **200 + `{success:false}`**。
+把目标**移出**该状态（`active`）不受影响。
+
+> **口径更正**：复审原文说「agent 拒绝这个值」。回查 agent 源码后确认不是 ——
+> agent 的 patch 归一化 `HRe` 用 `iKt = new Set([... , "usage_limited"])` 校验，**它是接受的**。
+> 挡它的是 HAPI 自己的 CLI 映射表。所以这条是 **HAPI 的契约决定**，不是 agent 的拒绝。
+> 详见上面 B5 的更正。
+
+**② 空 patch 现在是 400。**
+以前 schema 放行、CLI 晚一步拒（200 + `{success:false}`）。agent 自己也是 400
+（`PATCH body must include status, objective, or token_budget.`），现在契约与它对齐。
+
+**③ `tokenBudget: null` 的语义写进了 schema 注释。**
+create 时 `null` = 不限额，patch 时 `null` = 清空额度 —— 两边终点相同。
+**这一条没有改代码**：原文说「create 丢 `null`、patch 透传 `null`，语义不一致」是**误报**，
+agent 的归一化让两者等价。详见上面 B7 的更正。
+
+## 「一处说了算」现在长什么样
+
+```
+shared/src/mcodeGoalStatus.ts
+  MCODE_GOAL_STATUS_MAP          agent 拼写 → HAPI 拼写（报告方向）
+  MCODE_GOAL_PATCHABLE_STATUSES  客户端可设置的状态（HAPI 拼写）  ← REST schema 用它
+  HAPI_TO_MCODE_GOAL_STATUS      HAPI 拼写 → agent 拼写（设置方向）  ← CLI 用它
+```
+
+- REST schema 的枚举 = `MCODE_GOAL_PATCHABLE_STATUSES`（不再是手写的第二份）。
+- `HAPI_TO_MCODE_GOAL_STATUS` 用 `satisfies Record<McodeGoalPatchableStatus, McodeGoalStatus>`
+  标注 —— **少一个映射就是编译错误**，集合与映射不可能再各写各的。
+- web 的目标状态判定 = 协议包导出的 `ThreadGoalStatusSchema`（之前是内联的 6 个字符串）。
+- steering：`isSteeringSupportedForSession()` 从 `STEERING_SUPPORTED_FLAVORS` 派生，
+  `cursor` 的 legacy 特判（stream-json 不能 steer）原样保留。
+
+## 顺带删掉的一处重复
+
+复审 B9 列了 5 份状态表，**漏了 CLI 那份**：`cli/src/mcode/utils/mcodeExtensions.ts` 里
+还有一张 `MCODE_GOAL_PATCH_STATUSES` + 一张 `HAPI_TO_MCODE_GOAL_STATUS`。
+现在这两张删了，CLI 直接用协议包的。对应的两个测试用例也搬到了
+`shared/src/mcodeGoalStatus.test.ts`（跟着函数走，而不是留在原地）。
+
+## 验证
+
+| 检查 | 结果 |
+|---|---|
+| `bun run typecheck`（cli/web/hub/relay） | ✅ 全绿 |
+| `bun test`（shared） | ✅ 360 pass / 0 fail（新增 7 例） |
+| `bun run test`（hub） | ✅ 1408 pass / 0 fail |
+| `bun run test --run src/mcode`（cli） | ✅ 15 files / 267 pass / 0 fail（2 个用例搬到 shared） |
+| `bun run test --run`（web） | ✅ 312 files / 3451 pass / 0 fail |
+| agent 源码回查 | ✅ `GRe` / `HRe` / `cKt` / `iKt` 逐条核对（B5、B7 的证据） |
+
+## 这轮没做的（明确留着）
+
+- **B8**（REST 目标响应仍是 snake_case，事件路径是 camelCase）—— 要改的是 hub 的**响应形状**，
+  native / 第三方客户端会跟着变，属于换契约那一半，单独做。
+- **B11**（清空目标事件不带 threadId，web 无脑全删）—— 要同时动 CLI 的三个发送点和 web 的 reducer。
+- **B1 / B2 / B3 / B4**（用户直接可见的那批）—— 没动，仍按原顺序排在前面。
+- **P2 整表**（B12–B21）—— 没动。
+- **B14**（预算框允许小数）—— 本轮的 `.refine()` 只挡空 patch；小数仍由 schema 的 `.int()` 挡，
+  但 **web 那边仍然允许输入小数**，报错文案还是「A goal needs an objective」，等 B3 一起改。

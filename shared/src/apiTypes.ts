@@ -9,6 +9,7 @@ import {
     SessionSchema
 } from './schemas'
 import { AgentFlavorSchema } from './modes'
+import { MCODE_GOAL_PATCHABLE_STATUSES } from './mcodeGoalStatus'
 import type {
     DecryptedMessage,
     Machine,
@@ -997,19 +998,31 @@ export type McodeAppsResponse = {
     auth?: McodeConnectorAuth
     error?: string
 }
-/** The body of a "patch the MiniMax Code goal" request. */
+/**
+ * The body of a "patch the MiniMax Code goal" request.
+ *
+ * `usageLimited` is a state the agent derives from its own usage counters,
+ * not one a client can set, so it is not part of the statuses a patch may
+ * ask for. A request for it is a bad request, and the schema has to say so:
+ * the CLI used to turn it down a layer later, which turned a 400 into a 200
+ * with `success: false` in the body.
+ *
+ * The list itself lives in `./mcodeGoalStatus`, next to the translation to
+ * the agent's spelling, so the two cannot drift apart.
+ */
 export const McodeGoalPatchRequestSchema = z.object({
-    status: z.enum([
-        'active',
-        'paused',
-        'blocked',
-        'complete',
-        'budgetLimited',
-        'usageLimited'
-    ]).optional(),
+    status: z.enum(MCODE_GOAL_PATCHABLE_STATUSES).optional(),
     objective: z.string().min(1).optional(),
+    /**
+     * `null` means "no budget": in a create it is what omitting the field
+     * means, and in a patch it clears the budget the goal has. The agent
+     * normalizes both the same way, so the two verbs agree on the meaning.
+     */
     tokenBudget: z.number().int().positive().nullable().optional()
-})
+}).refine(
+    (patch) => patch.status !== undefined || patch.objective !== undefined || patch.tokenBudget !== undefined,
+    { message: 'A goal update needs at least one field' }
+)
 
 export type McodeGoalPatchRequest = z.infer<typeof McodeGoalPatchRequestSchema>
 

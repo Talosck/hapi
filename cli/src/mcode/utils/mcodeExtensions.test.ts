@@ -12,7 +12,6 @@ import {
     parseMcodeGoalUpdate,
     toHapiThreadGoal,
     toMcodeExtensionCapabilities,
-    toMcodeGoalPatchStatus,
     toSubagentSnapshotMembers,
     type McodeGoal
 } from './mcodeExtensions';
@@ -323,21 +322,6 @@ describe('parseMcodeGoalState', () => {
     it('rejects a goal without the required fields', () => {
         expect(parseMcodeGoalState({ goalId: 'goal-1' })).toBeNull();
         expect(parseMcodeGoalState(goal({ status: 'weird' as never }))).toBeNull();
-    });
-});
-
-describe('toMcodeGoalPatchStatus', () => {
-    it('maps HAPI status spellings onto the agent spellings', () => {
-        expect(toMcodeGoalPatchStatus('active')).toBe('active');
-        expect(toMcodeGoalPatchStatus('paused')).toBe('paused');
-        expect(toMcodeGoalPatchStatus('blocked')).toBe('blocked');
-        expect(toMcodeGoalPatchStatus('complete')).toBe('complete');
-        expect(toMcodeGoalPatchStatus('budgetLimited')).toBe('budget_limited');
-    });
-
-    it('refuses a status the agent cannot be asked to enter', () => {
-        // `usage_limited` is derived by the agent from its own counters.
-        expect(toMcodeGoalPatchStatus('usageLimited')).toBeNull();
     });
 });
 

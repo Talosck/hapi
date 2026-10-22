@@ -1,6 +1,6 @@
 import type { AgentEvent, CodexReview, CodexReviewFinding, NormalizedAgentContent, NormalizedMessage, RoundModelUsage, RoundSummary, ToolResultPermission, UsageData } from '@/chat/types'
 import { inlineMediaSourceFromWire } from '@/chat/inlineMediaSource'
-import { AGENT_MESSAGE_PAYLOAD_TYPE, asNumber, asString, isObject } from '@hapi/protocol'
+import { AGENT_MESSAGE_PAYLOAD_TYPE, asNumber, asString, isObject, ThreadGoalStatusSchema } from '@hapi/protocol'
 import { isClaudeChatVisibleMessage } from '@hapi/protocol/messages'
 import { parseAgentTimestampMs } from '@/chat/agentTimestamp'
 
@@ -121,20 +121,17 @@ function normalizeThreadGoal(value: unknown) {
     if (!isObject(value)) return null
     const threadId = asString(value.threadId ?? value.thread_id)
     const objective = asString(value.objective)
-    const status = asString(value.status)
-    if (!threadId || !objective || !status) return null
-    if (
-        status !== 'active'
-        && status !== 'paused'
-        && status !== 'budgetLimited'
-        && status !== 'usageLimited'
-        && status !== 'blocked'
-        && status !== 'complete'
-    ) return null
+    const rawStatus = asString(value.status)
+    if (!threadId || !objective || !rawStatus) return null
+    // The status set is the protocol's, not a copy of it: an unknown status
+    // used to be dropped here, and a status the protocol adds used to need
+    // this file edited too.
+    const status = ThreadGoalStatusSchema.safeParse(rawStatus)
+    if (!status.success) return null
     return {
         threadId,
         objective,
-        status,
+        status: status.data,
         tokenBudget: asNumber(value.tokenBudget ?? value.token_budget),
         tokensUsed: asNumber(value.tokensUsed ?? value.tokens_used) ?? 0,
         timeUsedSeconds: asNumber(value.timeUsedSeconds ?? value.time_used_seconds) ?? 0,

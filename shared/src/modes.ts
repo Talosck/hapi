@@ -219,6 +219,21 @@ export function getCodexCollaborationModeOptions(): CodexCollaborationModeOption
  */
 export const STEERING_SUPPORTED_FLAVORS = ['codex', 'cursor', 'pi', 'mcode'] as const
 
+/**
+ * The flavors that steer every session of that flavor, with no per-session
+ * condition.
+ *
+ * Derived from {@link STEERING_SUPPORTED_FLAVORS} so that adding a flavor to
+ * the whitelist is enough — the session gate below used to carry its own
+ * hardcoded list, so a new flavor in the constant silently did nothing.
+ *
+ * `cursor` is deliberately not here: its ACP sessions steer, but legacy
+ * stream-json sessions cannot (see {@link isSteeringSupportedForSession}).
+ */
+const STEERING_UNCONDITIONAL_FLAVORS = STEERING_SUPPORTED_FLAVORS.filter(
+    (flavor): flavor is Exclude<(typeof STEERING_SUPPORTED_FLAVORS)[number], 'cursor'> => flavor !== 'cursor'
+)
+
 export function isSteeringSupportedForFlavor(flavor?: string | null): boolean {
     return (STEERING_SUPPORTED_FLAVORS as readonly string[]).includes(flavor ?? '')
 }
@@ -236,16 +251,19 @@ export function isSteeringSupportedForSession(metadata?: {
     cursorSessionId?: string | null
     cursorSessionProtocol?: 'acp' | 'stream-json' | null
 } | null): boolean {
-    if (metadata?.flavor === 'codex' || metadata?.flavor === 'pi' || metadata?.flavor === 'mcode') {
+    const flavor = metadata?.flavor
+    if (!flavor || !isSteeringSupportedForFlavor(flavor)) {
+        return false
+    }
+    if ((STEERING_UNCONDITIONAL_FLAVORS as readonly string[]).includes(flavor)) {
         return true
     }
-    if (metadata?.flavor !== 'cursor') {
+    // The remaining flavors steer only for some of their sessions. Today that
+    // is Cursor alone, so the checks below are the Cursor legacy ones.
+    if (metadata?.cursorSessionProtocol === 'stream-json') {
         return false
     }
-    if (metadata.cursorSessionProtocol === 'stream-json') {
-        return false
-    }
-    if (!metadata.cursorSessionProtocol && metadata.cursorSessionId) {
+    if (!metadata?.cursorSessionProtocol && metadata?.cursorSessionId) {
         return false
     }
     return true

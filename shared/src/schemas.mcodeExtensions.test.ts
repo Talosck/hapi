@@ -57,7 +57,25 @@ describe('McodeGoalCreateRequestSchema', () => {
 describe('McodeGoalPatchRequestSchema', () => {
     it('accepts HAPI goal status spellings', () => {
         expect(McodeGoalPatchRequestSchema.safeParse({ status: 'budgetLimited' }).success).toBe(true)
-        expect(McodeGoalPatchRequestSchema.safeParse({ status: 'usageLimited' }).success).toBe(true)
+        expect(McodeGoalPatchRequestSchema.safeParse({ status: 'active' }).success).toBe(true)
         expect(McodeGoalPatchRequestSchema.safeParse({ status: 'budget_limited' }).success).toBe(false)
+    })
+
+    it('rejects a status a client may not set', () => {
+        // `usageLimited` is a runtime-derived state - the agent computes it
+        // from its own usage counters. HAPI refuses to let a client claim it,
+        // so accepting it here would turn a 400 into a 200 with
+        // success:false.
+        expect(McodeGoalPatchRequestSchema.safeParse({ status: 'usageLimited' }).success).toBe(false)
+    })
+
+    it('rejects an update with nothing to change', () => {
+        expect(McodeGoalPatchRequestSchema.safeParse({}).success).toBe(false)
+    })
+
+    it('accepts a single field on its own', () => {
+        expect(McodeGoalPatchRequestSchema.safeParse({ objective: 'Ship it' }).success).toBe(true)
+        expect(McodeGoalPatchRequestSchema.safeParse({ tokenBudget: null }).success).toBe(true)
+        expect(McodeGoalPatchRequestSchema.safeParse({ tokenBudget: 5_000 }).success).toBe(true)
     })
 })
