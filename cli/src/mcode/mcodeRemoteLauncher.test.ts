@@ -127,7 +127,16 @@ function createBackend(overrides: Record<string, unknown> = {}) {
         }),
         supportsSessionFork: vi.fn(() => true),
         waitForSessionUpdateQueue: vi.fn(async () => {}),
-        prompt: vi.fn(async () => {}),
+        // The real backend calls onPromptSent once the request is on the
+        // wire: that is where the runner hands the message to the agent.
+        prompt: vi.fn(async (
+            _sessionId: string,
+            _content: unknown,
+            _onUpdate: unknown,
+            options?: { onPromptSent?: () => void }
+        ) => {
+            options?.onPromptSent?.();
+        }),
         cancelPrompt: vi.fn(async () => {}),
         closeSession: vi.fn(async () => {}),
         respondToPermission: vi.fn(async () => {}),
@@ -196,7 +205,8 @@ function createScriptedSession() {
             .mockResolvedValue(null),
         size: () => 0,
         reset: vi.fn(),
-        pushIsolated: vi.fn()
+        pushIsolated: vi.fn(),
+        pendingLocalIds: () => []
     }
     const client = {
         rpcHandlerManager: { registerHandler: vi.fn() },
@@ -242,7 +252,8 @@ function createBlockingSession() {
         })),
         size: () => 0,
         reset: vi.fn(),
-        pushIsolated: vi.fn()
+        pushIsolated: vi.fn(),
+        pendingLocalIds: () => []
     }
     const client = {
         rpcHandlerManager: { registerHandler: vi.fn() },
@@ -1407,7 +1418,8 @@ describe('mcodeRemoteLauncher abort handling', () => {
             }),
             size: () => 0,
             reset: vi.fn(),
-            pushIsolated: vi.fn()
+            pushIsolated: vi.fn(),
+            pendingLocalIds: () => []
         }
         const client = {
             rpcHandlerManager: {
@@ -1499,7 +1511,8 @@ describe('mcodeRemoteLauncher abort handling', () => {
                 .mockResolvedValue(null),
             size: () => 0,
             reset: vi.fn(),
-            pushIsolated: vi.fn()
+            pushIsolated: vi.fn(),
+            pendingLocalIds: () => []
         }
         const client = {
             rpcHandlerManager: {
@@ -1944,6 +1957,76 @@ describe('mcodeRemoteLauncher turn lease', () => {
         }, { timeout: 5_000 })
         // The configuration is applied once the agent is free.
         expect(configOption.mock.calls.length).toBeGreaterThan(configCallsWhenTheWaitStarted)
+        queue.close()
+    })
+
+    it('acknowledges the message when the agent takes it', async () => {
+        // The hub is told the message is delivered when the runner hands it
+        // to the agent, not when the runner takes it out of its own queue.
+        const backend = createBackend()
+        const { session, queue, client } = createSteerSession()
+        queue.push('go', { permissionMode: 'default', model: null }, 'local-1')
+
+        void mcodeRemoteLauncher(session as never, {})
+
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(1)
+        }, { timeout: 5_000 })
+        expect(client.emitMessagesConsumed).toHaveBeenCalledWith(['local-1'])
+        queue.close()
+    })
+
+    it('keeps a waiting message queued while the agent is busy', async () => {
+        // The wait happens before the message is taken from the queue, so a
+        // message that waits for a busy agent is still a queued message: the
+        // user can cancel it, the hub still has it, and a runner that dies
+        // here hands it to the next runner instead of losing it.
+        let leaseReads = 0
+        const backend = createBackend()
+        const { session, queue, client } = createSteerSession()
+        queue.push('go', { permissionMode: 'default', model: null }, 'local-1')
+
+        void mcodeRemoteLauncher(session as never, {
+            readTurnLease: vi.fn(async () => {
+                leaseReads += 1
+                return leaseReads <= 3 ? HELD_LEASE : FREE
+            })
+        })
+
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        expect(queue.size()).toBe(1)
+        expect(backend.prompt).not.toHaveBeenCalled()
+        expect(client.emitMessagesConsumed).not.toHaveBeenCalled()
+
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(1)
+        }, { timeout: 5_000 })
+        expect(client.emitMessagesConsumed).toHaveBeenCalledWith(['local-1'])
+        queue.close()
+    })
+
+    it('acknowledges the messages an abort dropped', async () => {
+        // The abort clears the queue. A message that stays unacknowledged
+        // would stay queued in the hub and be handed to the next runner,
+        // which would deliver a message the user just stopped.
+        const backend = createBackend()
+        const { session, queue, client } = createSteerSession()
+        queue.push('go', { permissionMode: 'default', model: null }, 'local-1')
+
+        void mcodeRemoteLauncher(session as never, {
+            // The agent holds the session, so the message stays queued and
+            // the abort finds it there.
+            readTurnLease: vi.fn(async () => HELD_LEASE)
+        })
+
+        const registerHandler = client.rpcHandlerManager.registerHandler as ReturnType<typeof vi.fn>
+        await vi.waitFor(() => {
+            expect(registerHandler.mock.calls.some((call) => call[0] === RPC_METHODS.Abort)).toBe(true)
+        }, { timeout: 5_000 })
+        const abortHandler = registerHandler.mock.calls.find((call) => call[0] === RPC_METHODS.Abort)?.[1] as () => Promise<void>
+        await abortHandler()
+
+        expect(client.emitMessagesConsumed).toHaveBeenCalledWith(['local-1'])
         queue.close()
     })
 

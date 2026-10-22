@@ -383,3 +383,65 @@ runtime 层 `Session already has an active Turn. Use queue send …`（-32603，
   得把 ack 推迟到"agent 受理轮次"之后（`agy` flavor 已经是这个模型）。这会动投递语义
   （hub 排队浮条、取消、seq 回填），仍是独立立项。
 - **native 对齐**、**非 web 客户端的重复拦截**：同上一轮，未动。
+
+---
+
+# 追加：延迟确认——消息在 agent 接手前不再算"已投递"（2026-10-22 晚，第 4 轮）
+
+上一轮把"等 agent"这件事做对了：HAPI 知道 agent 忙，会等租约释放再发。
+但还有一个洞：**等待期间那条消息只活在 runner 的内存里**——hub 侧早在消息离开
+队列时就被 ack 了。runner 在等待期间挂掉，消息就没了。
+
+## 机制是现成的，mcode 是第二个使用者
+
+| 环节 | 现状 | 位置 |
+|---|---|---|
+| CLI 侧开关 | `acknowledgeMessagesOnDequeue: false` → 队列出队不再自动 ack | `cli/src/agent/sessionBase.ts:77` |
+| 先例 | `agy` flavor 用的就是这套（手动 `emitMessagesConsumed`） | `cli/src/agy/session.ts:58` |
+| hub 重放 | 未 ack 的即时消息在 CLI 每次 `session-alive` 时重放给 CLI | `hub/src/sync/messageService.ts:979` |
+| CLI 去重 | 按消息 id 的 LRU 去重，重复的重放会被丢掉 | `cli/src/api/apiSession.ts`（`IncomingMessageFilter`） |
+| 排队浮条 | 未 ack 的行（`invoked_at IS NULL`）就是浮条里的"排队中"，**不在聊天线程里** | `web/src/lib/messages.ts:21`、`web/src/components/SessionChat.tsx:1425` |
+| 取消 | 浮条的取消会问 CLI 要不要丢掉队列里的那条 | `hub/src/sync/messageService.ts:780` |
+
+所以这不是新机制，是把 `agy` 已经证明过的东西搬到 mcode 上。
+
+## 三个设计决定
+
+**1. 等租约的位置前移到"取消息之前"。**
+如果等租约在取消息之后，消息就在 launcher 手里了：hub 那边是未 ack（会进浮条、可以取消），
+但 CLI 那边不在队列里了，取消按钮按下去没反应——比没有按钮更糟。
+把等待放到取消息之前，等待期间那条消息**仍然在 CLI 的队列里**：取消按钮有效，hub 侧也还留着它。
+
+**2. ack 的时点是"交给 agent 的那一刻"**（`session/prompt` 请求写出去时），不是取队列时。
+从这一刻起 runner 负责把它送到（被拒了会自己重新入队），hub 可以把它算作已投递。
+refusal 那条路仍然是"已 ack + 进程内重入队"，和改动前一致，没有回退。
+
+**3. abort 时要把被丢掉的待发消息 ack 掉。**
+abort 会清空队列（`queue.reset()`）。不清的话那些行在 hub 里还是未 ack 状态，
+下一个 runner 会拿到它们，把用户刚停掉的消息再投一遍。`MessageQueue2.pendingLocalIds()`
+就是为这件事准备的（"Lets a caller reconcile them with the hub before a reset()"）。
+
+## 改了什么
+
+| # | 改动 | 位置 |
+|---|---|---|
+| 1 | mcode 会话改为延迟确认 | `cli/src/mcode/session.ts` |
+| 2 | 等租约前移到取消息之前；等待期间消息留在队列里 | `cli/src/mcode/mcodeRemoteLauncher.ts` |
+| 3 | prompt 写出时 ack 这一批消息 | 同上 |
+| 4 | abort 时 ack 被清空的待发消息 | 同上 |
+
+**投递契约的变化（就是上一轮说的"hub 排队浮条、取消、seq 回填"）**：
+一条还在等 agent 的 mcode 消息，现在会出现在 web 的排队浮条里（可取消、可编辑），
+而不是直接躺在聊天线程里被当成"已投递"。agent 接手的那一刻它才进线程。
+这是 hub 早就支持的状态，不是新状态。
+
+## 还没做的 / 已知边界
+
+- **graceful 退出仍会丢**：runner 正常退出时 hub 会把没 ack 的行一次 stamp 掉
+  （`sweepImmediateQueuedOnSessionEnd`），这是 hub 早就有的行为，agy 也一样。
+  这次保护的是"runner 挂掉"。
+- **local flavor 的 abort**：`BaseLocalLauncher.doAbort` 也会 `queue.reset()`，
+  但那里没有 ack 掉待发消息。local 模式收到消息会立刻切到 remote，所以窗口极小。
+- **refusal 之后仍是进程内重入队**：被拒的消息已经 ack 了，runner 挂掉仍会丢。
+  这条路现在很少走到（租约门控挡住了大部分），但没有根治。
+- **native 端**：`queue-notice` 与排队浮条都还没有 native 的原生呈现。

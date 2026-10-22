@@ -407,6 +407,30 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // abort while the agent is idle would end the whole HAPI session
             // instead of cancelling a turn.
             const waitSignal = this.abortController.signal;
+
+            // The agent's runtime holds the session's turn lease for every turn
+            // it runs, and it runs turns HAPI did not start: a background task
+            // that finished has to be reported into the owner session, and
+            // that delivery holds the lease while it runs.
+            //
+            // A session that holds the lease refuses more than the turn: the
+            // model, effort and permission mode cannot be applied either, and
+            // a `session/prompt` sent into it is refused as well. HAPI used to
+            // fire blind, eat the refusal and retry on a guessed backoff -
+            // which is how a message ended up minutes late. The lease says
+            // when the agent is free, so wait for it instead: the wait ends
+            // the moment the other turn ends, and the turn is admitted the
+            // first time it is tried.
+            //
+            // The wait comes BEFORE the message is taken from the queue. That
+            // is what keeps a waiting message a queued message: it stays
+            // cancellable (the hub asks this runner to drop it) and it stays
+            // unacknowledged in the hub, so a runner that dies while it waits
+            // hands the message to the next runner instead of losing it.
+            if (!await this.waitForAgentTurn(session, acpSessionId, waitSignal)) {
+                continue;
+            }
+
             const batch = await session.queue.waitForMessagesAndGetAsString(waitSignal);
             if (!batch) {
                 if (waitSignal.aborted && !this.shouldExit) {
@@ -419,31 +443,6 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // the previous turn: mcode dismisses the pending questionnaire in
             // that case, so drop the card instead of leaving a dead request.
             await this.questionHandler?.cancelAll('Superseded by a new message');
-
-            // The agent's runtime holds the session's turn lease for every turn
-            // it runs, and it runs turns HAPI did not start: a background task
-            // that finished has to be reported into the owner session, and
-            // that delivery holds the lease while it runs.
-            //
-            // A session that holds the lease refuses more than the turn: the
-            // model, effort and permission mode cannot be applied either, so
-            // the wait comes before those calls. Applying them first would
-            // report a failed model switch to the user every time their
-            // message waited for a turn that was already running.
-            //
-            // A `session/prompt` sent into a held lease is refused as well,
-            // so HAPI used to fire blind, eat the refusal and retry on a
-            // guessed backoff - which is how a message ended up minutes late.
-            // The lease says when the agent is free, so wait for it instead:
-            // the wait ends the moment the other turn ends, and the turn is
-            // admitted the first time it is tried.
-            //
-            // An abort during the wait does not skip the turn: the batch was
-            // acknowledged when it left the queue, so it cannot be dropped.
-            // The turn starts and the abort cancels it right behind the
-            // request, the same way an abort that lands during the mode round
-            // trips below is handled.
-            await this.waitForTurnLease(session, acpSessionId, waitSignal);
 
             // `null` means "back to the agent default" (the model the session
             // was created with); `undefined` means "no explicit choice".
@@ -547,13 +546,19 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     // above take real time, and `handleAbort` cancels a
                     // *running* prompt — of which there is none yet, so the
                     // abort would be lost and the agent would keep working on
-                    // a message the user just stopped. The batch was
-                    // acknowledged when it left the queue, so it cannot be
+                    // a message the user just stopped. The batch cannot be
                     // dropped either. Start the turn and cancel it right
                     // behind the request instead: the transport keeps the
                     // order, so the agent registers the turn and then
                     // cancels it before it does any work.
                     onPromptSent: () => {
+                        // The message is the agent's from here: the runner
+                        // hands it over and owns the delivery from now on,
+                        // so the hub can mark it delivered. A message that
+                        // never gets this far - one that waited for a busy
+                        // agent and was never sent - stays queued in the hub
+                        // and is handed to the next runner if this one dies.
+                        this.acknowledgeBatch(session, batch);
                         if (waitSignal.aborted) {
                             void backend.cancelPrompt(acpSessionId);
                         }
@@ -619,7 +624,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // client that offers "Steer" on a busy session would steer a turn
             // that does not exist.
             if (refusedAsBusy) {
-                await this.waitBeforeRetry(session, acpSessionId, waitSignal);
+                await this.waitBeforeRetry(waitSignal);
             }
         }
     }
@@ -722,6 +727,26 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         logger.debug('[mcode-remote] Refused turn re-queued', { messages: batch.items?.length ?? 1 });
     }
 
+    /**
+     * Marks a batch as handed over to the agent.
+     *
+     * The hub acknowledges a message when the runner hands it to the agent,
+     * not when the runner takes it out of its own queue. A message that waits
+     * for a busy agent therefore stays queued in the hub: the user sees it as
+     * a queued message, can cancel it, and a runner that dies while it waits
+     * hands it to the next runner instead of losing it.
+     */
+    private acknowledgeBatch(
+        session: McodeSession,
+        batch: { items?: Array<{ localId?: string }> }
+    ): void {
+        const localIds = (batch.items ?? [])
+            .map((item) => item.localId)
+            .filter((localId): localId is string => Boolean(localId));
+        if (localIds.length === 0) return;
+        session.client.emitMessagesConsumed(localIds);
+    }
+
     private requeueBatch(batch: {
         message: string;
         mode: McodeMode;
@@ -745,24 +770,18 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     /**
      * Waits before the next attempt at a refused turn.
      *
-     * The refusal says the session is not ready for a turn, and the turn
-     * lease says when it will be: the wait ends the moment the agent
-     * releases it, instead of guessing with a backoff. The backoff stays as
-     * the floor, because a refusal is not always about the lease - the
-     * session can be compacting or changing, and those end on their own.
+     * The refusal says the session is not ready for a turn. The wait for the
+     * agent to be free happens in the next round of the loop, before the
+     * message is taken from the queue, so this is only the floor that keeps a
+     * refusal that is not about the turn lease - a session that is compacting
+     * or changing - from turning into a request per second.
      */
-    private async waitBeforeRetry(
-        session: McodeSession,
-        sessionId: string,
-        signal: AbortSignal
-    ): Promise<void> {
+    private async waitBeforeRetry(signal: AbortSignal): Promise<void> {
         const delay = Math.min(
             MCODE_BUSY_RETRY_BASE_MS * 2 ** Math.min(Math.max(this.busyRefusals - 1, 0), 6),
             MCODE_BUSY_RETRY_MAX_MS
         );
         await this.sleepWithAbort(delay, signal);
-        if (signal.aborted) return;
-        await this.waitForTurnLease(session, sessionId, signal);
     }
 
     /**
@@ -783,16 +802,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * An index that cannot be read (an older agent without the table, a
      * locked file) leaves the lease state unknown, and an unknown lease never
      * blocks: the turn is attempted and refused the way it was before.
+     *
+     * Returns false when the session was aborted while it waited.
      */
-    private async waitForTurnLease(
+    private async waitForAgentTurn(
         session: McodeSession,
         sessionId: string,
         signal: AbortSignal
-    ): Promise<void> {
+    ): Promise<boolean> {
         for (;;) {
-            // An abort ends the wait, but not the turn: the caller still hands
-            // the message to the agent and cancels the turn right behind it.
-            if (signal.aborted) return;
+            if (signal.aborted) return false;
 
             const state = await this.readTurnLease(sessionId);
             if (state.status !== 'held') {
@@ -801,15 +820,21 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 // when the agent takes the turn, and the notice flags are
                 // reset there - so a session that is busy, freed and busy
                 // again is still one episode with one notice.
-                return;
+                return true;
             }
 
             // The agent is busy. Say so, so a client can show that the
             // message is waiting instead of looking like it was lost. The
             // notice comes first: it starts the busy episode, and the wait
             // the client shows is measured from that moment.
-            this.reportBusyNotice(session, 'busy');
-            this.setWaitingForAgent(true);
+            //
+            // Only a message that is actually waiting is announced: an agent
+            // that is busy with a turn of its own is not something the user
+            // has to act on until they have something to send.
+            if (session.queue.size() > 0) {
+                this.reportBusyNotice(session, 'busy');
+                this.setWaitingForAgent(true);
+            }
             await this.sleepWithAbort(MCODE_TURN_LEASE_POLL_MS, signal);
         }
     }
@@ -1706,6 +1731,14 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         }
         this.reportBackgroundTaskDelta();
         this.session.sendSessionEvent({ type: 'message', message: 'Session aborted' });
+        // The messages that were still queued are dropped by the reset, so
+        // they have to be acknowledged before it: an unacknowledged row stays
+        // queued in the hub and would be handed to the next runner, which
+        // would deliver a message the user just aborted.
+        const dropped = this.session.queue.pendingLocalIds();
+        if (dropped.length > 0) {
+            this.session.client.emitMessagesConsumed(dropped);
+        }
         this.session.queue.reset();
         this.session.onThinkingChange(false);
         this.abortController.abort();

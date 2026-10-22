@@ -51,7 +51,15 @@ export class McodeSession extends AgentSessionBase<McodeMode> {
                 mcodeSessionId: sessionId
             }),
             permissionMode: opts.permissionMode,
-            effort: opts.effort
+            effort: opts.effort,
+            // The hub acknowledges a message when the runner hands it to the
+            // agent, not when the runner takes it out of its own queue. A
+            // message that waits for a busy agent would be lost with a runner
+            // that dies while it waits: the hub already marked it delivered,
+            // and the only copy left was in the runner's memory.
+            // Unacknowledged rows stay queued in the hub, so the next runner
+            // picks them up again.
+            acknowledgeMessagesOnDequeue: false
         });
 
         this.startedBy = opts.startedBy;
