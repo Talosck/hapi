@@ -202,6 +202,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         onSessionEnd: (payload) => syncEngine?.handleSessionEnd(payload),
         onMachineAlive: (payload) => syncEngine?.handleMachineAlive(payload),
         onBackgroundTaskDelta: (sessionId, delta) => syncEngine?.handleBackgroundTaskDelta(sessionId, delta),
+        onBackgroundTaskCount: (sessionId, running) => syncEngine?.handleBackgroundTaskCount(sessionId, running),
         onSessionActivity: (sessionId, updatedAt) => syncEngine?.recordSessionActivity(sessionId, updatedAt),
         onAgentProgress: (sessionId, at) => syncEngine?.recordAgentProgress(sessionId, at),
         onSweepImmediateQueued: (sessionId, now) => syncEngine?.sweepImmediateQueuedOnSessionEnd(sessionId, now),

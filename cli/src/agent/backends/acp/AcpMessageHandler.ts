@@ -415,7 +415,20 @@ export class AcpMessageHandler {
 
     constructor(
         onMessage: (message: AgentMessage) => void,
-        private readonly options: { textChunkMode?: AcpTextChunkMode; flavor?: string } = {}
+        private readonly options: {
+            textChunkMode?: AcpTextChunkMode;
+            flavor?: string;
+            /**
+             * Whether an image the agent sends is registered so it can be
+             * shown again later.
+             *
+             * A conversation that is replayed when a session is loaded holds
+             * the images of a turn that was already registered when it
+             * streamed. Registering them a second time would evict the
+             * originals, so a reader of a replay turns this off.
+             */
+            registerImages?: boolean;
+        } = {}
     ) {
         this.onMessage = (message) => {
             if (this.acceptingUpdates) onMessage(message);
@@ -745,6 +758,7 @@ export class AcpMessageHandler {
     }
 
     private async emitGeneratedImageFromAcpContent(content: Record<string, unknown>): Promise<void> {
+        if (this.options.registerImages === false) return;
         try {
             const image = await registerGeneratedImageFromAcpBlock(content);
             if (!image) {
@@ -814,6 +828,20 @@ export class AcpMessageHandler {
             ...(asString(update.title) ? { title: asString(update.title)! } : {}),
             ...(asString(update.kind) ? { kind: asString(update.kind)! } : {})
         });
+
+        // An agent that reports a finished tool call in a single update -
+        // the conversation an agent replays when a session is loaded, for
+        // example - carries the result with the call itself. The result
+        // would be dropped otherwise, and a tool that never reports a result
+        // stays unfinished for good.
+        if ((status === 'completed' || status === 'failed') && update.rawOutput !== undefined) {
+            this.onMessage({
+                type: 'tool_result',
+                id: toolCallId,
+                output: update.rawOutput,
+                status: status === 'failed' ? 'failed' : 'completed'
+            });
+        }
     }
 
     private handleToolCallUpdate(update: Record<string, unknown>): void {

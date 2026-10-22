@@ -1237,6 +1237,8 @@ export default {
   'session.status.goal': '目标',
   'session.status.tasks': '任务',
   'session.status.subagents': '子代理',
+  'session.status.backgroundTasks.count.one': '1 个后台任务运行中',
+  'session.status.backgroundTasks.count.other': '{count} 个后台任务运行中',
   'session.status.terminals': '后台终端',
   'session.status.terminalsUnavailable': '{count} 个终端运行中 · 无法确定具体命令',
   'session.status.terminalsPossible': '可能的命令',

@@ -296,7 +296,20 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     /** The permission mode HAPI last asked for, even when the agent cannot honor it. */
     private requestedPermissionMode: PermissionMode | null = null;
     private hasAppliedPermissionMode = false;
+    /**
+     * The background work the session has going.
+     *
+     * The ledger is what the user is shown, so it only holds what HAPI can
+     * back up: a task the agent launched and never reported as finished.
+     */
     private readonly backgroundTasks = new BackgroundTaskAggregator();
+    /**
+     * The ledger that was last published to the hub.
+     *
+     * The snapshot is only sent when it changed: the count is an absolute
+     * number, so an unchanged ledger does not need a new message.
+     */
+    private publishedBackgroundTasks: string | null = null;
     /** ACP session id of the running MiniMax Code session. */
     private acpSessionId: string | null = null;
     /** The MCP servers handed to the agent, kept for a restart. */
@@ -371,6 +384,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
         this.opts = opts;
+        // The agent's bash tool does not repeat the working directory in every
+        // call, so the session's own directory is the fallback for the tasks
+        // that do not name one.
+        this.backgroundTasks.setDefaultCwd(session.path);
     }
 
     public async launch(): Promise<RemoteLauncherExitReason> {
@@ -514,6 +531,17 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     sessionId: session.sessionId,
                     cwd: session.path,
                     mcpServers: acpMcpServers
+                }, {
+                    // The agent replays the conversation it remembers. The
+                    // replay holds the turns it ran on its own - the turn in
+                    // which it read a background task that finished while HAPI
+                    // was not watching - so the ledger is reconciled with it.
+                    onHistory: (messages) => this.backgroundTasks.reconcile(
+                        // The replay carries the raw tool names of the agent
+                        // ("bash", "task_output"); the ledger knows them by
+                        // their canonical name.
+                        messages.map((message) => normalizeMcodeToolCall(message))
+                    )
                 });
             } catch (error) {
                 logger.warn('[mcode-remote] resume failed, starting new session', error);
@@ -1826,14 +1854,27 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         for (const forwarded of this.backgroundTasks.handle(normalized)) {
             this.emitAgentMessage(forwarded);
         }
-        this.reportBackgroundTaskDelta();
+        this.reportBackgroundTasks();
     }
 
-    private reportBackgroundTaskDelta(): void {
-        const delta = this.backgroundTasks.takeBackgroundTaskDelta();
-        if (delta) {
-            this.session.sendBackgroundTaskDelta(delta);
-        }
+    /**
+     * Publishes the background work the session has going.
+     *
+     * The ledger is published as a whole, not as a delta: the count is the
+     * size of the ledger, so a hub that missed a message cannot end up with a
+     * count that drifts away from the truth. The snapshot is only sent when
+     * it changed, because it is a chat message.
+     */
+    private reportBackgroundTasks(): void {
+        const tasks = this.backgroundTasks.snapshot();
+        const signature = JSON.stringify(tasks);
+        if (signature === this.publishedBackgroundTasks) return;
+        // A session that never had background work does not publish an empty
+        // list: the snapshot is a chat message, and a client that has none
+        // falls back to what it can read out of the transcript.
+        if (tasks.length === 0 && this.publishedBackgroundTasks === null) return;
+        this.publishedBackgroundTasks = signature;
+        this.session.sendSessionEvent({ type: 'background-task-snapshot', tasks });
     }
 
     /**
@@ -2041,7 +2082,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         for (const message of this.backgroundTasks.flushPromptEnd()) {
             this.emitAgentMessage(message);
         }
-        this.reportBackgroundTaskDelta();
+        this.reportBackgroundTasks();
     }
 
     private applyDisplayMode(permissionMode: PermissionMode | undefined, model?: string): void {
@@ -2066,7 +2107,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         for (const message of this.backgroundTasks.cancelAll('Session aborted')) {
             this.emitAgentMessage(message);
         }
-        this.reportBackgroundTaskDelta();
+        this.reportBackgroundTasks();
         this.session.sendSessionEvent({ type: 'message', message: 'Session aborted' });
         // The messages that were still queued are dropped by the reset, so
         // they have to be acknowledged before it: an unacknowledged row stays

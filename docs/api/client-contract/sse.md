@@ -165,7 +165,7 @@ The most bug-prone part of the protocol. `session-updated.data` is either a **fu
 
 Patch application, field by field:
 
-- **Flat fields** — `active`, `thinking`, `activeAt`, `model`, `modelReasoningEffort`, `effort`, `serviceTier`, `permissionMode`, `collaborationMode`, `copilotAgentMode`, `backgroundTaskCount`: last-write-wins assignment when present. `activeTurnStartedAt` appears in patches but the reference implementation deliberately never applies it from a patch (`web/src/lib/sessionPatch.ts`) — take it from full-session payloads only; the `sse/` fixtures pin this.
+- **Flat fields** — `active`, `thinking`, `activeAt`, `model`, `modelReasoningEffort`, `effort`, `serviceTier`, `permissionMode`, `collaborationMode`, `copilotAgentMode`, `backgroundTaskCount`: last-write-wins assignment when present. `backgroundTaskCount` is an absolute number (how many background tasks the session has going), not a delta — see `background-task-snapshot` in [messages.md](./messages.md). `activeTurnStartedAt` appears in patches but the reference implementation deliberately never applies it from a patch (`web/src/lib/sessionPatch.ts`) — take it from full-session payloads only; the `sse/` fixtures pin this.
 - **`updatedAt`** — max-monotonic: `updatedAt = max(cached.updatedAt, patch.updatedAt)`. A stale replay must never move the clock backward.
 - **Versioned sub-patches** — `metadata`, `agentState`, `todos`, `teamState` each arrive as a wrapper `{version: number, value: …}`. Apply `value` and store `version` **only when `version` is strictly greater than the cached watermark**:
 

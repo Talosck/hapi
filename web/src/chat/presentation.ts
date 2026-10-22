@@ -335,6 +335,10 @@ export function getEventPresentation(event: AgentEvent, t?: EventTranslator): Ev
         const members = Array.isArray(event.members) ? event.members : []
         return { icon: '🤖', text: `Subagents updated (${members.length})` }
     }
+    if (event.type === 'background-task-snapshot') {
+        const tasks = Array.isArray(event.tasks) ? event.tasks : []
+        return { icon: '🖥️', text: `Background tasks running (${tasks.length})` }
+    }
     if (event.type === 'token-count') {
         return formatTokenCountEvent(event)
     }

@@ -621,6 +621,16 @@ export class SyncEngine {
         this.sessionCache.applyBackgroundTaskDelta(sessionId, delta)
     }
 
+    /**
+     * Stores how many background tasks the session has going.
+     *
+     * The count is absolute, so it cannot drift the way a counter that adds
+     * up starts and completions does when a completion goes unnoticed.
+     */
+    handleBackgroundTaskCount(sessionId: string, running: number): void {
+        this.sessionCache.setBackgroundTaskCount(sessionId, running)
+    }
+
     recordSessionActivity(sessionId: string, updatedAt: number): void {
         this.sessionCache.recordSessionActivity(sessionId, updatedAt)
     }

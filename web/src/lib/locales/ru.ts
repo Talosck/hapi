@@ -1236,6 +1236,8 @@ export default {
   'session.status.goal': 'Цель',
   'session.status.tasks': 'Задачи',
   'session.status.subagents': 'Подагенты',
+  'session.status.backgroundTasks.count.one': 'Выполняется 1 фоновая задача',
+  'session.status.backgroundTasks.count.other': 'Выполняется фоновых задач: {count}',
   'session.status.terminals': 'Фоновые терминалы',
   'session.status.terminalsUnavailable': 'Выполняется: {count} · точная команда недоступна',
   'session.status.terminalsPossible': 'Возможные команды',

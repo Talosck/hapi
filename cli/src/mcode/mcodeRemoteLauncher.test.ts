@@ -184,7 +184,6 @@ function createSession(messages: QueuedMessage[] = [], permissionMode: 'default'
             session.sessionId = id
         },
         onThinkingChange: vi.fn(),
-        sendBackgroundTaskDelta: vi.fn(),
         sendAgentMessage: vi.fn(),
         sendSessionEvent: vi.fn(),
         setModel: vi.fn(),
@@ -235,7 +234,6 @@ function createScriptedSession() {
             session.sessionId = id
         },
         onThinkingChange: vi.fn(),
-        sendBackgroundTaskDelta: vi.fn(),
         sendUserMessage: vi.fn(),
         sendAgentMessage: vi.fn(),
         sendSessionEvent: vi.fn(),
@@ -284,7 +282,6 @@ function createBlockingSession() {
             session.sessionId = id
         },
         onThinkingChange: vi.fn(),
-        sendBackgroundTaskDelta: vi.fn(),
         sendUserMessage: vi.fn(),
         sendAgentMessage: vi.fn(),
         sendSessionEvent: vi.fn(),
@@ -325,7 +322,6 @@ function createSteerSession() {
             session.sessionId = id
         },
         onThinkingChange: vi.fn(),
-        sendBackgroundTaskDelta: vi.fn(),
         sendUserMessage: vi.fn(),
         sendAgentMessage: vi.fn(),
         sendSessionEvent: vi.fn(),
@@ -626,6 +622,51 @@ describe('mcodeRemoteLauncher config sync', () => {
         })
     })
 
+    it('reconciles the background work of the conversation the agent replays', async () => {
+        const backend = createBackend({
+            loadSession: vi.fn(async (
+                _config: unknown,
+                options?: { onHistory?: (messages: unknown[]) => void }
+            ) => {
+                // The agent replays the conversation it remembers, with the
+                // raw tool names of the agent.
+                options?.onHistory?.([
+                    {
+                        type: 'tool_call',
+                        id: 'call-1',
+                        name: 'bash',
+                        input: { command: 'npm run dev', run_in_background: true },
+                        status: 'completed'
+                    },
+                    {
+                        type: 'tool_result',
+                        id: 'call-1',
+                        output: {
+                            content: [{ type: 'text', text: '<bash_background task_id="bg_1">Started.</bash_background>' }],
+                            details: { task_id: 'bg_1', status: 'started' }
+                        },
+                        status: 'completed'
+                    }
+                ]);
+                return 'mcode-session-1';
+            })
+        });
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }]);
+        session.sessionId = 'mcode-existing';
+
+        await mcodeRemoteLauncher(session as never, {});
+
+        const snapshots = session.sendSessionEvent.mock.calls
+            .map((call) => call[0] as { type?: string; tasks?: unknown })
+            .filter((event) => event.type === 'background-task-snapshot');
+        expect(snapshots).toEqual([
+            {
+                type: 'background-task-snapshot',
+                tasks: [expect.objectContaining({ id: 'bg_1', command: 'npm run dev' })]
+            }
+        ]);
+    });
+
     it('folds background task polls into the launch card', async () => {
         const backend = createBackend({
             prompt: vi.fn(async (
@@ -700,9 +741,15 @@ describe('mcodeRemoteLauncher config sync', () => {
         expect(sent[2]).toMatchObject({ type: 'tool-call-result', callId: 'task-call', is_error: false })
         expect(JSON.stringify(sent[2])).toContain('all done')
         expect(JSON.stringify(sent)).not.toContain('task_output')
-        expect(session.sendBackgroundTaskDelta.mock.calls.map((call) => call[0])).toEqual([
-            { started: 1, completed: 0 },
-            { started: 0, completed: 1 }
+
+        // The background work is published as a whole list, so the count the
+        // hub stores cannot drift away from the session.
+        const snapshots = session.sendSessionEvent.mock.calls
+            .map((call) => call[0] as { type?: string; tasks?: unknown })
+            .filter((event) => event.type === 'background-task-snapshot')
+        expect(snapshots).toEqual([
+            { type: 'background-task-snapshot', tasks: [expect.objectContaining({ id: 'bg_1' })] },
+            { type: 'background-task-snapshot', tasks: [] }
         ])
     })
 })

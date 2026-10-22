@@ -12,7 +12,7 @@ import type { RawJSONLines } from '@/claude/types'
 import { configuration } from '@/configuration'
 import { extractUserRequest } from '@/agy/utils/agyMessageText'
 import { AGENT_MESSAGE_PAYLOAD_TYPE } from "@hapi/protocol"
-import type { SessionEndReason, SubagentSnapshotMember, ThreadGoal } from '@hapi/protocol'
+import type { BackgroundTaskRecord, SessionEndReason, SubagentSnapshotMember, ThreadGoal } from '@hapi/protocol'
 import type { ClientToServerEvents, ServerToClientEvents, TerminalOutputPayload, Update } from '@hapi/protocol'
 import {
     AgentTerminalInputPayloadSchema,
@@ -192,7 +192,17 @@ const MATERIALIZATION_RETRY_MAX_MS = 30_000
  * (delegation snapshot, thread goal) the newest one is the only one that
  * matters.
  */
-const LOSSLESS_SESSION_EVENT_TYPES = new Set(['message', 'error', 'queue-notice', 'compact-summary', 'plan-removed'])
+const LOSSLESS_SESSION_EVENT_TYPES = new Set([
+    'message',
+    'error',
+    'queue-notice',
+    'compact-summary',
+    'plan-removed',
+    // The background work of the session is state, not chatter: a snapshot
+    // that is dropped would leave the count of running background tasks stale
+    // for the rest of the session.
+    'background-task-snapshot'
+])
 
 function isTransientMaterializationError(error: unknown): boolean {
     if (!axios.isAxiosError(error)) {
@@ -1239,6 +1249,16 @@ export class ApiSessionClient extends EventEmitter {
         // web drops the matching plan card.
         type: 'plan-removed'
         planId: string
+    } | {
+        // The background work the session has going.
+        //
+        // The list is the whole truth, not a delta: the number of entries is
+        // the number of running background tasks. A client therefore cannot
+        // end up with a count that drifts away from the session, which is
+        // what a started-minus-completed counter does when a completion goes
+        // unnoticed.
+        type: 'background-task-snapshot'
+        tasks: BackgroundTaskRecord[]
     }, id?: string): void {
         const content = {
             role: 'agent',
@@ -1255,26 +1275,6 @@ export class ApiSessionClient extends EventEmitter {
                 message: content
             })
         }, LOSSLESS_SESSION_EVENT_TYPES.has(event.type) ? 'lossless' : 'droppable')
-    }
-
-    /**
-     * Reports out-of-band background work (mcode subagents / background bash)
-     * to the hub. Deliberately a socket event rather than a chat message: the
-     * count belongs to session state, and clients already render the owning
-     * tool card.
-     */
-    sendBackgroundTaskDelta(delta: { started?: number; completed?: number }): void {
-        const started = Math.max(0, Math.trunc(delta.started ?? 0))
-        const completed = Math.max(0, Math.trunc(delta.completed ?? 0))
-        if (started === 0 && completed === 0) return
-
-        this.emitOrQueue(() => {
-            this.socket.emit('background-task', {
-                sid: this.sessionId,
-                ...(started > 0 ? { started } : {}),
-                ...(completed > 0 ? { completed } : {})
-            })
-        }, 'lossless')
     }
 
     emitAgentTerminalOutput(data: string): void {

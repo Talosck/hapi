@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatBlock, NormalizedMessage, ToolCallBlock } from '@/chat/types'
-import { buildSessionStatusData } from './sessionStatus'
+import { buildSessionStatusData, latestBackgroundTaskSnapshot } from './sessionStatus'
 
 function toolBlock(overrides: Omit<Partial<ToolCallBlock>, 'tool'> & {
     name: string
@@ -46,6 +46,38 @@ function taskNotification(taskId?: string): NormalizedMessage {
     }
 }
 
+function backgroundTaskSnapshot(tasks: unknown): NormalizedMessage {
+    return {
+        id: 'background-task-snapshot',
+        localId: null,
+        createdAt: 300,
+        role: 'event',
+        isSidechain: false,
+        content: { type: 'background-task-snapshot', tasks } as never
+    }
+}
+
+describe('latestBackgroundTaskSnapshot', () => {
+    it('returns null when the session never published one', () => {
+        expect(latestBackgroundTaskSnapshot([])).toBeNull()
+    })
+
+    it('reads the newest snapshot the session published', () => {
+        const messages: NormalizedMessage[] = [
+            backgroundTaskSnapshot([{ id: 'bg_1', command: 'npm run dev', cwd: '/repo', startedAt: 1 }]),
+            backgroundTaskSnapshot([{ id: 'bg_2', command: 'npm test', cwd: '/repo', startedAt: 2 }])
+        ]
+
+        expect(latestBackgroundTaskSnapshot(messages)).toEqual([
+            { id: 'bg_2', command: 'npm test', cwd: '/repo', startedAt: 2 }
+        ])
+    })
+
+    it('ignores a snapshot the client cannot read', () => {
+        expect(latestBackgroundTaskSnapshot([backgroundTaskSnapshot([{ id: 'bg_1' }])])).toBeNull()
+    })
+})
+
 describe('buildSessionStatusData', () => {
     it('returns null when the session has no hidden status', () => {
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks: [], messages: [] })).toBeNull()
@@ -90,6 +122,52 @@ describe('buildSessionStatusData', () => {
             expect.objectContaining({ id: 'agent-pending', state: 'waiting', startedAt: null }),
             expect.objectContaining({ id: 'agent-4', title: 'Nested work', state: 'running' })
         ])
+    })
+
+    it('shows the background work the session published instead of guessing from the transcript', () => {
+        const messages: NormalizedMessage[] = [
+            backgroundTaskSnapshot([
+                { id: 'bg_1', command: 'npm run dev', cwd: '/repo/web', startedAt: 1000 }
+            ])
+        ]
+
+        const data = buildSessionStatusData({
+            goal: null,
+            tasks: [],
+            blocks: [],
+            messages,
+            backgroundTaskCount: 1
+        })
+
+        expect(data?.terminals).toEqual([
+            { id: 'bg_1', command: 'npm run dev', cwd: '/repo/web', startedAt: 1000 }
+        ])
+        // The session says what it is running, so there is nothing left to
+        // discover and nothing to guess.
+        expect(data?.undiscoveredTerminalCount).toBe(0)
+        expect(data?.possibleTerminalCommands).toEqual([])
+    })
+
+    it('shows no terminals when the session published an empty list', () => {
+        const data = buildSessionStatusData({
+            goal: {
+                threadId: 'thread-1',
+                objective: 'Ship status panel',
+                status: 'active',
+                tokenBudget: 50_000,
+                tokensUsed: 0,
+                timeUsedSeconds: 0,
+                createdAt: 1,
+                updatedAt: 1
+            },
+            tasks: [],
+            blocks: [],
+            messages: [backgroundTaskSnapshot([])],
+            backgroundTaskCount: 0
+        })
+
+        expect(data?.terminals ?? []).toEqual([])
+        expect(data?.undiscoveredTerminalCount).toBe(0)
     })
 
     it('tracks Claude background terminals until their task notification arrives', () => {

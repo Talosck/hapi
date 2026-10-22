@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@/agent/types';
 import { BackgroundTaskAggregator } from './backgroundTaskAggregator';
+import { normalizeMcodeToolCall } from './toolCallNormalizer';
 
 type ToolCallMessage = Extract<AgentMessage, { type: 'tool_call' }>;
 type ToolResultMessage = Extract<AgentMessage, { type: 'tool_result' }>;
@@ -57,6 +58,7 @@ function startBackgroundTask(aggregator: BackgroundTaskAggregator, overrides: {
     callId?: string;
     name?: string;
     taskId?: string;
+    input?: Record<string, unknown>;
 } = {}): void {
     const callId = overrides.callId ?? 'task-call';
     const taskId = overrides.taskId ?? 'bg_1';
@@ -65,9 +67,9 @@ function startBackgroundTask(aggregator: BackgroundTaskAggregator, overrides: {
     expect(aggregator.handle(toolCall({
         id: callId,
         name,
-        input: name === 'Bash'
+        input: overrides.input ?? (name === 'Bash'
             ? { command: 'npm run dev', run_in_background: true }
-            : { description: 'Research the repo', prompt: 'Look around' }
+            : { description: 'Research the repo', prompt: 'Look around' })
     }))).toHaveLength(1);
 
     const launched = aggregator.handle(toolResult({
@@ -250,12 +252,8 @@ describe('BackgroundTaskAggregator', () => {
             details: { task_id: 'bg_1', status: 'started' }
         });
         expect(aggregator.handle(held)).toEqual([]);
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
 
         expect(aggregator.flushPromptEnd()).toEqual([held]);
-        // The task can no longer be observed, so the hub counter is released
-        // together with the card instead of staying "running" forever.
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
 
         // Once the launch card is complete, later polls update its result
         // instead of emitting a running progress snapshot.
@@ -264,43 +262,21 @@ describe('BackgroundTaskAggregator', () => {
         expect(update).toMatchObject({ type: 'tool_result', id: 'task-call' });
     });
 
-    it('counts a task once when it is released at the end of a turn and polled in the next', () => {
-        const aggregator = new BackgroundTaskAggregator();
-        startBackgroundTask(aggregator);
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
-
-        // The turn ends without a poll: the card is released and the counter
-        // is settled.
-        aggregator.flushPromptEnd();
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
-
-        // The next turn polls the same task and it finishes. The completion
-        // was already counted, so the counter must not be settled twice: the
-        // hub clamps at zero, which would hide a still running task.
-        aggregator.handle(taskOutputCall({ id: 'poll-late' }));
-        aggregator.handle(taskOutputResult('succeeded', 'done', { id: 'poll-late' }));
-
-        expect(aggregator.takeBackgroundTaskDelta()).toBeNull();
-    });
-
     it('does not complete a released task again when the session is aborted', () => {
         const aggregator = new BackgroundTaskAggregator();
         startBackgroundTask(aggregator);
         aggregator.flushPromptEnd();
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 1 });
 
         expect(aggregator.cancelAll('Session aborted')).toEqual([]);
-        expect(aggregator.takeBackgroundTaskDelta()).toBeNull();
     });
 
     it('keeps the first card when the same task id is launched twice', () => {
         const aggregator = new BackgroundTaskAggregator();
         startBackgroundTask(aggregator, { callId: 'call-a' });
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
 
         // The same task id again: the second launch is forwarded as a plain
         // result instead of orphaning the first card and counting a second
-        // start.
+        // task.
         aggregator.handle(toolCall({ id: 'call-b', name: 'Task' }));
         const duplicate = toolResult({
             id: 'call-b',
@@ -308,13 +284,13 @@ describe('BackgroundTaskAggregator', () => {
             details: { task_id: 'bg_1', status: 'started' }
         });
         expect(aggregator.handle(duplicate)).toEqual([duplicate]);
-        expect(aggregator.takeBackgroundTaskDelta()).toBeNull();
+        expect(aggregator.snapshot().length).toBe(1);
 
         // The original card is still the one that completes.
         aggregator.handle(taskOutputCall({ id: 'poll-1' }));
         const [update] = aggregator.handle(taskOutputResult('succeeded', 'done'));
         expect(update).toMatchObject({ type: 'tool_result', id: 'call-a' });
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
+        expect(aggregator.snapshot().length).toBe(0);
     });
 
     it('completes tracked tasks when the session is aborted', () => {
@@ -328,6 +304,7 @@ describe('BackgroundTaskAggregator', () => {
             status: 'completed'
         });
         expect(JSON.stringify(done)).toContain('canceled');
+        expect(aggregator.snapshot().length).toBe(0);
     });
 
     it('falls through unknown task polls as a single card', () => {
@@ -356,87 +333,293 @@ describe('BackgroundTaskAggregator', () => {
         const malformed = toolResult({ id: 'bad-task', text: 'no task id here', details: {} });
 
         expect(aggregator.handle(malformed)).toEqual([malformed]);
+        expect(aggregator.snapshot().length).toBe(0);
     });
 
-    it('reports start and completion deltas for the hub counter', () => {
-        const aggregator = new BackgroundTaskAggregator();
-        startBackgroundTask(aggregator);
+    describe('the running ledger', () => {
+        it('publishes the command and the directory of the task that is running', () => {
+            const aggregator = new BackgroundTaskAggregator({ cwd: '/home/dev/project' });
+            startBackgroundTask(aggregator, {
+                name: 'Bash',
+                taskId: 'bg_bash',
+                input: { command: 'npm run dev', run_in_background: true }
+            });
 
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
-        expect(aggregator.takeBackgroundTaskDelta()).toBeNull();
+            expect(aggregator.snapshot()).toEqual([
+                {
+                    id: 'bg_bash',
+                    command: 'npm run dev',
+                    cwd: '/home/dev/project',
+                    startedAt: expect.any(Number)
+                }
+            ]);
+            expect(aggregator.snapshot().length).toBe(1);
+        });
 
-        aggregator.handle(taskOutputCall({ id: 'poll-delta' }));
-        aggregator.handle(taskOutputResult('succeeded', 'done', { id: 'poll-delta' }));
+        it('takes the directory from the call when the agent names one', () => {
+            const aggregator = new BackgroundTaskAggregator({ cwd: '/home/dev/project' });
+            startBackgroundTask(aggregator, {
+                name: 'Bash',
+                taskId: 'bg_bash',
+                input: { command: 'npm run dev', cwd: '/srv/app', run_in_background: true }
+            });
 
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
+            expect(aggregator.snapshot()[0]?.cwd).toBe('/srv/app');
+        });
+
+        it('drops the task once the agent reports a final status', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+            expect(aggregator.snapshot().length).toBe(1);
+
+            aggregator.handle(taskOutputCall({ id: 'poll-done' }));
+            aggregator.handle(taskOutputResult('succeeded', 'done', { id: 'poll-done' }));
+
+            expect(aggregator.snapshot().length).toBe(0);
+            expect(aggregator.snapshot()).toEqual([]);
+        });
+
+        it('keeps a task the agent is watching across turns', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+            aggregator.handle(taskOutputCall({ id: 'poll-live' }));
+            aggregator.handle(taskOutputResult('running', 'working', { id: 'poll-live' }));
+
+            expect(aggregator.flushPromptEnd()).toEqual([]);
+            expect(aggregator.snapshot().length).toBe(1);
+
+            // The agent asks about it again in the next turn: it is still
+            // running, so it keeps counting.
+            aggregator.handle(taskOutputCall({ id: 'poll-live-2' }));
+            aggregator.handle(taskOutputResult('running', 'still working', { id: 'poll-live-2' }));
+            expect(aggregator.flushPromptEnd()).toEqual([]);
+            expect(aggregator.snapshot().length).toBe(1);
+        });
+
+        it('stops counting a task the agent stopped asking about', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+            aggregator.handle(taskOutputCall({ id: 'poll-live' }));
+            aggregator.handle(taskOutputResult('running', 'working', { id: 'poll-live' }));
+
+            // The turn the agent asked about it in does not count as unasked.
+            aggregator.flushPromptEnd();
+            expect(aggregator.snapshot().length).toBe(1);
+
+            // One turn without the agent asking about it: a grace turn.
+            aggregator.flushPromptEnd();
+            expect(aggregator.snapshot().length).toBe(1);
+
+            // Nothing in the stream proves it still runs, so it leaves the
+            // count instead of keeping the session busy forever.
+            aggregator.flushPromptEnd();
+            expect(aggregator.snapshot().length).toBe(0);
+        });
+
+        it('counts a released task again when the agent turns out to still watch it', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+            aggregator.flushPromptEnd();
+            aggregator.flushPromptEnd();
+            aggregator.flushPromptEnd();
+            expect(aggregator.snapshot().length).toBe(0);
+
+            aggregator.handle(taskOutputCall({ id: 'poll-again' }));
+            aggregator.handle(taskOutputResult('running', 'still working', { id: 'poll-again' }));
+            expect(aggregator.snapshot().length).toBe(1);
+        });
+
+        it('stops counting a task whose stop was accepted', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+            aggregator.handle(taskOutputCall({ id: 'poll-stop' }));
+            aggregator.handle(taskOutputResult('running', 'working', { id: 'poll-stop' }));
+
+            aggregator.handle(toolCall({ id: 'stop-1', name: 'task_stop', input: { task_id: 'bg_1' } }));
+            aggregator.handle(toolResult({
+                id: 'stop-1',
+                text: '<task_stop status="stopping">Stop requested.</task_stop>',
+                details: { task_id: 'bg_1', status: 'stopping' }
+            }));
+
+            const released = aggregator.flushPromptEnd();
+            expect(released).toHaveLength(1);
+            expect(released[0]).toMatchObject({ type: 'tool_result', id: 'task-call' });
+            expect(aggregator.snapshot().length).toBe(0);
+        });
+
+        it('counts every task the session has going', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator, { callId: 'call-a', taskId: 'bg_a' });
+            startBackgroundTask(aggregator, { callId: 'call-b', taskId: 'bg_b' });
+
+            expect(aggregator.snapshot().length).toBe(2);
+            expect(aggregator.snapshot().map((task) => task.id)).toEqual(['bg_a', 'bg_b']);
+        });
     });
 
-    it('reports completions for tasks canceled with the session', () => {
-        const aggregator = new BackgroundTaskAggregator();
-        startBackgroundTask(aggregator);
+    describe('the payloads MiniMax Code really sends', () => {
+        it('reads the ledger out of a real background launch and its poll', () => {
+            // Captured from `mcode acp`: the launch of a background command
+            // and the poll the agent runs in the same turn.
+            const aggregator = new BackgroundTaskAggregator({ cwd: '/home/talos/proj' });
+            const feed = (message: AgentMessage) => aggregator.handle(normalizeMcodeToolCall(message));
 
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
+            feed({
+                type: 'tool_call',
+                id: 'call_1',
+                name: 'bash',
+                input: {
+                    command: 'sleep 4 && echo hello-from-background',
+                    description: 'Run sleep 4 and echo hello-from-background',
+                    run_in_background: true
+                },
+                status: 'pending'
+            });
+            feed({
+                type: 'tool_result',
+                id: 'call_1',
+                output: {
+                    content: [{ type: 'text', text: '<bash_background task_id="bg_62208582-734c-4936-854e-a1529eb5a1d0">\n...\n</bash_background>' }],
+                    details: {
+                        description: 'Run sleep 4 and echo hello-from-background',
+                        timing: {},
+                        envSanitized: [],
+                        status: 'started',
+                        task_id: 'bg_62208582-734c-4936-854e-a1529eb5a1d0'
+                    }
+                },
+                status: 'completed'
+            });
 
-        aggregator.cancelAll('Session aborted');
+            expect(aggregator.snapshot()).toEqual([
+                {
+                    id: 'bg_62208582-734c-4936-854e-a1529eb5a1d0',
+                    command: 'sleep 4 && echo hello-from-background',
+                    cwd: '/home/talos/proj',
+                    startedAt: expect.any(Number)
+                }
+            ]);
 
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
+            feed({
+                type: 'tool_call',
+                id: 'poll_1',
+                name: 'task_output',
+                input: { task_id: 'bg_62208582-734c-4936-854e-a1529eb5a1d0', wait_ms: 10000 },
+                status: 'completed'
+            });
+            feed({
+                type: 'tool_result',
+                id: 'poll_1',
+                output: {
+                    content: [{ type: 'text', text: '<task_output status="succeeded">\n<bash_status>Command exited with code 0</bash_status>\nhello-from-background\n\n</task_output>' }],
+                    details: {
+                        task_id: 'bg_62208582-734c-4936-854e-a1529eb5a1d0',
+                        status: 'succeeded',
+                        execution: { status: 'succeeded', reason: 'exited', exitCode: 0 },
+                        output: {},
+                        timing: {},
+                        effective_wait_ms: 10000,
+                        wait_ms_clamped: false,
+                        timed_out: false,
+                        next_offset: 22,
+                        truncated: false
+                    }
+                },
+                status: 'completed'
+            });
+
+            expect(aggregator.snapshot()).toEqual([]);
+        });
     });
 
-    it('releases a task whose stop was accepted when the turn ends', () => {
-        // A polled task stays alive across turns: the agent polls it again
-        // later. A task whose stop was accepted ("stopping") is not observed
-        // again, so the hub counter must not keep it.
-        const aggregator = new BackgroundTaskAggregator();
-        startBackgroundTask(aggregator);
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
+    describe('reconciling a replayed conversation', () => {
+        it('settles a task the agent finished while HAPI was not watching', () => {
+            const aggregator = new BackgroundTaskAggregator();
 
-        aggregator.handle(taskOutputCall({ id: 'poll-stop' }));
-        aggregator.handle(taskOutputResult('running', 'working', { id: 'poll-stop' }));
+            // What the agent replays when the session is loaded: the launch,
+            // then the turn in which the agent read the finished task.
+            aggregator.reconcile([
+                toolCall({
+                    id: 'call-1',
+                    name: 'Bash',
+                    input: { command: 'npm run dev', run_in_background: true }
+                }),
+                toolResult({
+                    id: 'call-1',
+                    text: '<bash_background task_id="bg_1">Started.</bash_background>',
+                    details: { task_id: 'bg_1', status: 'started' }
+                }),
+                toolCall({ id: 'poll-1', name: 'task_output', input: { task_id: 'bg_1' } }),
+                toolResult({
+                    id: 'poll-1',
+                    text: '<task_output status="succeeded">done</task_output>',
+                    details: { task_id: 'bg_1', status: 'succeeded' }
+                })
+            ]);
 
-        aggregator.handle(toolCall({ id: 'stop-1', name: 'task_stop', input: { task_id: 'bg_1' } }));
-        aggregator.handle(toolResult({
-            id: 'stop-1',
-            text: '<task_stop status="stopping">Stop requested.</task_stop>',
-            details: { task_id: 'bg_1', status: 'stopping' }
-        }));
+            expect(aggregator.snapshot().length).toBe(0);
+        });
 
-        // The turn ends: the task is released, so the counter drops.
-        const released = aggregator.flushPromptEnd();
-        expect(released).toHaveLength(1);
-        expect(released[0]).toMatchObject({ type: 'tool_result', id: 'task-call' });
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
-    });
+        it('keeps a task the agent never reported a final status for', () => {
+            const aggregator = new BackgroundTaskAggregator();
 
-    it('keeps a polled task alive across turns while it still runs', () => {
-        const aggregator = new BackgroundTaskAggregator();
-        startBackgroundTask(aggregator);
-        aggregator.takeBackgroundTaskDelta();
-        aggregator.handle(taskOutputCall({ id: 'poll-live' }));
-        aggregator.handle(taskOutputResult('running', 'working', { id: 'poll-live' }));
+            aggregator.reconcile([
+                toolCall({
+                    id: 'call-1',
+                    name: 'Bash',
+                    input: { command: 'npm run dev', run_in_background: true }
+                }),
+                toolResult({
+                    id: 'call-1',
+                    text: '<bash_background task_id="bg_1">Started.</bash_background>',
+                    details: { task_id: 'bg_1', status: 'started' }
+                })
+            ]);
 
-        expect(aggregator.flushPromptEnd()).toEqual([]);
-        expect(aggregator.takeBackgroundTaskDelta()).toBeNull();
-    });
+            expect(aggregator.snapshot().length).toBe(1);
+            expect(aggregator.snapshot()[0]?.command).toBe('npm run dev');
+        });
 
-    it('counts a released task again when it turns out to still run', () => {
-        const aggregator = new BackgroundTaskAggregator();
-        startBackgroundTask(aggregator);
-        aggregator.takeBackgroundTaskDelta();
-        aggregator.handle(taskOutputCall({ id: 'poll-stop' }));
-        aggregator.handle(taskOutputResult('running', 'working', { id: 'poll-stop' }));
-        aggregator.handle(toolCall({ id: 'stop-1', name: 'task_stop', input: { task_id: 'bg_1' } }));
-        aggregator.handle(toolResult({
-            id: 'stop-1',
-            text: '<task_stop status="stopping">Stop requested.</task_stop>',
-            details: { task_id: 'bg_1', status: 'stopping' }
-        }));
-        aggregator.flushPromptEnd();
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 0, completed: 1 });
+        it('stops counting a reconciled task the agent stopped asking about', () => {
+            const aggregator = new BackgroundTaskAggregator();
 
-        // The stop did not take effect: the task runs on and is counted again.
-        aggregator.handle(taskOutputCall({ id: 'poll-again' }));
-        aggregator.handle(taskOutputResult('running', 'still working', { id: 'poll-again' }));
+            aggregator.reconcile([
+                toolCall({
+                    id: 'call-1',
+                    name: 'Bash',
+                    input: { command: 'npm run dev', run_in_background: true }
+                }),
+                toolResult({
+                    id: 'call-1',
+                    text: '<bash_background task_id="bg_1">Started.</bash_background>',
+                    details: { task_id: 'bg_1', status: 'started' }
+                })
+            ]);
+            expect(aggregator.snapshot().length).toBe(1);
 
-        expect(aggregator.takeBackgroundTaskDelta()).toEqual({ started: 1, completed: 0 });
+            // Nobody asked about it since the replay, so it leaves the count
+            // like any other task the agent stopped watching.
+            aggregator.flushPromptEnd();
+            expect(aggregator.snapshot().length).toBe(1);
+            aggregator.flushPromptEnd();
+            expect(aggregator.snapshot().length).toBe(0);
+        });
+
+        it('does not report the replayed messages as new cards', () => {
+            const aggregator = new BackgroundTaskAggregator();
+
+            aggregator.reconcile([
+                toolCall({
+                    id: 'call-1',
+                    name: 'Bash',
+                    input: { command: 'npm run dev', run_in_background: true }
+                })
+            ]);
+
+            // The transcript already holds these messages; reconciling must
+            // not add anything to it.
+            expect(aggregator.handle(toolCall({ id: 'call-1', name: 'Bash' }))).toHaveLength(1);
+        });
     });
 });

@@ -547,24 +547,57 @@ export class AcpSdkBackend implements AgentBackend {
         return sessionId;
     }
 
-    async loadSession(config: AgentSessionConfig & { sessionId: string }): Promise<string> {
+    async loadSession(
+        config: AgentSessionConfig & { sessionId: string },
+        options?: { onHistory?: (messages: AgentMessage[]) => void }
+    ): Promise<string> {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
         }
 
-        const response = await withRetry(
-            () => this.transport!.sendRequest('session/load', {
-                sessionId: config.sessionId,
-                cwd: config.cwd,
-                mcpServers: config.mcpServers
-            }),
-            {
-                ...AcpSdkBackend.INIT_RETRY_OPTIONS,
-                onRetry: (error, attempt, nextDelayMs) => {
-                    logger.debug(`[ACP] session/load attempt ${attempt} failed, retrying in ${nextDelayMs}ms`, error);
-                }
+        // The agent replays the conversation it remembers. That replay is
+        // history: it must not reach the transcript, because the transcript
+        // already holds those messages. It is still worth reading, so it goes
+        // to a handler of its own.
+        const replay: AgentMessage[] = [];
+        const previousHandler = this.messageHandler;
+        this.messageHandler = new AcpMessageHandler((message) => {
+            // The replay is read for the tool calls it holds: they say what
+            // the agent did while nobody was watching.
+            if (message.type === 'tool_call' || message.type === 'tool_result') {
+                replay.push(message);
             }
-        );
+        }, {
+            textChunkMode: this.options.textChunkMode,
+            flavor: this.options.flavor,
+            registerImages: false
+        });
+
+        let response: unknown;
+        try {
+            response = await withRetry(
+                () => this.transport!.sendRequest('session/load', {
+                    sessionId: config.sessionId,
+                    cwd: config.cwd,
+                    mcpServers: config.mcpServers
+                }),
+                {
+                    ...AcpSdkBackend.INIT_RETRY_OPTIONS,
+                    onRetry: (error, attempt, nextDelayMs) => {
+                        logger.debug(`[ACP] session/load attempt ${attempt} failed, retrying in ${nextDelayMs}ms`, error);
+                    }
+                }
+            );
+        } finally {
+            // The agent sends the replay before it answers the request, so the
+            // updates are already queued. Drain them before the handler is
+            // released, or the last ones would be handled by the next turn's
+            // handler.
+            await this.sessionUpdateQueue;
+            this.messageHandler = previousHandler;
+        }
+
+        options?.onHistory?.(replay);
 
         const loadedSessionId = isObject(response) ? asString(response.sessionId) : null;
         const sessionId = loadedSessionId ?? config.sessionId;

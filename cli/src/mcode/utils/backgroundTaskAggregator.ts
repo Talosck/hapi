@@ -2,19 +2,35 @@ import { isObject } from '@hapi/protocol';
 import type { AgentMessage } from '@/agent/types';
 
 /**
- * mcode runs subagents and background bash commands out-of-band: the launch
- * tool (`task` / `bash`) returns immediately with a task id, and the agent
- * polls the task with `task_output` (plus `task_query` / `task_append` /
- * `task_stop`). The ACP adapter emits one `tool_call` snapshot per poll, so a
- * single background command can produce dozens of near-identical cards.
+ * mcode runs background work out-of-band: the launch tool (`bash` with
+ * `run_in_background`, or `task`) returns immediately with a task id, and the
+ * agent reads the task back with `task_output` (plus `task_query` /
+ * `task_append` / `task_stop`). The ACP adapter emits one `tool_call` snapshot
+ * per poll, so a single background command can produce dozens of
+ * near-identical cards.
  *
- * This aggregator folds that lifecycle into the originating `Task` / `Bash`
+ * This aggregator folds that lifecycle into the originating `Bash` / `Task`
  * card:
  * - a background launch result is held, keeping the card in the running state;
  * - polls for that task update the launch card's result instead of creating
  *   their own cards;
  * - a terminal status completes the launch card;
  * - polls for unknown tasks fall through as a single card (latest call only).
+ *
+ * On top of the cards it keeps a **ledger** of the background work the session
+ * still has going. The ledger is what the user is shown, so it only holds what
+ * HAPI can actually back up:
+ *
+ * - a task enters the ledger when the agent launches it;
+ * - a task leaves it when the agent reports a terminal status, or when the
+ *   agent stops asking about it (nothing proves it still runs, so counting it
+ *   would be a guess).
+ *
+ * The count of running background work is therefore the size of the ledger -
+ * an absolute number that cannot drift the way a started-minus-completed
+ * counter does. A completion HAPI never sees (the agent finishes a task
+ * between two turns and reports it in a turn of its own) used to leave the
+ * counter stuck for the rest of the session.
  *
  * mcode does not stream child tool calls over ACP, so this is the maximum
  * fidelity HAPI can borrow from its own subagent cards: one card per task with
@@ -35,6 +51,7 @@ const RUNNING_TASK_STATUSES = new Set([
     'queued',
     'accepted',
     'auto_promoted',
+    'background_started',
     'stopping'
 ]);
 
@@ -54,6 +71,31 @@ const TERMINAL_TASK_STATUSES = new Set([
 
 const FAILED_TASK_STATUSES = new Set(['failed', 'error']);
 
+/**
+ * How many turns may pass without the agent asking about a task before HAPI
+ * stops counting it as running.
+ *
+ * Two turns is long enough for an agent that looks at a slow job every other
+ * turn, and short enough that a task the agent abandoned does not keep the
+ * session busy forever. A terminal status settles it for good.
+ */
+const UNTRACKED_AFTER_TURNS = 2;
+
+/**
+ * One background task, as far as HAPI can tell.
+ *
+ * Only tasks HAPI believes are still running are in the ledger, so every
+ * record here is a task the session has going.
+ */
+export type BackgroundTaskRecord = {
+    id: string;
+    /** The command the agent ran. */
+    command: string;
+    cwd: string | null;
+    /** Epoch milliseconds: when HAPI first saw the task start. */
+    startedAt: number;
+};
+
 type ToolCallInfo = {
     name: string;
     input: unknown;
@@ -67,6 +109,16 @@ type TrackedTask = {
     status: string | null;
     /** True once a task_* poll has been folded into the launch card. */
     polled: boolean;
+    /**
+     * True while the agent asked about this task in the current turn.
+     *
+     * A task the agent asks about every turn is one it is watching, and it
+     * stays "running". A task it stopped asking about is not observed any
+     * more, and after a turn or two it leaves the running count.
+     */
+    askedThisTurn: boolean;
+    /** How many turns passed without the agent asking about this task. */
+    turnsUnasked: number;
     /** True once the launch result was forwarded and the card is completed. */
     launchResultForwarded: boolean;
     /**
@@ -78,8 +130,8 @@ type TrackedTask = {
     /**
      * True once a stop was accepted for this task (`task_stop` answered
      * "stopping"). The task winds down and is not observed again, so it is
-     * released at the end of the turn — otherwise the hub counter would keep
-     * a task that no longer runs.
+     * released at the end of the turn — otherwise the session would keep
+     * counting a task that no longer runs.
      */
     stopRequested: boolean;
 };
@@ -210,25 +262,72 @@ function taskIdFromInput(input: unknown): string | null {
     return isObject(input) ? readString(input, ['task_id', 'taskId']) : null;
 }
 
+/** The command the agent ran. */
+function readCommand(input: unknown): string | null {
+    if (!isObject(input)) return null;
+    const command = input.command;
+    if (typeof command === 'string' && command.trim().length > 0) return command.trim();
+    if (Array.isArray(command)) {
+        const parts = command.filter((part): part is string => typeof part === 'string');
+        if (parts.length > 0) return parts.join(' ').trim();
+    }
+    for (const key of ['description', 'summary', 'prompt']) {
+        const value = input[key];
+        if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+    }
+    return null;
+}
+
+function readCwd(input: unknown): string | null {
+    if (!isObject(input)) return null;
+    for (const key of ['cwd', 'workdir', 'path']) {
+        const value = input[key];
+        if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+    }
+    return null;
+}
+
 export class BackgroundTaskAggregator {
     private readonly toolCalls = new Map<string, ToolCallInfo>();
     private readonly tasks = new Map<string, TrackedTask>();
     private readonly bufferedCalls = new Map<string, ToolCallMessage>();
     private readonly heldLaunchResults = new Map<string, ToolResultMessage>();
-    private startedCount = 0;
-    private completedCount = 0;
+    /** The background work the session still has going. */
+    private readonly records = new Map<string, BackgroundTaskRecord>();
 
     /**
-     * Drains the lifecycle counters accumulated since the last call. The
-     * launcher forwards them to the hub so `backgroundTaskCount` — and the
-     * session idle/status logic built on it — matches the cards.
+     * The directory the session runs in.
+     *
+     * The agent's bash tool does not repeat it in every call, so it is the
+     * fallback for the tasks that do not name one.
      */
-    takeBackgroundTaskDelta(): { started: number; completed: number } | null {
-        if (this.startedCount === 0 && this.completedCount === 0) return null;
-        const delta = { started: this.startedCount, completed: this.completedCount };
-        this.startedCount = 0;
-        this.completedCount = 0;
-        return delta;
+    private defaultCwd: string | null;
+
+    /**
+     * @param options.cwd the directory the session runs in.
+     */
+    constructor(options: { cwd?: string | null } = {}) {
+        this.defaultCwd = options.cwd ?? null;
+    }
+
+    /**
+     * Sets the directory the session runs in.
+     *
+     * The launcher learns the path after it is constructed, so the fallback
+     * cannot be a constructor argument.
+     */
+    setDefaultCwd(cwd: string | null): void {
+        this.defaultCwd = cwd;
+    }
+
+    /**
+     * The background work the session still has going, oldest first.
+     *
+     * This is what the user is shown, so it carries what the agent ran and
+     * where it runs.
+     */
+    snapshot(): BackgroundTaskRecord[] {
+        return [...this.records.values()];
     }
 
     /**
@@ -246,25 +345,67 @@ export class BackgroundTaskAggregator {
     }
 
     /**
-     * Called when a prompt/turn ends. A background task that was never polled
-     * cannot be tracked reliably, so release its admission result and let the
-     * card finish; polled tasks stay running and keep updating the card.
+     * Rebuilds the ledger from a replayed conversation history.
+     *
+     * When the agent process is replaced, HAPI asks it to load the session
+     * again. The agent replays the conversation, and that replay contains the
+     * tool calls of the turns HAPI never saw - including the turn in which the
+     * agent read a finished background task. Without this, a task that
+     * finished while HAPI was not looking would keep counting as running until
+     * the session was closed.
+     *
+     * The replay is history, not a live turn: it updates the ledger but never
+     * produces cards, because the transcript already holds them.
+     */
+    reconcile(messages: readonly AgentMessage[]): void {
+        for (const message of messages) {
+            if (message.type === 'tool_call') {
+                this.replayToolCall(message);
+                continue;
+            }
+            if (message.type === 'tool_result') {
+                this.replayToolResult(message);
+            }
+        }
+    }
+
+    /**
+     * Called when a prompt/turn ends.
+     *
+     * A task the agent asked about in this turn is one it is watching, so it
+     * keeps running and keeps updating its card. A task the agent stopped
+     * asking about is not observed any more - nothing in the stream proves it
+     * still runs - so it leaves the running count after a turn or two instead
+     * of keeping the session busy forever.
+     *
+     * A launch that was never polled cannot be observed any more, so its card
+     * is released and it completes.
      */
     flushPromptEnd(): AgentMessage[] {
         const forwarded: AgentMessage[] = [];
 
         for (const task of this.tasks.values()) {
             if (task.completed) continue;
-            if (task.polled) {
-                // A polled task normally stays alive across turns: the agent
-                // polls it again later. A task whose stop was accepted is not
-                // observed again, so it is released here — otherwise the hub
-                // counter would keep a task that no longer runs and the
-                // session would never look idle.
-                if (!task.stopRequested) continue;
+
+            if (task.askedThisTurn) {
+                task.askedThisTurn = false;
+                task.turnsUnasked = 0;
+            } else {
+                task.turnsUnasked += 1;
+                if (task.turnsUnasked >= UNTRACKED_AFTER_TURNS) {
+                    // Nothing proves the task still runs, so it stops counting.
+                    // The task stays tracked: a later turn may still poll it,
+                    // and that poll puts it back into the running count.
+                    this.records.delete(task.taskId);
+                }
+            }
+
+            // A task whose stop was accepted is not observed again, so it
+            // leaves the count and its card completes.
+            if (task.stopRequested) {
+                this.records.delete(task.taskId);
                 this.heldLaunchResults.delete(task.callId);
                 task.completed = true;
-                this.completedCount += 1;
                 forwarded.push({
                     type: 'tool_result',
                     id: task.callId,
@@ -276,16 +417,13 @@ export class BackgroundTaskAggregator {
                 });
                 continue;
             }
+
+            if (task.polled) continue;
+
             const held = this.heldLaunchResults.get(task.callId);
             if (!held) continue;
             this.heldLaunchResults.delete(task.callId);
             task.launchResultForwarded = true;
-            // We can no longer observe this task, so release both the card and
-            // the hub counter instead of leaving a permanently "running" entry.
-            // The task stays tracked: a later turn may still poll it, and that
-            // poll must not count a second completion.
-            task.completed = true;
-            this.completedCount += 1;
             forwarded.push(held);
         }
 
@@ -305,10 +443,9 @@ export class BackgroundTaskAggregator {
         const forwarded: AgentMessage[] = [];
 
         for (const task of this.tasks.values()) {
-            // A task that was already released has a complete card and was
-            // already counted; completing it again would both duplicate the
-            // card and push the hub counter below zero.
-            if (task.completed) continue;
+            // A task that was already released has a complete card; completing
+            // it again would duplicate the card.
+            if (task.completed || task.launchResultForwarded) continue;
             forwarded.push({
                 type: 'tool_result',
                 id: task.callId,
@@ -319,13 +456,14 @@ export class BackgroundTaskAggregator {
                 status: 'completed'
             });
             task.completed = true;
-            this.completedCount += 1;
+            this.records.delete(task.taskId);
         }
 
         this.tasks.clear();
         this.heldLaunchResults.clear();
         this.bufferedCalls.clear();
         this.toolCalls.clear();
+        this.records.clear();
         return forwarded;
     }
 
@@ -369,11 +507,18 @@ export class BackgroundTaskAggregator {
                     input: call.input,
                     status: parsed.status,
                     polled: false,
+                    askedThisTurn: false,
+                    turnsUnasked: 0,
                     launchResultForwarded: false,
                     completed: false,
                     stopRequested: false
                 });
-                this.startedCount += 1;
+                this.records.set(parsed.taskId, {
+                    id: parsed.taskId,
+                    command: readCommand(call.input) ?? parsed.taskId,
+                    cwd: readCwd(call.input) ?? this.defaultCwd,
+                    startedAt: Date.now()
+                });
                 this.heldLaunchResults.set(message.id, message);
                 return [];
             }
@@ -402,6 +547,8 @@ export class BackgroundTaskAggregator {
         }
 
         task.polled = true;
+        task.askedThisTurn = true;
+        task.turnsUnasked = 0;
         task.status = parsed.status ?? task.status;
 
         // A stop that was accepted ("stopping") means the task winds down and
@@ -410,21 +557,29 @@ export class BackgroundTaskAggregator {
             task.stopRequested = true;
         }
 
-        // A task that was released at the end of an earlier turn (its card was
-        // completed and the hub counter was decremented) but is still running
-        // is counted again: the counter has to match the cards.
+        // A task that was released at the end of an earlier turn but turned
+        // out to still run is running again.
         if (task.completed && !isTerminalStatus(parsed.status)) {
             task.completed = false;
             task.stopRequested = false;
-            this.startedCount += 1;
+        }
+        // The agent asked about it, so it runs - unless it reported a final
+        // status, which is handled below.
+        if (!isTerminalStatus(parsed.status)) {
+            this.markRunning(task);
         }
 
         // task_append can activate an idle child under a NEW task id. Re-key
         // the tracked task so later task_output calls still land on this card.
         if (call.name === 'task_append' && parsed.taskId && parsed.taskId !== task.taskId) {
             this.tasks.delete(task.taskId);
+            const record = this.records.get(task.taskId);
+            this.records.delete(task.taskId);
             task.taskId = parsed.taskId;
             this.tasks.set(task.taskId, task);
+            if (record) {
+                this.records.set(task.taskId, { ...record, id: task.taskId });
+            }
         }
 
         const terminal = isTerminalStatus(parsed.status);
@@ -440,16 +595,95 @@ export class BackgroundTaskAggregator {
         if (terminal) {
             this.tasks.delete(task.taskId);
             this.heldLaunchResults.delete(task.callId);
-            // A task that was already released (its card was completed at the
-            // end of an earlier turn) must not be counted a second time: the
-            // hub counter would drop below zero and hide a running task.
-            if (!task.completed) {
-                task.completed = true;
-                this.completedCount += 1;
-            }
+            task.completed = true;
+            this.records.delete(task.taskId);
         }
 
         return [update];
+    }
+
+    /**
+     * Puts a task back into the running count.
+     *
+     * A task that was launched in an earlier turn - or before this process
+     * started - has no record yet, so one is created from what the agent
+     * reported about it.
+     */
+    private markRunning(task: TrackedTask): void {
+        const existing = this.records.get(task.taskId);
+        if (existing) return;
+        this.records.set(task.taskId, {
+            id: task.taskId,
+            command: readCommand(task.input) ?? task.taskId,
+            cwd: readCwd(task.input) ?? this.defaultCwd,
+            startedAt: Date.now()
+        });
+    }
+
+    private replayToolCall(message: ToolCallMessage): void {
+        if (!BACKGROUND_LAUNCH_TOOLS.has(message.name) && !BACKGROUND_CONTROL_TOOLS.has(message.name)) {
+            return;
+        }
+        this.toolCalls.set(message.id, { name: message.name, input: message.input });
+    }
+
+    private replayToolResult(message: ToolResultMessage): void {
+        const call = this.toolCalls.get(message.id);
+        if (!call) return;
+        this.toolCalls.delete(message.id);
+
+        const parsed = parseTaskResult(message.output);
+        const taskId = readString(parsed.details, ['task_id', 'taskId'])
+            ?? taskIdFromInput(call.input)
+            ?? matchAttribute(parsed.text, 'task_id');
+        if (!taskId) return;
+
+        if (BACKGROUND_LAUNCH_TOOLS.has(call.name)) {
+            if (!isBackgroundLaunch(parsed)) return;
+            if (this.tasks.has(taskId)) return;
+            this.tasks.set(taskId, {
+                taskId,
+                callId: message.id,
+                name: call.name,
+                input: call.input,
+                status: parsed.status,
+                polled: false,
+                askedThisTurn: false,
+                turnsUnasked: 0,
+                // The transcript already holds the card of this launch, so the
+                // replay must not produce one.
+                launchResultForwarded: true,
+                completed: false,
+                stopRequested: false
+            });
+            this.records.set(taskId, {
+                id: taskId,
+                command: readCommand(call.input) ?? taskId,
+                cwd: readCwd(call.input) ?? this.defaultCwd,
+                startedAt: Date.now()
+            });
+            return;
+        }
+
+        // A poll: a terminal status settles the task for good, anything else
+        // says it is still alive.
+        if (isTerminalStatus(parsed.status)) {
+            this.records.delete(taskId);
+            this.tasks.delete(taskId);
+            return;
+        }
+
+        const task = this.tasks.get(taskId);
+        if (!task) return;
+        task.polled = true;
+        task.turnsUnasked = 0;
+        if (this.records.has(taskId)) return;
+        this.records.set(taskId, {
+            id: taskId,
+            command: readCommand(task.input) ?? taskId,
+            cwd: readCwd(task.input) ?? this.defaultCwd,
+            startedAt: Date.now()
+        });
     }
 
     private buildUpdate(

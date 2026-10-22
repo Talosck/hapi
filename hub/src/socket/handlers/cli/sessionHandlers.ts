@@ -8,7 +8,7 @@ import type { Store, StoredSession } from '../../../store'
 import type { SyncEvent } from '../../../sync/syncEngine'
 import { extractTodoWriteTodosFromMessageContent } from '../../../sync/todos'
 import { extractTeamStateFromMessageContent, applyTeamStateDelta } from '../../../sync/teams'
-import { extractBackgroundTaskDelta } from '../../../sync/backgroundTasks'
+import { extractBackgroundTaskDelta, extractBackgroundTaskSnapshot } from '../../../sync/backgroundTasks'
 import { shouldRecordSessionActivity } from '../../../sync/sessionActivity'
 import type { CliSocketWithData } from '../../socketTypes'
 import type { SessionEndReason } from '@hapi/protocol'
@@ -56,12 +56,6 @@ const messageSchema = z.object({
     createdAt: z.number().optional()
 })
 
-const backgroundTaskDeltaSchema = z.object({
-    sid: z.string(),
-    started: z.number().int().min(0).optional(),
-    completed: z.number().int().min(0).optional()
-})
-
 const updateMetadataSchema = z.object({
     sid: z.string(),
     expectedVersion: z.number().int(),
@@ -98,6 +92,8 @@ export type SessionHandlersDeps = {
     onSessionEnd?: (payload: SessionEndPayload) => void
     onWebappEvent?: (event: SyncEvent) => void
     onBackgroundTaskDelta?: (sessionId: string, delta: { started: number; completed: number }) => void
+    /** Sets the absolute number of background tasks the session has going. */
+    onBackgroundTaskCount?: (sessionId: string, running: number) => void
     onSessionActivity?: (sessionId: string, updatedAt: number) => void
     /** tiann/hapi#1820: any message is agent progress, either direction. */
     onAgentProgress?: (sessionId: string, at: number) => void
@@ -109,7 +105,7 @@ export type SessionHandlersDeps = {
 }
 
 export function registerSessionHandlers(socket: CliSocketWithData, deps: SessionHandlersDeps): void {
-    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onAgentProgress, onSweepImmediateQueued, onMessagesConsumed } = deps
+    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onBackgroundTaskCount, onSessionActivity, onAgentProgress, onSweepImmediateQueued, onMessagesConsumed } = deps
 
     socket.on('native-queue-message', data => {
         const parsed = z.object({ sid: z.string(), localId: z.string().min(1), text: z.string().nullable() }).safeParse(data)
@@ -235,6 +231,15 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         const bgDelta = extractBackgroundTaskDelta(content)
         if (bgDelta) {
             onBackgroundTaskDelta?.(sid, bgDelta)
+        }
+
+        // The background work a session has going is published as a whole
+        // list, so the hub stores an absolute count. A counter that adds up
+        // starts and completions sticks when a completion goes unnoticed -
+        // the agent finishing a task between two turns is exactly that.
+        const bgSnapshot = extractBackgroundTaskSnapshot(content)
+        if (bgSnapshot) {
+            onBackgroundTaskCount?.(sid, bgSnapshot.running)
         }
 
         const update = {
@@ -416,27 +421,6 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
         onSessionReady?.(data)
-    })
-
-    // Out-of-band work (mcode subagents / background bash) reports lifecycle
-    // deltas directly instead of inventing chat messages. The hub keeps
-    // `backgroundTaskCount` in session state, which already drives the session
-    // list, status bar, and idle reconciliation.
-    socket.on('background-task', (data: unknown) => {
-        const parsed = backgroundTaskDeltaSchema.safeParse(data)
-        if (!parsed.success) return
-
-        const started = parsed.data.started ?? 0
-        const completed = parsed.data.completed ?? 0
-        if (started === 0 && completed === 0) return
-
-        const sessionAccess = resolveSessionAccess(parsed.data.sid)
-        if (!sessionAccess.ok) {
-            emitAccessError('session', parsed.data.sid, sessionAccess.reason)
-            return
-        }
-
-        onBackgroundTaskDelta?.(parsed.data.sid, { started, completed })
     })
 
     socket.on('messages-consumed', (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean; steered?: boolean }) => {

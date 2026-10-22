@@ -109,6 +109,7 @@ function isSilentStateEventBlock(block: ChatBlock): boolean {
             block.event.type === 'thread-goal-updated'
             || block.event.type === 'thread-goal-cleared'
             || block.event.type === 'subagent-snapshot'
+            || block.event.type === 'background-task-snapshot'
             || isRedundantGoalStatusMessage(block.event)
         )
 }

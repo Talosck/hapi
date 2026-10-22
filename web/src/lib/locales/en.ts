@@ -1234,6 +1234,8 @@ export default {
   'session.status.goal': 'Goal',
   'session.status.tasks': 'Tasks',
   'session.status.subagents': 'Subagents',
+  'session.status.backgroundTasks.count.one': '1 background task running',
+  'session.status.backgroundTasks.count.other': '{count} background tasks running',
   'session.status.terminals': 'Background terminals',
   'session.status.terminalsUnavailable': '{count} running · exact command unavailable',
   'session.status.terminalsPossible': 'Possible commands',

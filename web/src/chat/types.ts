@@ -1,5 +1,5 @@
 import type { AttachmentMetadata, MessageStatus } from '@/types/api'
-import type { SubagentSnapshotMember, ThreadGoal } from '@/types/api'
+import type { BackgroundTaskRecord, SubagentSnapshotMember, ThreadGoal } from '@/types/api'
 import type { InlineMediaSource } from '@/chat/inlineMediaSource'
 
 export type UsageData = {
@@ -95,6 +95,11 @@ export type AgentEvent =
     // members are the session's subagents; the snapshot is session state, not
     // a timeline entry.
     | { type: 'subagent-snapshot'; members: SubagentSnapshotMember[] }
+    // The background work the session has going. The list is the whole truth:
+    // its size is the number of running background tasks, so a client never
+    // has to keep a counter in step. Like the delegation tree it is session
+    // state, not a timeline entry.
+    | { type: 'background-task-snapshot'; tasks: BackgroundTaskRecord[] }
     // The agent withdrew a plan it had published: the plan card keyed by this
     // id is dropped from the transcript.
     | { type: 'plan-removed'; planId: string }

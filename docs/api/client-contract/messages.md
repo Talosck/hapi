@@ -198,6 +198,7 @@ A visible `data.type` not matched above ⇒ stringified agent text fallback (unl
 | `thread-goal-updated` | `goal: ThreadGoal`, `threadId?`, `turnId?` |
 | `thread-goal-cleared` | `threadId?` |
 | `subagent-snapshot` | `members: SubagentSnapshotMember[]` — live delegation tree (MiniMax Code subagents); state only, the web renders it in the session status panel |
+| `background-task-snapshot` | `tasks: BackgroundTaskRecord[]` — the background work the session has going (MiniMax Code background commands); state only, the web renders it in the session status panel. The list is the whole truth: its size is the number of running background tasks |
 | `abort-restore` | `text` |
 | *(catch-all)* | `{type: string, …}` |
 

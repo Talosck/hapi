@@ -534,33 +534,38 @@ describe('cli session handlers', () => {
         })
     })
 
-    it('applies background task deltas from the CLI', () => {
+    it('stores the background work the CLI publishes', () => {
         const store = new Store(':memory:')
-        const session = store.sessions.getOrCreateSession('bg-delta', {}, null, 'default')
+        const session = store.sessions.getOrCreateSession('bg-snapshot', {}, null, 'default')
         const socket = new FakeSocket()
-        const deltas: Array<{ sid: string; delta: { started: number; completed: number } }> = []
-        const accessErrors: Array<{ scope: string; id: string }> = []
+        const counts: Array<{ sid: string; running: number }> = []
 
         registerSessionHandlers(socket as unknown as CliSocketWithData, {
             store,
             resolveSessionAccess: (sessionId) => sessionId === session.id
                 ? { ok: true, value: session as StoredSession }
                 : { ok: false, reason: 'not-found' },
-            emitAccessError: (scope, id) => { accessErrors.push({ scope, id }) },
-            onBackgroundTaskDelta: (sid, delta) => { deltas.push({ sid, delta }) }
+            emitAccessError: () => {},
+            onBackgroundTaskCount: (sid, running) => { counts.push({ sid, running }) }
         })
 
-        socket.trigger('background-task', { sid: session.id, started: 2 })
-        socket.trigger('background-task', { sid: session.id, completed: 1 })
-        socket.trigger('background-task', { sid: session.id, started: 0, completed: 0 })
-        socket.trigger('background-task', { sid: session.id, started: -1 })
-        socket.trigger('background-task', { sid: 'unknown', started: 1 })
+        const publish = (tasks: unknown) => socket.trigger('message', {
+            sid: session.id,
+            message: {
+                role: 'agent',
+                content: { id: 'evt-1', type: 'event', data: { type: 'background-task-snapshot', tasks } }
+            }
+        })
 
-        expect(deltas).toEqual([
-            { sid: session.id, delta: { started: 2, completed: 0 } },
-            { sid: session.id, delta: { started: 0, completed: 1 } }
+        publish([{ id: 'bg_1', command: 'npm run dev', cwd: '/tmp/project', startedAt: 1700000000000 }])
+        publish([])
+        // A snapshot the hub cannot read is ignored: the count stays as it was.
+        publish([{ id: 'bg_2' }])
+
+        expect(counts).toEqual([
+            { sid: session.id, running: 1 },
+            { sid: session.id, running: 0 }
         ])
-        expect(accessErrors).toEqual([{ scope: 'session', id: 'unknown' }])
         store.close()
     })
 })

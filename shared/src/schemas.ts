@@ -372,6 +372,24 @@ export const SubagentSnapshotMemberSchema = z.object({
 
 export type SubagentSnapshotMember = z.infer<typeof SubagentSnapshotMemberSchema>
 
+/**
+ * One background task a session still has going.
+ *
+ * MiniMax Code runs background work out-of-band and reports what it started.
+ * The list is the whole truth: the number of entries is the number of tasks
+ * that are running, so a client never has to keep a counter in step.
+ */
+export const BackgroundTaskRecordSchema = z.object({
+    id: z.string(),
+    /** The command the agent ran. */
+    command: z.string(),
+    cwd: z.string().nullable(),
+    /** Epoch milliseconds: when the task started. */
+    startedAt: z.number()
+})
+
+export type BackgroundTaskRecord = z.infer<typeof BackgroundTaskRecordSchema>
+
 export const AttachmentMetadataSchema = z.object({
     id: z.string(),
     filename: z.string(),

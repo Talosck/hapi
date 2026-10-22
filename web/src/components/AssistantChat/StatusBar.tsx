@@ -56,7 +56,7 @@ function getConnectionStatus(
     agentState: AgentState | null | undefined,
     voiceStatus: ConversationStatus | undefined,
     backgroundTaskCount: number,
-    t: (key: string) => string
+    t: (key: string, params?: Record<string, string | number>) => string
 ): { text: string; color: string; dotColor: string; isPulsing: boolean } {
     const hasPermissions = agentState?.requests && Object.keys(agentState.requests).length > 0
 
@@ -100,7 +100,12 @@ function getConnectionStatus(
 
     if (backgroundTaskCount > 0) {
         return {
-            text: `${backgroundTaskCount} background task${backgroundTaskCount > 1 ? 's' : ''} running`,
+            text: t(
+                backgroundTaskCount === 1
+                    ? 'session.status.backgroundTasks.count.one'
+                    : 'session.status.backgroundTasks.count.other',
+                { count: backgroundTaskCount }
+            ),
             color: 'text-[#007AFF]',
             dotColor: 'bg-[#007AFF]',
             isPulsing: true

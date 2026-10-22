@@ -347,6 +347,50 @@ describe('AcpSdkBackend', () => {
         expect(capturedRequestId).toBe('tool-approve');
     });
 
+    it('hands the replayed conversation of a loaded session to the caller', async () => {
+        const backend = new AcpSdkBackend({ command: 'mcode' });
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: (method: string, params: unknown) => Promise<unknown>; close: () => Promise<void> } | null;
+            handleSessionUpdate: (params: unknown) => void;
+        };
+        backendInternal.transport = {
+            sendRequest: async (method) => {
+                if (method === 'session/load') {
+                    // The agent replays the conversation before it answers.
+                    backendInternal.handleSessionUpdate({
+                        sessionId: 'session-1',
+                        update: {
+                            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+                            toolCallId: 'call-1',
+                            title: 'task_output',
+                            name: 'task_output',
+                            kind: 'other',
+                            status: 'completed',
+                            rawInput: { task_id: 'bg_1' },
+                            rawOutput: {
+                                content: [{ type: 'text', text: '<task_output status="succeeded">done</task_output>' }],
+                                details: { task_id: 'bg_1', status: 'succeeded' }
+                            }
+                        }
+                    });
+                    return { sessionId: 'session-1' };
+                }
+                return null;
+            },
+            close: async () => {}
+        };
+
+        const replayed: AgentMessage[][] = [];
+        const sessionId = await backend.loadSession(
+            { sessionId: 'session-1', cwd: '/repo', mcpServers: [] },
+            { onHistory: (messages) => replayed.push(messages) }
+        );
+
+        expect(sessionId).toBe('session-1');
+        expect(replayed).toHaveLength(1);
+        expect(JSON.stringify(replayed[0])).toContain('succeeded');
+    });
+
     it('uses session/set_model by default (gemini flavor)', async () => {
         const backend = new AcpSdkBackend({ command: 'gemini' });
         const calls: Array<{ method: string; params: unknown }> = [];

@@ -218,7 +218,7 @@ describe('ApiSessionClient lazy materialization', () => {
         client.close()
     })
 
-    it('reports background task deltas on the session socket', async () => {
+    it('reports the background work of the session on the session socket', async () => {
         socketHarness.sockets.length = 0
         const materialize = vi.fn(async (snapshot) => createSession({
             namespace: 'default',
@@ -236,12 +236,30 @@ describe('ApiSessionClient lazy materialization', () => {
         expect(socket).toBeDefined()
         socket!.emitted.length = 0
 
-        client.sendBackgroundTaskDelta({ started: 2, completed: 1 })
-        client.sendBackgroundTaskDelta({})
+        client.sendSessionEvent({
+            type: 'background-task-snapshot',
+            tasks: [{ id: 'bg_1', command: 'npm run dev', cwd: '/tmp/project', startedAt: 1700000000000 }]
+        })
         client.close()
 
         expect(socket!.emitted).toEqual([
-            { event: 'background-task', args: [{ sid: '11111111-1111-4111-8111-111111111111', started: 2, completed: 1 }] }
+            {
+                event: 'message',
+                args: [{
+                    sid: '11111111-1111-4111-8111-111111111111',
+                    message: {
+                        role: 'agent',
+                        content: {
+                            id: expect.any(String),
+                            type: 'event',
+                            data: {
+                                type: 'background-task-snapshot',
+                                tasks: [{ id: 'bg_1', command: 'npm run dev', cwd: '/tmp/project', startedAt: 1700000000000 }]
+                            }
+                        }
+                    }
+                }]
+            }
         ])
     })
 

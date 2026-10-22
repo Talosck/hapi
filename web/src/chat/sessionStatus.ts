@@ -1,5 +1,5 @@
 import { isObject } from '@hapi/protocol'
-import { SubagentSnapshotMemberSchema } from '@hapi/protocol/schemas'
+import { BackgroundTaskRecordSchema, SubagentSnapshotMemberSchema } from '@hapi/protocol/schemas'
 import type { SubagentSnapshotMember, ThreadGoal, TodoItem } from '@/types/api'
 import type { ChatBlock, NormalizedMessage, ToolCallBlock } from '@/chat/types'
 import { isSubagentToolName } from '@/chat/subagentTool'
@@ -185,6 +185,37 @@ export function latestSubagentSnapshot(
 }
 
 /**
+ * The newest background work snapshot the session reported, if any.
+ *
+ * MiniMax Code publishes the whole list of the background work the session
+ * has going whenever it changes. The list is the truth: its size is the
+ * number of running background tasks, so the panel never has to guess a
+ * command out of the transcript or count on a counter that can drift.
+ *
+ * `null` means the session never reported one, so the panel falls back to
+ * what it can read out of the transcript.
+ */
+export function latestBackgroundTaskSnapshot(
+    messages: readonly NormalizedMessage[]
+): SessionStatusTerminal[] | null {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index]
+        if (message.role !== 'event') continue
+        const event = message.content
+        if (event.type !== 'background-task-snapshot') continue
+        const parsed = BackgroundTaskRecordSchema.array().safeParse(event.tasks)
+        if (!parsed.success) continue
+        return parsed.data.map((task) => ({
+            id: task.id,
+            command: task.command,
+            cwd: task.cwd,
+            startedAt: task.startedAt
+        }))
+    }
+    return null
+}
+
+/**
  * Orders the delegation members as a tree: a parent comes before its
  * children, and siblings keep the order the agent reported them in.
  */
@@ -325,14 +356,21 @@ export function buildSessionStatusData(args: {
 }): SessionStatusData | null {
     const tools = collectToolBlocks(args.blocks)
     const detectedTerminals = buildBackgroundTerminals(tools, args.messages)
-    const terminals = args.backgroundTaskCount === undefined
-        ? [...detectedTerminals.confirmed, ...detectedTerminals.uncertain]
-        : args.backgroundTaskCount > 0
-            ? detectedTerminals.confirmed.slice(-args.backgroundTaskCount)
-            : []
-    const undiscoveredTerminalCount = args.backgroundTaskCount === undefined
+    // A session that publishes its background work knows what it is running
+    // and which command runs it, so the panel shows that instead of guessing
+    // out of the transcript.
+    const reportedBackgroundTasks = latestBackgroundTaskSnapshot(args.snapshotMessages ?? args.messages)
+    const terminals = reportedBackgroundTasks
+        ?? (args.backgroundTaskCount === undefined
+            ? [...detectedTerminals.confirmed, ...detectedTerminals.uncertain]
+            : args.backgroundTaskCount > 0
+                ? detectedTerminals.confirmed.slice(-args.backgroundTaskCount)
+                : [])
+    const undiscoveredTerminalCount = reportedBackgroundTasks
         ? 0
-        : Math.max(0, args.backgroundTaskCount - terminals.length)
+        : args.backgroundTaskCount === undefined
+            ? 0
+            : Math.max(0, args.backgroundTaskCount - terminals.length)
     const possibleTerminalCommands = undiscoveredTerminalCount > 0
         ? detectedTerminals.uncertain.map((terminal) => terminal.command)
         : []

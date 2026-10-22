@@ -565,6 +565,29 @@ export class SessionCache {
         }
     }
 
+    /**
+     * Stores how many background tasks the session has going.
+     *
+     * The count is absolute: it is the size of the list the CLI published, so
+     * it cannot drift the way a started-minus-completed counter does when a
+     * completion goes unnoticed.
+     */
+    setBackgroundTaskCount(sessionId: string, running: number): void {
+        const session = this.sessions.get(sessionId)
+        if (!session) return
+
+        const next = Math.max(0, Math.trunc(running))
+        if ((session.backgroundTaskCount ?? 0) === next) return
+
+        session.backgroundTaskCount = next
+        this.recordAgentProgress(sessionId)
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId,
+            data: { backgroundTaskCount: next } satisfies SessionPatch
+        })
+    }
+
     applyBackgroundTaskDelta(sessionId: string, delta: { started: number; completed: number }): void {
         const session = this.sessions.get(sessionId)
         if (!session) return
