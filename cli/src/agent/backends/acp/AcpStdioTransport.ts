@@ -54,6 +54,24 @@ interface JsonRpcResponse {
     };
 }
 
+/**
+ * The message a JSON-RPC error is reported with.
+ *
+ * Agents often answer with a generic message and put the actionable part in
+ * `error.data` - MiniMax Code refuses a second goal with "Internal error"
+ * and the real reason ("Unfinished thread goal already exists") in
+ * `data.details`. Losing it leaves the user with a message that says
+ * nothing, so the details win when they are there.
+ */
+function acpErrorMessage(error: { message: string; data?: unknown }): string {
+    const data = error.data;
+    if (typeof data === 'object' && data !== null) {
+        const details = (data as { details?: unknown }).details;
+        if (typeof details === 'string' && details.trim()) return details.trim();
+    }
+    return error.message;
+}
+
 type RequestHandler = (params: unknown, requestId: string | number | null) => Promise<unknown>;
 
 export type AcpStderrErrorType = 'rate_limit' | 'model_not_found' | 'authentication' | 'quota_exceeded' | 'unknown';
@@ -542,7 +560,7 @@ export class AcpStdioTransport {
         this.pending.delete(response.id);
 
         if (response.error) {
-            pending.reject(new Error(response.error.message));
+            pending.reject(new Error(acpErrorMessage(response.error)));
             return;
         }
 

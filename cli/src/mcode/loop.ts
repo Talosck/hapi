@@ -30,6 +30,11 @@ interface McodeLoopOptions {
     onConfigDiscovered?: (config: { model: string | null; effort: string | null }) => void;
     /** Fired after a failed inline model switch, with the model still active. */
     onModelRollback?: (model: string | null) => void;
+    /**
+     * Fired when the agent moves to another model on its own - a sibling
+     * session on the same process, or the user in the agent's own UI.
+     */
+    onAgentModelChanged?: (model: string) => void;
     /** Fired after a failed effort switch, with the effort still active. */
     onEffortRollback?: (effort: string | null) => void;
     /** Fired after a failed permission-mode apply, with the restored mode. */
@@ -119,6 +124,7 @@ export async function mcodeLoop(opts: McodeLoopOptions): Promise<void> {
                 effort: getCurrentEffort(),
                 onConfigDiscovered: opts.onConfigDiscovered,
                 onModelRollback: opts.onModelRollback,
+                onAgentModelChanged: opts.onAgentModelChanged,
                 onEffortRollback: opts.onEffortRollback,
                 onPermissionModeRollback: opts.onPermissionModeRollback,
                 onPermissionModeChanged: opts.onPermissionModeChanged

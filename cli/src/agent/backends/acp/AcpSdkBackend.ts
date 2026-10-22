@@ -797,7 +797,8 @@ export class AcpSdkBackend implements AgentBackend {
     async prompt(
         sessionId: string,
         content: PromptContent[],
-        onUpdate: (msg: AgentMessage) => void
+        onUpdate: (msg: AgentMessage) => void,
+        options?: { onPromptSent?: () => void }
     ): Promise<void> {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
@@ -836,10 +837,16 @@ export class AcpSdkBackend implements AgentBackend {
             this.promptRequestInFlight = true;
             let response: unknown;
             try {
-                response = await this.transport.sendRequest('session/prompt', {
+                const request = this.transport.sendRequest('session/prompt', {
                     sessionId,
                     prompt: content
                 }, { timeoutMs: Infinity });
+                // The request is on the wire now: the transport writes it
+                // synchronously, so anything sent behind it reaches the agent
+                // after the agent registered the turn. That is what lets a
+                // caller cancel a turn it has just started.
+                options?.onPromptSent?.();
+                response = await request;
             } finally {
                 this.promptRequestInFlight = false;
             }

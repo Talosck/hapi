@@ -1546,12 +1546,16 @@ function SessionChatInner(props: SessionChatProps) {
     const mcodeGoalControls = useMemo(() => {
         const capabilities = props.session.metadata?.capabilities?.mcodeExtensions
         if (!capabilities) return null
+        // The hub only accepts goal changes on a running session. Offering the
+        // controls on an inactive one turns every click into a 409 with a raw
+        // JSON body, so the controls only exist while the session runs.
+        if (!props.session.active) return null
         return {
             api: props.api,
             sessionId: props.session.id,
             capabilities
         }
-    }, [props.api, props.session.id, props.session.metadata?.capabilities?.mcodeExtensions])
+    }, [props.api, props.session.id, props.session.active, props.session.metadata?.capabilities?.mcodeExtensions])
 
     const hasRunningChildAgent = useMemo(
         () => hasAbortableAgentRun(reduced.blocks),

@@ -204,10 +204,12 @@ export async function listMcodeConnectorApps(options?: {
 
     const promise = (async (): Promise<McodeConnectorCatalogResult> => {
         let auth: McodeConnectorAuthSummary = { status: 'unknown', authMode: null, scope: null, expiresAt: null }
+        let authRead = true
         try {
             const { stdout } = await run(command, ['auth', 'status'])
             auth = parseMcodeConnectorAuth(parseJsonPayload(stdout))
         } catch (error) {
+            authRead = false
             logger.debug('Failed to read the MiniMax Code connector auth status:', error)
         }
 
@@ -216,7 +218,12 @@ export async function listMcodeConnectorApps(options?: {
             const tools = parseMcodeConnectorTools(parseJsonPayload(stdout))
             const catalog: McodeConnectorCatalogResult = { auth, apps: groupMcodeConnectorApps(tools) }
             // A failed read is not cached: the next request should try again.
-            cachedCatalog = { expiresAt: Date.now() + CATALOG_TTL_MS, catalog }
+            // The same goes for a failed auth read - caching it would show
+            // "unknown" for the whole TTL, long after the auth became
+            // readable again.
+            if (authRead) {
+                cachedCatalog = { expiresAt: Date.now() + CATALOG_TTL_MS, catalog }
+            }
             return catalog
         } catch (error) {
             logger.debug('Failed to list the MiniMax Code connector tools:', error)

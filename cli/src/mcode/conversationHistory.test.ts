@@ -138,6 +138,20 @@ describe('McodeConversationHistory fork', () => {
         await expect(history.fork()).rejects.toThrow('only fork at the end of a finished turn');
     });
 
+    it('explains every spelling of the agent boundary error', async () => {
+        // The agent uses more than one spelling for the same refusal.
+        for (const code of ['boundary-not-found', 'boundary-invalid', 'invalid-boundary']) {
+            const backend = createBackend({
+                sendExtensionRequest: vi.fn(async () => {
+                    throw new Error(`Invalid params: ${code}`);
+                })
+            });
+            const history = createHistory(backend);
+
+            await expect(history.fork()).rejects.toThrow('only fork at the end of a finished turn');
+        }
+    });
+
     it('refuses to fork before the session is ready', async () => {
         const backend = createBackend();
         const history = new McodeConversationHistory(() => backend as never);

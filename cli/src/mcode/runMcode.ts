@@ -182,6 +182,7 @@ export async function runMcode(opts: {
                 applyDiscoveredEffort(config.effort);
             },
             onModelRollback: (model) => applyDiscoveredModel(model),
+            onAgentModelChanged: (model) => applyDiscoveredModel(model),
             onEffortRollback: (effort) => applyDiscoveredEffort(effort),
             onPermissionModeRollback: (mode) => applyRolledBackPermissionMode(mode),
             onPermissionModeChanged: (mode) => applyAgentPermissionMode(mode),

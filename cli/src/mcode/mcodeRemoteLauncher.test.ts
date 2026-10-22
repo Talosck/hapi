@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { AcpSessionModeUnsupportedError } from '@/agent/backends/acp'
+import { ACP_INDETERMINATE_SYMBOL } from '@/agent/backends/acp/AcpStdioTransport'
 import { MessageQueue2 } from '@/utils/MessageQueue2'
 import type { McodeMode } from './types'
 
@@ -287,7 +288,9 @@ function createSteerSession() {
         sendClaudeSessionMessage: vi.fn(),
         updateAgentState: vi.fn(),
         updateMetadata: vi.fn(),
-        emitMessagesConsumed: vi.fn()
+        emitMessagesConsumed: vi.fn(),
+        setSteerDeliveryState: vi.fn(async () => true),
+        emitSteerIndeterminate: vi.fn()
     }
     const session = {
         path: '/tmp/mcode-test',
@@ -897,6 +900,29 @@ describe('mcodeRemoteLauncher extension capabilities', () => {
         expect(published.some((entry) => entry.capabilities?.conversationHistory?.forkCurrent === true)).toBe(true)
     })
 
+    it('drops the fork capability when the agent goes away', async () => {
+        createBackend()
+        const { session, finish } = createBlockingSession()
+
+        const launched = mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(session.client.updateMetadata).toHaveBeenCalled()
+        })
+        finish()
+        await launched
+
+        // The hub merges the metadata writes, so the chain of updates is what
+        // the hub ends up with. The local TUI cannot fork: a stale "fork
+        // supported" would leave a dead Fork button on the last message.
+        const calls = session.client.updateMetadata.mock.calls
+        let metadata: { capabilities?: { conversationHistory?: { forkCurrent?: boolean } } } = {}
+        for (const call of calls) {
+            const updater = call[0] as (m: unknown) => unknown
+            metadata = updater(metadata) as typeof metadata
+        }
+        expect(metadata.capabilities?.conversationHistory?.forkCurrent).toBe(false)
+    })
+
     it('does not publish a fork capability the agent does not have', async () => {
         createBackend({ supportsSessionFork: vi.fn(() => false) })
         const { session, finish } = createBlockingSession()
@@ -1017,6 +1043,42 @@ describe('mcodeRemoteLauncher extension capabilities', () => {
         });
         // The row goes back to the queue: the normal loop delivers it later.
         expect(queue.peekByLocalId('local-1')?.message).toBe('steer me');
+        expect(client.emitMessagesConsumed).not.toHaveBeenCalled();
+        queue.close();
+    });
+
+    it('holds a steer whose transport failed instead of replaying it', async () => {
+        const backend = createBackend({
+            prompt: vi.fn(() => new Promise(() => {})),
+            sendExtensionRequest: vi.fn(async (method: string) => {
+                if (method === 'mcode/session/steer') {
+                    // The request may have reached the agent: the transport
+                    // failed before the answer came back.
+                    const error = new Error('ACP request timed out')
+                    Object.defineProperty(error, ACP_INDETERMINATE_SYMBOL, { value: true })
+                    throw error
+                }
+                if (method === 'mcode/session/goal/get') return { goal: null };
+                if (method === 'mcode/session/delegation/get') return { snapshot: null };
+                throw new Error(`unexpected method ${method}`);
+            })
+        });
+        const { session, queue, client } = createSteerSession();
+        queue.push('first', { permissionMode: 'default', model: null });
+
+        void mcodeRemoteLauncher(session as never, {});
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalled();
+        });
+        queue.push('steer me', { permissionMode: 'default', model: null }, 'local-1');
+
+        const handler = findRpcHandler(session, RPC_METHODS.SteerQueuedMessage);
+        const result = await handler({ localId: 'local-1' });
+        expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
+        // The row must not go back into the automatic queue: the agent may
+        // have injected the message, and the hub would replay it.
+        expect(queue.peekByLocalId('local-1')).toBeNull();
+        expect(client.emitSteerIndeterminate).toHaveBeenCalledWith(['local-1']);
         expect(client.emitMessagesConsumed).not.toHaveBeenCalled();
         queue.close();
     });
@@ -1393,6 +1455,91 @@ describe('mcodeRemoteLauncher abort handling', () => {
         const reason = await launched
         expect(waits.length).toBe(2)
         expect(reason).toBe('exit')
+    })
+
+    it('cancels a turn whose abort landed before the prompt started', async () => {
+        const abortHandlers: Array<() => Promise<void>> = []
+        const events: string[] = []
+
+        let configOptionCalls = 0
+        const backend = createBackend({
+            setConfigOption: vi.fn(async () => {
+                events.push('setConfigOption')
+                configOptionCalls += 1
+                // The second call is the one the message loop makes, after the
+                // launcher applied the session's startup mode. The abort lands
+                // there: between taking the message and starting the turn.
+                if (configOptionCalls === 2) {
+                    while (abortHandlers.length === 0) {
+                        await new Promise((resolve) => setTimeout(resolve, 0))
+                    }
+                    await abortHandlers[0]()
+                }
+            }),
+            prompt: vi.fn(async (
+                _sessionId: string,
+                _content: unknown,
+                _onUpdate: unknown,
+                options?: { onPromptSent?: () => void }
+            ) => {
+                events.push('prompt')
+                options?.onPromptSent?.()
+            }),
+            cancelPrompt: vi.fn(async () => {
+                events.push('cancel')
+            })
+        })
+
+        const queue = {
+            waitForMessagesAndGetAsString: vi.fn()
+                .mockResolvedValueOnce({
+                    message: 'hi',
+                    mode: { permissionMode: 'bypassPermissions', model: null }
+                })
+                .mockResolvedValue(null),
+            size: () => 0,
+            reset: vi.fn(),
+            pushIsolated: vi.fn()
+        }
+        const client = {
+            rpcHandlerManager: {
+                registerHandler: vi.fn((method: string, handler: () => Promise<void>) => {
+                    if (method === RPC_METHODS.Abort) abortHandlers.push(handler)
+                })
+            },
+            sendAgentMessage: vi.fn(),
+            sendSessionEvent: vi.fn(),
+            sendClaudeSessionMessage: vi.fn(),
+            updateAgentState: vi.fn(),
+            updateMetadata: vi.fn(),
+            emitMessagesConsumed: vi.fn()
+        }
+        const session = {
+            path: '/tmp/mcode-test',
+            logPath: '/tmp/mcode-test/test.log',
+            client,
+            queue,
+            sessionId: null as string | null,
+            getPermissionMode: () => 'default' as const,
+            onSessionFound(id: string) { session.sessionId = id },
+            onThinkingChange: vi.fn(),
+            sendUserMessage: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            sendSessionEvent: vi.fn(),
+            setModel: vi.fn(),
+            setPermissionMode: vi.fn(),
+            pushKeepAlive: vi.fn()
+        }
+
+        const launched = mcodeRemoteLauncher(session as never, {})
+
+        await launched
+
+        // The abort's own cancel went out before the turn existed, so it
+        // cancelled nothing. The turn starts - the message was already
+        // acknowledged when it left the queue - and a second cancel goes out
+        // right behind the prompt request, which is what stops the agent.
+        expect(events).toEqual(['setConfigOption', 'setConfigOption', 'cancel', 'prompt', 'cancel'])
     })
 })
 

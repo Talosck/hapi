@@ -140,6 +140,26 @@ describe('listMcodeConnectorApps', () => {
         expect(catalog.error).toContain('ENOENT')
     })
 
+    it('does not cache a failed auth read as "unknown"', async () => {
+        let authCalls = 0
+        const runTools = async (_command: string, args: string[]) => {
+            if (args[0] === 'auth') {
+                authCalls += 1
+                if (authCalls === 1) throw new Error('mcode-tools auth status failed')
+                return { stdout: JSON.stringify({ status: 'authenticated', auth_mode: 'shared-broker' }), stderr: '' }
+            }
+            return { stdout: JSON.stringify({ tools: [] }), stderr: '' }
+        }
+
+        const first = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, forceRefresh: true })
+        expect(first.auth.status).toBe('unknown')
+
+        // The failed read must not be cached: the next request has to try
+        // again instead of showing "unknown" for the whole TTL.
+        const second = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools })
+        expect(second.auth.status).toBe('authenticated')
+    })
+
     it('caches the answer so a polling client does not spawn again', async () => {
         let calls = 0
         const runTools = async (command: string, args: string[]) => {

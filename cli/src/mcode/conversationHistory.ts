@@ -64,6 +64,19 @@ export class McodeConversationHistory {
     }
 
     /**
+     * Drops the history controls.
+     *
+     * The controls belong to the agent process that just went away: the local
+     * TUI cannot fork, so the web must not keep offering a Fork button that
+     * can only fail. The state is dropped as well as published, so a later
+     * publish does not resurrect the stale capability.
+     */
+    async disable(): Promise<void> {
+        this.states = markUnsupported(this.states, 'forkCurrent');
+        await this.publishCapabilities?.();
+    }
+
+    /**
      * Records what the agent can do, once the handshake has been answered.
      *
      * The agent lists `fork` in `agentCapabilities.sessionCapabilities`, so
@@ -139,12 +152,12 @@ function isMethodNotFound(error: unknown): boolean {
  * Turns the agent's boundary error into something a user can act on.
  *
  * The agent forks at the latest message boundary, which only exists at the
- * end of a finished turn. Its raw error (`message-boundary-not-found`) does
- * not say that.
+ * end of a finished turn. Its raw error (`boundary-not-found`, and the
+ * `invalid-boundary` spellings around it) does not say that.
  */
 function describeForkError(error: unknown): Error {
     const message = error instanceof Error ? error.message : String(error)
-    if (/message-boundary-not-found|message-boundary-invalid/i.test(message)) {
+    if (/boundary-not-found|boundary-invalid|invalid-boundary/i.test(message)) {
         return new Error('MiniMax Code can only fork at the end of a finished turn')
     }
     return error instanceof Error ? error : new Error(message)

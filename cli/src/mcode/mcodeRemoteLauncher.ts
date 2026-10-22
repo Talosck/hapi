@@ -23,6 +23,7 @@ import type { McodeSession } from './session';
 import type { PermissionMode } from './types';
 import { createMcodeBackend } from './utils/mcodeBackend';
 import type { AcpSessionStateUpdate } from '@/agent/backends/acp';
+import { isAcpIndeterminateError } from '@/agent/backends/acp/AcpStdioTransport';
 import { McodePermissionHandler } from './utils/permissionHandler';
 import {
     applyMcodePermissionMode,
@@ -63,6 +64,11 @@ export type McodeRemoteLauncherOptions = {
     onConfigDiscovered?: (config: { model: string | null; effort: string | null }) => void;
     /** Fired after a failed inline switch, with the model still active. */
     onModelRollback?: (model: string | null) => void;
+    /**
+     * Fired when the agent moves to another model on its own - a sibling
+     * session on the same process, or the user in the agent's own UI.
+     */
+    onAgentModelChanged?: (model: string) => void;
     /** Fired after a failed effort switch, with the effort still active. */
     onEffortRollback?: (effort: string | null) => void;
     /** Fired after a failed permission-mode apply, with the restored mode. */
@@ -393,6 +399,23 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             try {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
                     this.handleAgentMessage(message);
+                }, {
+                    // The abort can land between taking the message and
+                    // starting the turn: the model / effort / mode round trips
+                    // above take real time, and `handleAbort` cancels a
+                    // *running* prompt — of which there is none yet, so the
+                    // abort would be lost and the agent would keep working on
+                    // a message the user just stopped. The batch was
+                    // acknowledged when it left the queue, so it cannot be
+                    // dropped either. Start the turn and cancel it right
+                    // behind the request instead: the transport keeps the
+                    // order, so the agent registers the turn and then
+                    // cancels it before it does any work.
+                    onPromptSent: () => {
+                        if (waitSignal.aborted) {
+                            void backend.cancelPrompt(acpSessionId);
+                        }
+                    }
                 });
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
@@ -477,6 +500,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         // The flags are set to "off" rather than removed: the hub merges
         // metadata writes, so a removed key could survive the merge.
         this.extensionControl = null;
+        // The same goes for the history controls: the local TUI cannot fork
+        // either, and the metadata merge would keep a stale "fork supported"
+        // that leaves a dead Fork button on the last message.
+        await this.conversationHistory?.disable();
         this.session.client.updateMetadata((metadata) => ({
             ...metadata,
             capabilities: {
@@ -716,6 +743,15 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     return { steered: false, error: 'Steer was cancelled' };
                 }
 
+                // Persist the pre-dispatch state, so a runner restart cannot
+                // replay a steer whose outcome was never proven.
+                const dispatchStatePersisted = await this.session.client.setSteerDeliveryState([localId], 'dispatching');
+                if (!dispatchStatePersisted) {
+                    this.session.queue.markReservationIndeterminate(taken);
+                    this.session.client.emitSteerIndeterminate([localId]);
+                    return { steered: false, error: 'Steer state is indeterminate' };
+                }
+
                 try {
                     const response = await backend.sendExtensionRequest<Record<string, unknown>>(
                         'mcode/session/steer',
@@ -728,6 +764,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                         : null;
                     if (mode !== 'steered') {
                         // The agent answered, but it did not take the message.
+                        await this.session.client.setSteerDeliveryState([localId], 'queued');
                         this.session.queue.restoreReservation(taken);
                         return { steered: false, error: 'MiniMax Code did not accept the steer' };
                     }
@@ -735,9 +772,23 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     this.session.client.emitMessagesConsumed([localId], { steered: true });
                     return { steered: true };
                 } catch (error) {
+                    if (isAcpIndeterminateError(error)) {
+                        // The request may have reached the agent: it can have
+                        // injected the message before the transport failed.
+                        // Restoring the row would let the hub replay it and the
+                        // agent would see the message twice, so the row is held
+                        // out of the automatic queue for an explicit retry or
+                        // cancel instead.
+                        if (this.session.queue.markReservationIndeterminate(taken)) {
+                            this.session.client.emitSteerIndeterminate([localId]);
+                        }
+                        logger.debug('[mcode-remote] steer outcome unknown; row held for explicit resolution', error);
+                        return { steered: false, error: 'Steer outcome is being reconciled' };
+                    }
                     // A rejection means the agent did not take the message: the
                     // row goes back to the queue and the normal loop delivers
                     // it after the turn.
+                    await this.session.client.setSteerDeliveryState([localId], 'queued');
                     this.session.queue.restoreReservation(taken);
                     const message = error instanceof Error ? error.message : String(error);
                     logger.warn('[mcode-remote] steer rejected', { message });
@@ -1039,6 +1090,9 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         if (update.kind === 'mode') {
             this.currentSessionMode = update.modeId;
         }
+        if (update.kind === 'config-options') {
+            this.refreshAgentModel();
+        }
         if (update.kind === 'plan-removed') {
             // The agent withdrew a plan (MiniMax Code removes the plan it
             // attached to a questionnaire once the questionnaire is answered).
@@ -1047,6 +1101,24 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             return;
         }
         this.publishAgentPermissionMode();
+    }
+
+    /**
+     * Adopts the model the agent actually runs.
+     *
+     * The agent can move to another model on its own - a sibling session on the
+     * same process, or the user in the agent's own UI. The hub must not keep
+     * advertising the model HAPI set earlier, or the session header shows a
+     * model the agent is not running.
+     */
+    private refreshAgentModel(): void {
+        const backend = this.backend;
+        if (!backend || !this.acpSessionId) return;
+        const agentModel = backend.getSessionModelsMetadata(this.acpSessionId)?.currentModelId;
+        if (!agentModel || agentModel === this.currentBackendModel) return;
+        logger.debug('[mcode-remote] Agent moved to another model', { from: this.currentBackendModel, to: agentModel });
+        this.currentBackendModel = agentModel;
+        this.opts.onAgentModelChanged?.(agentModel);
     }
 
     /**

@@ -3,7 +3,7 @@ import { formatDuration } from '@/chat/presentation'
 import type { SessionStatusData, SessionStatusSubagent } from '@/chat/sessionStatus'
 import { ChecklistList } from '@/components/ToolCard/checklist'
 import { useTranslation } from '@/lib/use-translation'
-import type { ApiClient } from '@/api/client'
+import { ApiError, type ApiClient } from '@/api/client'
 import type { McodeConnectorApp, McodeConnectorAuth, McodeExtensionCapabilities, ThreadGoal } from '@hapi/protocol'
 
 function Section(props: { title: string; children: ReactNode }) {
@@ -95,7 +95,14 @@ function GoalControls(props: {
                 setError(result.error ?? t('session.status.goal.actionFailed'))
             }
         } catch (e) {
-            setError(e instanceof Error ? e.message : t('session.status.goal.actionFailed'))
+            // The hub rejects goal changes on a session that is no longer
+            // running. Its 409 carries a JSON body, which is not something to
+            // show the user verbatim.
+            setError(
+                e instanceof ApiError && e.status === 409 && e.code === 'session_inactive'
+                    ? t('chat.sendError.sessionInactive')
+                    : e instanceof Error ? e.message : t('session.status.goal.actionFailed')
+            )
         } finally {
             setBusy(false)
         }

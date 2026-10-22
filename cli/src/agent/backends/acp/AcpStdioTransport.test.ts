@@ -220,6 +220,28 @@ describe('AcpStdioTransport plain-text stdout', () => {
         await transport.close();
     });
 
+    test('reports the actionable part of an error response, not the generic message', async () => {
+        const transport = await AcpStdioTransport.create({ command: 'mcode', args: ['acp'] });
+
+        const pending = transport.sendRequest('mcode/session/goal/create', { sessionId: 'mvs_1' });
+
+        emitStdout(`${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            error: {
+                code: -32603,
+                message: 'Internal error',
+                data: { details: 'Unfinished thread goal already exists (goalId=tg_1).' }
+            }
+        })}\n`);
+
+        // The agent puts the reason in data.details and leaves the message
+        // generic; showing "Internal error" would say nothing to the user.
+        await expect(pending).rejects.toThrow('Unfinished thread goal already exists (goalId=tg_1).');
+
+        await transport.close();
+    });
+
     test('ignores non-object JSON lines without killing the session', async () => {
         const transport = await AcpStdioTransport.create({ command: 'gemini' });
         const pending = transport.sendRequest('initialize');
