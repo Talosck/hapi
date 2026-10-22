@@ -2,6 +2,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { logger } from '@/ui/logger';
+import { MCODE_RUNTIME_INDEX_RELATIVE_PATH, openMcodeRuntimeIndex } from './mcodeRuntimeIndex';
 
 /**
  * Locating the native MiniMax Code session directory on disk.
@@ -20,21 +21,12 @@ import { logger } from '@/ui/logger';
 
 const SESSION_DIR_PREFIX = 'session_';
 const SESSIONS_ROOT_RELATIVE_PATH = ['v2', 'sessions'];
-const SESSION_INDEX_RELATIVE_PATH = ['v2', 'sqlite', 'runtime-state.sqlite'];
 /**
  * Days re-checked on every discovery retry. A session directory is created
  * together with its session, so a session HAPI just attached to can only turn
  * up in one of these.
  */
 const RECENT_DAY_WINDOW = 7;
-
-type SqliteStatement = {
-    get(...params: unknown[]): unknown;
-};
-type SqliteDatabase = {
-    query(sql: string): SqliteStatement;
-    close(): void;
-};
 
 /** A dated session directory together with its parsed calendar day. */
 export type McodeSessionDayDir = {
@@ -182,30 +174,6 @@ export async function findMcodeSessionDirInDayDirs(
 }
 
 /**
- * Open runtime index handles, one per data directory. The handle is kept for
- * the lifetime of the process: the index is read on every discovery attempt
- * and re-opening the database each time costs more than the query itself.
- */
-const indexDatabases = new Map<string, SqliteDatabase>();
-
-async function openIndexDatabase(databasePath: string): Promise<SqliteDatabase | null> {
-    const cached = indexDatabases.get(databasePath);
-    if (cached) return cached;
-    try {
-        const { Database } = await import('bun:sqlite');
-        const database = new Database(databasePath, { readonly: true }) as unknown as SqliteDatabase;
-        indexDatabases.set(databasePath, database);
-        return database;
-    } catch (error) {
-        // A missing, locked, or unreadable index is not fatal: the dated tree
-        // is the fallback. The failure is not cached so an index that appears
-        // later is still picked up.
-        logger.debug(`[mcode-session] Runtime index unavailable at ${databasePath}`, error);
-        return null;
-    }
-}
-
-/**
  * Reads the dated directory of a session from mcode's runtime index. Absence,
  * locks and format drift all read as "no entry".
  */
@@ -213,8 +181,8 @@ export async function readMcodeSessionIndexRelativeDir(
     sessionId: string,
     dataDir: string = getMcodeDataDir()
 ): Promise<string | null> {
-    const databasePath = join(dataDir, ...SESSION_INDEX_RELATIVE_PATH);
-    const database = await openIndexDatabase(databasePath);
+    const databasePath = join(dataDir, ...MCODE_RUNTIME_INDEX_RELATIVE_PATH);
+    const database = await openMcodeRuntimeIndex(databasePath);
     if (!database) return null;
 
     try {

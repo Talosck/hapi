@@ -1818,3 +1818,179 @@ describe('mcodeRemoteLauncher local handoff', () => {
         expect(backend.disconnect).toHaveBeenCalled()
     })
 })
+
+describe('mcodeRemoteLauncher turn lease', () => {
+    const HELD_LEASE = {
+        status: 'held' as const,
+        lease: {
+            ownerId: 'turn-lease:17826:cd08c161-4c0d-4f53-8823-2814223f43ee.3a2ee0d3',
+            ownerKind: 'turn',
+            acquiredAtMs: 1792650918661,
+            expiresAtMs: 1792654038974
+        }
+    };
+    const FREE = { status: 'free' as const };
+    const UNKNOWN = { status: 'unknown' as const };
+
+    it('does not send a turn while the agent holds the session', async () => {
+        // The agent's runtime runs a turn of its own on this session - a
+        // background task that finished has to be reported - and a turn sent
+        // into that lease is refused. The lease is read first, so the message
+        // waits instead of being refused.
+        let leaseReads = 0
+        const backend = createBackend()
+        const { session, queue } = createSteerSession()
+        queue.push('go', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {
+            readTurnLease: vi.fn(async () => {
+                leaseReads += 1
+                return leaseReads <= 3 ? HELD_LEASE : FREE
+            })
+        })
+
+        // The turn is not sent while the lease is held.
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        expect(backend.prompt).not.toHaveBeenCalled()
+
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(1)
+        }, { timeout: 5_000 })
+
+        // The message went out unchanged, once the agent was free.
+        const promptMock = backend.prompt as ReturnType<typeof vi.fn>
+        expect(promptMock.mock.calls[0][1]).toEqual([{ type: 'text', text: 'go' }])
+        queue.close()
+    })
+
+    it('tells the user the session is busy while it waits for the lease', async () => {
+        let leaseReads = 0
+        const backend = createBackend()
+        const { session, queue } = createSteerSession()
+        queue.push('go', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {
+            readTurnLease: vi.fn(async () => {
+                leaseReads += 1
+                return leaseReads <= 3 ? HELD_LEASE : FREE
+            })
+        })
+
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(1)
+        }, { timeout: 5_000 })
+
+        // One notice for the wait, not one per poll.
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        const notices = events.filter((event: { type?: string; message?: string } | undefined) =>
+            event?.type === 'queue-notice')
+        expect(notices).toHaveLength(1)
+        expect((notices[0] as { message: string }).message).toContain('Your message is kept')
+        queue.close()
+    })
+
+    it('publishes that the session waits for the agent while the lease is held', async () => {
+        let leaseReads = 0
+        const backend = createBackend()
+        const { session, queue, client } = createSteerSession()
+        queue.push('go', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {
+            readTurnLease: vi.fn(async () => {
+                leaseReads += 1
+                return leaseReads <= 3 ? HELD_LEASE : FREE
+            })
+        })
+
+        await vi.waitFor(() => {
+            const states = client.updateAgentState.mock.calls.map((call) =>
+                (call[0] as (state: Record<string, unknown>) => Record<string, unknown>)({})
+            )
+            expect(states.some((state) => state.waitingForAgent === true)).toBe(true)
+        }, { timeout: 5_000 })
+        queue.close()
+    })
+
+    it('does not touch the agent configuration while it holds the session', async () => {
+        // A session that holds the lease refuses more than the turn: the
+        // model, the effort and the permission mode cannot be applied either.
+        // Applying them first would report a failed model switch to the user
+        // every time their message waited for a turn that was already running.
+        const backend = createBackend()
+        const configOption = backend.setConfigOption as ReturnType<typeof vi.fn>
+        const { session, queue } = createSteerSession()
+        // A mode the session did not start with, so the turn really has to
+        // apply it.
+        queue.push('go', { permissionMode: 'auto', model: null })
+
+        let configCallsWhenTheWaitStarted = -1
+        let leaseReads = 0
+        void mcodeRemoteLauncher(session as never, {
+            readTurnLease: vi.fn(async () => {
+                leaseReads += 1
+                if (leaseReads === 1) {
+                    configCallsWhenTheWaitStarted = configOption.mock.calls.length
+                }
+                return leaseReads <= 3 ? HELD_LEASE : FREE
+            })
+        })
+
+        // The configuration is not touched while the agent holds the session.
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        expect(configOption.mock.calls.length).toBe(configCallsWhenTheWaitStarted)
+
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(1)
+        }, { timeout: 5_000 })
+        // The configuration is applied once the agent is free.
+        expect(configOption.mock.calls.length).toBeGreaterThan(configCallsWhenTheWaitStarted)
+        queue.close()
+    })
+
+    it('sends the turn right away when the lease state is unknown', async () => {
+        // An agent whose runtime index cannot be read must not hold the
+        // session hostage: the turn is attempted the way it was before.
+        const backend = createBackend()
+        const { session, queue } = createSteerSession()
+        queue.push('go', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {
+            readTurnLease: vi.fn(async () => UNKNOWN)
+        })
+
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(1)
+        }, { timeout: 5_000 })
+        queue.close()
+    })
+
+    it('waits for the lease before it retries a refused turn', async () => {
+        // The refusal says the session is not ready; the lease says when it
+        // will be. The retry waits for the lease, not for a guessed backoff.
+        const BUSY_ERROR = 'Internal error: MiniMax Code Runtime failed: Session already has an active Turn. Use queue send to deliver the message after it.'
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) throw new Error(BUSY_ERROR)
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('go', { permissionMode: 'default', model: null })
+
+        let leaseReads = 0
+        void mcodeRemoteLauncher(session as never, {
+            readTurnLease: vi.fn(async () => {
+                leaseReads += 1
+                // The lease is held while the refusal is being handled, and
+                // free afterwards.
+                return leaseReads <= 4 ? HELD_LEASE : FREE
+            })
+        })
+
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 10_000 })
+        queue.close()
+    })
+})

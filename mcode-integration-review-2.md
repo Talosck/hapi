@@ -264,3 +264,122 @@ watcher 盯住 agent transcript 的新 turn + hub 的 `thinking=false`，在窗�
   `queue-notice` 会落到 generic 渲染；native 的"等待中"提示还没做。
 - **非 web 客户端**：重复发送的拦截只在 web 客户端；telegram bot / MCP / native 仍可能把
   同一段话送两遍。
+
+---
+
+# 追加：根因层——让 HAPI 看得见 agent 的真实占用（2026-10-22 晚，第 3 轮）
+
+上一轮把"忙碌拒绝"从**用户可见的故障**降级成了**可见的等待**（提示 + 浮条 + 拦截重发），
+但根因还在：HAPI 仍然**看不见** runtime 自开的那一轮，只能盲发 → 被拒 → 退避 → 重试。
+这一轮动的就是这一层。
+
+## 两个选项，先用事实否掉一个
+
+上一轮留的题目是二选一：**（a）让 agent 侧暴露 busy 状态**，还是
+**（b）改用 agent 自己的 queue**（`mcode/session/queue/enqueue`）。
+本机实测（agent 0.5.9，探针 `/tmp/probe-mcode-acp.ts`、`/tmp/probe-mcode-queue.ts`、
+`/tmp/probe-mcode-output.ts`）的结论是：**（b）不能用**。
+
+agent 在 initialize 里广播的扩展面共 15 个方法 / 4 个通知：
+
+```
+session/activate, mcode/session/activate, mcode/session/steer,
+mcode/session/queue/{list,enqueue,update,delete,steer},
+mcode/session/goal/{get,create,patch,clear},
+mcode/session/delegation/{get,stop}
+mcode/session/{current_session_update,queue_update,goal_update,delegation_update}
+```
+
+**（a）ACP 协议面无路可走**：上面这份清单里**没有任何一个"当前是否有 turn 在跑"的读取方法**。
+`mcode/session/current_session_update` 的 payload 只有 `{sessionId}`。
+但 agent **确实**暴露了 busy 状态——只是不在协议面上，而在它自己的运行时索引里（见下）。
+
+**（b）能用，但要用它交付消息，HAPI 会丢掉 agent 的输出和 Steer**：
+
+| 实测 | 结果 |
+|---|---|
+| `queue/enqueue` 会不会被拒 | 不会。永远返回 `{itemId, status:'queued', position}` |
+| 空闲时 enqueue | **直接开一轮**（随后 `session/prompt` 被拒 `Session already has an active Turn`） |
+| 忙时 enqueue | 挂起，`queue/list` 里可见 `status:'queued'`, `source:'api'` |
+| **enqueue 开的那一轮，输出会回传给 ACP 客户端吗** | **不会**。盯满 150 秒，0 条 `agent_message_chunk`；那一轮确实跑了（`usage_update` 用了 16043 token），但输出没回传 |
+| **enqueue 开的那一轮能被 steer 吗** | **不能**。`mcode/session/steer` 报 `Steering requires an admitted, active ACP prompt Turn for this Session.` |
+
+原因在 agent 源码里：ACP 的 `session/prompt` 处理器只把**它自己发起的这一轮**的 runtime 事件
+投影成 `session/update`（`run-acp-command-*.js` 的 `onSessionEvent` + `ir` 投影器）。
+`queue/enqueue` 走的是 `runtime.enqueueMessage()`，那一轮的输出没有 ACP 客户端在听。
+
+所以 **（b）等于拿"看得见回复"换"不丢消息"**——而"看得见回复"是这个产品的命门。**（b）否掉。**
+
+## 根因其实是"等待方式不对称"
+
+agent 源码里两处实现放在一起看，问题就清楚了：
+
+- **runtime 自己开的那一轮**（`turn_task_delivery_*`，回填后台子代理结果）走
+  `conversation.ingress.steer(...)`，**被占用的租约挡回来时它是"重试"**——它会等。
+- **HAPI 的 `session/prompt`** 走同一条 ingress，**被挡回来时它是"失败"**——它不吃。
+
+同一个租约，一边等一边不等。HAPI 等不到，就只能自己猜一个退避节奏，
+于是 32 次拒绝、269 秒延迟。
+
+## 租约在哪：agent 自己就在用它
+
+MiniMax Code 给每个 native session 一把**轮次租约**，落在
+`~/.minimax/v2/sqlite/runtime-state.sqlite`：
+
+```sql
+CREATE TABLE local_runtime_session_locks (
+    session_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,     -- turn-lease:<pid>:<uuid>.<uuid>
+    owner_kind TEXT NOT NULL,    -- 'turn'
+    acquired_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL
+)
+```
+
+这正是 agent 自己判断"这个 session 能不能接一轮"的那把锁——**agent 侧本来就暴露了 busy 状态，
+只是不在 ACP 协议面上，而在它自己的运行时索引里**。而这个库 HAPI **已经在读**
+（`mcodeSessionDirs.ts` 用它定位会话目录），不引入新的依赖面。
+
+实测（`/tmp/probe-mcode-lease.ts`，250ms 轮询）：
+
+```
+--- lease BEFORE any turn ---   null
+--- starting a long turn ---    +252ms  LEASE: owner=turn-lease:53303:… kind=turn
+                               +8515ms LEASE: null        ← 轮次结束，租约消失
+```
+
+**这就是需要的 busy 信号**：精确、无歧义、还带持有者 pid 和持有时长。
+读它是一次本地文件读，没有 agent 往返，不写任何东西。
+
+**忙的时候被拒的不止 `session/prompt`**：实测 `session/set_config_option` 在同一时刻也报
+`-32602 Invalid params`。HAPI 的模型 / 思考档 / 权限模式切换都在发 prompt 之前，
+所以"先切换再发送"会在每次等待时刷出一条"切换失败"。门控因此排在所有 ACP 往返**之前**。
+
+顺带记一条分层：**有两层拒绝，文本不同**——
+ACP 层 `A prompt is already active for this session.`（-32602，HAPI 自己并发发 prompt 时），
+runtime 层 `Session already has an active Turn. Use queue send …`（-32603，agent 有别的轮次时）。
+上一轮的分类器只认后者。
+
+## 这一轮改了什么
+
+| # | 改动 | 位置 |
+|---|---|---|
+| 1 | 新增 agent 运行时索引的只读句柄（`mcodeSessionDirs` 与新读者共用一个连接） | `cli/src/mcode/utils/mcodeRuntimeIndex.ts`（新） |
+| 2 | 新增轮次租约读取器：`free` / `held` / `unknown` 三态 | `cli/src/mcode/utils/mcodeTurnLease.ts`（新） |
+| 3 | **发送前先读租约**：租约被占就不发，等到释放才发——这一轮**第一次就被受理**，不再"拒绝 → 重试" | `cli/src/mcode/mcodeRemoteLauncher.ts` |
+| 3b | **门控排在所有 ACP 往返之前**：agent 忙的时候 `session/set_config_option` 也被拒（实测 `-32602`），排在后面的话每次等待都会伴随一次"切换模型失败" | 同上 |
+| 4 | 拒绝后的重试改为**等租约释放**（退避保留为地板，因为 compaction / mutating 不是租约问题） | 同上 |
+| 5 | 忙碌提示按"一次忙碌期一条"发布；`waitingForAgent` 在等租约期间就置位（不再等被拒之后） | 同上 |
+| 6 | abort 落在"等租约"窗口里时，**不丢消息**：照旧发出去再在请求后面紧跟一个 cancel | 同上 |
+| 7 | abort 之后的拒绝不再额外报一条 "prompt failed"（abort 已经报过了） | 同上 |
+
+**降级是硬要求**：租约表读不到（agent 版本没有这张表、文件被锁、数据目录不对）时状态是
+`unknown`，而 `unknown` **永远不拦投递**——行为退回改动前的样子，不会把会话卡死。
+`mcodeSessionDirs.ts` 同步改用共享句柄，行为不变。
+
+## 还没做的（明确留着）
+
+- **延迟 ack**：消息在等待期间仍然只活在 CLI 进程内存里（hub 侧早已 ack）。要彻底不丢，
+  得把 ack 推迟到"agent 受理轮次"之后（`agy` flavor 已经是这个模型）。这会动投递语义
+  （hub 排队浮条、取消、seq 回填），仍是独立立项。
+- **native 对齐**、**非 web 客户端的重复拦截**：同上一轮，未动。

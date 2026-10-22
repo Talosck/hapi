@@ -56,6 +56,7 @@ import {
     type McodeGoal
 } from './utils/mcodeExtensions';
 import { McodeExtensionControl } from './utils/mcodeExtensionControl';
+import { readMcodeTurnLease, type McodeTurnLeaseState } from './utils/mcodeTurnLease';
 import { McodeConversationHistory } from './conversationHistory';
 
 /** First wait before retrying a turn the agent refused because it was busy. */
@@ -67,8 +68,18 @@ const MCODE_BUSY_RETRY_BASE_MS = 1_000;
  * holds for minutes does not turn into a prompt-per-second loop.
  */
 const MCODE_BUSY_RETRY_MAX_MS = 60_000;
-/** How many refusals pass before the user is told the wait is not ending. */
-const MCODE_BUSY_STUCK_REFUSALS = 12;
+/**
+ * How often the session's turn lease is read while the agent holds it.
+ *
+ * The lease is a row in the agent's runtime index, so a poll is a local file
+ * read - no round trip to the agent, nothing written, nothing logged.
+ */
+const MCODE_TURN_LEASE_POLL_MS = 400;
+/**
+ * How long the agent may hold the session before the user is told that the
+ * wait is not ending.
+ */
+const MCODE_TURN_LEASE_STUCK_MS = 60_000;
 
 /**
  * Why the agent refused the turn, if it refused it for a transient reason.
@@ -126,6 +137,14 @@ export type McodeRemoteLauncherOptions = {
      * mode it switched to, or the tool permission policy it re-published.
      */
     onPermissionModeChanged?: (mode: PermissionMode) => void;
+    /**
+     * Reads the session's turn lease.
+     *
+     * The lease is the agent's own "a turn is running" state, and it decides
+     * whether a turn can be attempted at all. Injectable so the launcher can
+     * be driven without the agent's runtime index.
+     */
+    readTurnLease?: (sessionId: string) => Promise<McodeTurnLeaseState>;
 };
 
 class McodeRemoteLauncher extends RemoteLauncherBase {
@@ -181,6 +200,20 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private busyRefusals = 0;
     /** When the agent started refusing turns, for the "still busy" notice. */
     private busySinceMs: number | null = null;
+    /**
+     * Whether the "the agent is busy" notice was already published for the
+     * current busy episode.
+     *
+     * The episode starts when the session is found to be busy and ends when
+     * the agent takes the turn again, so a message that waits for minutes
+     * produces one notice and not one per poll.
+     */
+    private busyNoticePublished = false;
+    /**
+     * Whether the follow-up notice ("still busy after a minute") was already
+     * published for the current busy episode.
+     */
+    private busyStuckNoticePublished = false;
     /**
      * The last published "the agent holds a turn" value. `null` means it was
      * never published for the current agent session.
@@ -387,6 +420,31 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // that case, so drop the card instead of leaving a dead request.
             await this.questionHandler?.cancelAll('Superseded by a new message');
 
+            // The agent's runtime holds the session's turn lease for every turn
+            // it runs, and it runs turns HAPI did not start: a background task
+            // that finished has to be reported into the owner session, and
+            // that delivery holds the lease while it runs.
+            //
+            // A session that holds the lease refuses more than the turn: the
+            // model, effort and permission mode cannot be applied either, so
+            // the wait comes before those calls. Applying them first would
+            // report a failed model switch to the user every time their
+            // message waited for a turn that was already running.
+            //
+            // A `session/prompt` sent into a held lease is refused as well,
+            // so HAPI used to fire blind, eat the refusal and retry on a
+            // guessed backoff - which is how a message ended up minutes late.
+            // The lease says when the agent is free, so wait for it instead:
+            // the wait ends the moment the other turn ends, and the turn is
+            // admitted the first time it is tried.
+            //
+            // An abort during the wait does not skip the turn: the batch was
+            // acknowledged when it left the queue, so it cannot be dropped.
+            // The turn starts and the abort cancels it right behind the
+            // request, the same way an abort that lands during the mode round
+            // trips below is handled.
+            await this.waitForTurnLease(session, acpSessionId, waitSignal);
+
             // `null` means "back to the agent default" (the model the session
             // was created with); `undefined` means "no explicit choice".
             const requestedModel = batch.mode.model === null
@@ -503,6 +561,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 });
                 this.busyRefusals = 0;
                 this.busySinceMs = null;
+                this.busyNoticePublished = false;
+                this.busyStuckNoticePublished = false;
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
                 const refusal = classifyMcodeRefusal(errorMessage);
@@ -517,12 +577,19 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     // would lose the message - put it back and let the loop
                     // deliver it once the session is ready again.
                     this.requeueRefusedBatch(batch);
-                    this.reportRefusal(session, refusal, errorMessage);
+                    this.reportBusyNotice(session, refusal);
+                    logger.debug('[mcode-remote] session refused the turn', { refusal, message: errorMessage });
                     // The agent still holds a turn. Say so, so a client can
                     // show that the message is waiting instead of looking
                     // like it was lost.
                     this.setWaitingForAgent(true);
                     refusedAsBusy = true;
+                } else if (waitSignal.aborted) {
+                    // The session was aborted while the turn was refused. The
+                    // abort already told the user, and it cleared the queue,
+                    // so the message goes with it - a failure notice on top of
+                    // that would only be noise.
+                    logger.debug('[mcode-remote] turn refused while the session was aborted', { message: errorMessage });
                 } else {
                     logger.warn('[mcode-remote] prompt failed', { message: errorMessage });
                     session.sendSessionEvent({
@@ -552,7 +619,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // client that offers "Steer" on a busy session would steer a turn
             // that does not exist.
             if (refusedAsBusy) {
-                await this.waitBeforeRetry(waitSignal);
+                await this.waitBeforeRetry(session, acpSessionId, waitSignal);
             }
         }
     }
@@ -568,13 +635,18 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * The notice is its own event type, not an agent message: it is HAPI
      * talking about the queue, and a client has to be able to tell that
      * apart from something the agent said.
+     *
+     * One notice per busy episode, not one per attempt: the episode starts
+     * when the session is found to be busy and ends when the agent takes
+     * the turn again.
      */
-    private reportRefusal(session: McodeSession, reason: McodeRefusalReason, errorMessage: string): void {
+    private reportBusyNotice(session: McodeSession, reason: McodeRefusalReason): void {
         this.busySinceMs ??= Date.now();
         const waitingSeconds = Math.round((Date.now() - (this.busySinceMs ?? Date.now())) / 1000);
-        if (this.busyRefusals === 1) {
+        if (!this.busyNoticePublished) {
+            this.busyNoticePublished = true;
             const what = reason === 'busy'
-                ? 'MiniMax Code is busy with another turn on this session - a task it is running, or another MiniMax Code window attached to it - and refused your message.'
+                ? 'MiniMax Code is busy with another turn on this session - a task it is running, or another MiniMax Code window attached to it.'
                 : reason === 'compacting'
                     ? 'MiniMax Code is compacting this conversation and refused your message.'
                     : 'MiniMax Code is changing this conversation and refused your message.';
@@ -584,10 +656,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 waitingSeconds,
                 message: `${what} Your message is kept and goes out as soon as that finishes.`
             });
-            logger.debug('[mcode-remote] session refused the turn', { reason, message: errorMessage });
+            logger.debug('[mcode-remote] session is busy', { reason });
             return;
         }
-        if (this.busyRefusals === MCODE_BUSY_STUCK_REFUSALS) {
+        if (!this.busyStuckNoticePublished && waitingSeconds >= MCODE_TURN_LEASE_STUCK_MS / 1000) {
+            this.busyStuckNoticePublished = true;
             session.sendSessionEvent({
                 type: 'queue-notice',
                 reason,
@@ -644,6 +717,17 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         isolate?: boolean;
         items?: Array<{ message: string; localId?: string }>;
     }): void {
+        this.requeueBatch(batch);
+        this.busyRefusals += 1;
+        logger.debug('[mcode-remote] Refused turn re-queued', { messages: batch.items?.length ?? 1 });
+    }
+
+    private requeueBatch(batch: {
+        message: string;
+        mode: McodeMode;
+        isolate?: boolean;
+        items?: Array<{ message: string; localId?: string }>;
+    }): void {
         const items = batch.items?.length ? batch.items : [{ message: batch.message }];
         for (const item of [...items].reverse()) {
             try {
@@ -656,29 +740,98 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 logger.warn('[mcode-remote] Failed to re-queue a refused message', error);
             }
         }
-        this.busyRefusals += 1;
-        logger.debug('[mcode-remote] Refused turn re-queued', { messages: items.length });
     }
 
     /**
      * Waits before the next attempt at a refused turn.
      *
-     * The lease the agent holds is released when the other turn ends, which
-     * can take a while - a background task can hold the session for minutes.
-     * The wait doubles with every refusal, so a long-running turn does not
-     * turn into a prompt-per-second loop that writes a usage row per
-     * attempt.
+     * The refusal says the session is not ready for a turn, and the turn
+     * lease says when it will be: the wait ends the moment the agent
+     * releases it, instead of guessing with a backoff. The backoff stays as
+     * the floor, because a refusal is not always about the lease - the
+     * session can be compacting or changing, and those end on their own.
      */
-    private async waitBeforeRetry(signal: AbortSignal): Promise<void> {
+    private async waitBeforeRetry(
+        session: McodeSession,
+        sessionId: string,
+        signal: AbortSignal
+    ): Promise<void> {
         const delay = Math.min(
             MCODE_BUSY_RETRY_BASE_MS * 2 ** Math.min(Math.max(this.busyRefusals - 1, 0), 6),
             MCODE_BUSY_RETRY_MAX_MS
         );
-        await new Promise<void>((resolve) => {
+        await this.sleepWithAbort(delay, signal);
+        if (signal.aborted) return;
+        await this.waitForTurnLease(session, sessionId, signal);
+    }
+
+    /**
+     * Waits until the agent's runtime releases the session's turn lease.
+     *
+     * MiniMax Code gives every native session one turn lease and holds it for
+     * the whole turn. The runtime takes that lease for turns HAPI did not
+     * start - a background task that finished has to be reported into the
+     * owner session, and that delivery holds the lease while it runs. A
+     * `session/prompt` sent into a held lease is refused, so the wait is
+     * what keeps the message from being refused in the first place.
+     *
+     * The lease lives in the agent's runtime index, next to the session
+     * catalog HAPI already reads, and it is the same lease the agent itself
+     * consults before it admits a turn. Polling it is a local file read: no
+     * round trip to the agent and nothing written.
+     *
+     * An index that cannot be read (an older agent without the table, a
+     * locked file) leaves the lease state unknown, and an unknown lease never
+     * blocks: the turn is attempted and refused the way it was before.
+     */
+    private async waitForTurnLease(
+        session: McodeSession,
+        sessionId: string,
+        signal: AbortSignal
+    ): Promise<void> {
+        for (;;) {
+            // An abort ends the wait, but not the turn: the caller still hands
+            // the message to the agent and cancels the turn right behind it.
+            if (signal.aborted) return;
+
+            const state = await this.readTurnLease(sessionId);
+            if (state.status !== 'held') {
+                // The busy episode does not end here: the turn has not
+                // started yet, and it can still be refused. The episode ends
+                // when the agent takes the turn, and the notice flags are
+                // reset there - so a session that is busy, freed and busy
+                // again is still one episode with one notice.
+                return;
+            }
+
+            // The agent is busy. Say so, so a client can show that the
+            // message is waiting instead of looking like it was lost. The
+            // notice comes first: it starts the busy episode, and the wait
+            // the client shows is measured from that moment.
+            this.reportBusyNotice(session, 'busy');
+            this.setWaitingForAgent(true);
+            await this.sleepWithAbort(MCODE_TURN_LEASE_POLL_MS, signal);
+        }
+    }
+
+    /**
+     * Reads the session's turn lease.
+     *
+     * The reader is injectable so the launcher can be driven without the
+     * agent's runtime index.
+     */
+    private readTurnLease(sessionId: string): Promise<McodeTurnLeaseState> {
+        const read = this.opts.readTurnLease ?? readMcodeTurnLease;
+        return read(sessionId);
+    }
+
+    /** Sleeps, and gives up early when the session is aborted. */
+    private sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+        return new Promise<void>((resolve) => {
             const timer = setTimeout(() => {
                 signal.removeEventListener('abort', onAbort);
                 resolve();
-            }, delay);
+            }, ms);
             const onAbort = () => {
                 clearTimeout(timer);
                 resolve();
