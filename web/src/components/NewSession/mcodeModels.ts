@@ -41,7 +41,7 @@ export function shouldResetMcodeModel(args: {
 /**
  * MiniMax Code options for the create-session selector: Default plus one
  * entry per discovered model. `value` is the agent's ACP wire model id
- * (`m:...:u` or `m:...:v:<variant>`), which is what
+ * (`m:...:v:` or `m:...:v:<variant>`), which is what
  * `session/set_config_option` expects; the label shows the human-readable
  * model name.
  */

@@ -79,7 +79,7 @@
 | id | category | 取值 | scope |
 |---|---|---|---|
 | `permissionMode` | `_permission` | `default` / `auto` / `bypassPermissions` | **process** |
-| `model` | `model` | `m:<provider>:<model>:u` 或 `m:<provider>:<model>:v:<variant>` | session |
+| `model` | `model` | `m:<provider>:<model>:v:<variant>`（无变体时是空变体的 `m:<provider>:<model>:v:`） | session |
 | `thinkingEffort` | `thought_level` | `default` / `low` / `medium` / `high` / `xhigh` / `max` | session |
 
 会话模式（`modes`）：`default` / `plan`。`session/set_mode` **延迟到下一轮 prompt 生效**。
@@ -604,3 +604,55 @@ agent 广播 15 个方法 / 4 个通知。P1 之后还剩 **9 方法 + 2 通知*
 | **真实 mcode 联调**（`cli && bun run verify:mcode-steer`） | ✅ 无轮次时 agent 拒绝（`Steering requires an admitted, active ACP prompt Turn`）→ 轮次中 steer 返回 `{turnId, mode:"steered"}` → **agent 当场改口 `STEER_ACK`** |
 
 联调脚本 `cli/scripts/verify-mcode-steer.ts` 发的是与 launcher **完全相同形状**的调用（含 `clientRequestId` 幂等键）。
+
+---
+
+## 11. 复审与修复记录（实施后审计）
+
+P0–P4 落地之后，重新做了一次**实施后审计**：把实现逐条对着本机真实的 `@minimax-ai/code@0.5.9` 复核，代码里的每个假设都用实机探针验一遍，而不是只读代码。
+
+方法上有三条纪律，后面几个结论都靠它才成立：
+
+1. **凡是"看起来对"的都要探针证伪。** 用例：用量统计一度被怀疑读错了 transcript 结构（真实结构是 `entry.message.usage` 嵌套），实跑 HAPI 自己的 `parseMcodeUsageLine` 之后，79 条记录与 agent 自己的 `local_runtime_token_usage` 表**逐项一致**——那条怀疑是错的。
+2. **子代理的"确认 bug"也要复核。** 深审分支报了 3 条，其中 2 条的**触发条件在 v0.5.9 上不成立**（见下），被实机数据推翻。
+3. **修不动就降级为"潜在风险"并写清依据**，不写成 bug。
+
+### 11.1 修掉的 bug
+
+| 严重度 | 问题 | 症状 | 修复 |
+|---|---|---|---|
+| 高 | abort 落在「取队列 → 发起 prompt」之间 | 用户点了 Stop，agent 照样干活 | prompt 请求发出后紧跟一条 `session/cancel`（传输层保序，agent 先注册轮次再取消）→ 实测 `stopReason: cancelled`、零输出 |
+| 高 | goal 工具卡状态用 snake_case 渲染 | 预算耗尽时徽章显示字面量 `budget_limited` | 状态映射上提到 shared 单点（`MCODE_GOAL_STATUS_MAP`），CLI 与 web 共用 |
+| 高 | ru 语言包缺全部 14 个 `tool.goal.*` | 俄语界面里 goal 卡片整块英文 | 补齐；顺带补上 zh-CN 缺的 6 个 `newSession.agyModel.*`；新增 locale 键集对齐测试 |
+| 中高 | `HAPI_MCODE_PATH` 是幽灵变量 | 多套安装时"已连接应用"读的是另一套的 oauth lease | `getAgentLaunchCommand` 真正读取它，同级 `mcode-tools` 解析随之可达 |
+| 中高 | agent 退出后 `conversationHistory.forkCurrent` 仍为 true | 死 Fork 按钮，每次点都报 "MiniMax Code session is not ready" | `cleanup()` 时下线历史能力（pi flavor 早有同样处理） |
+| 中 | 会话 inactive 时仍显示 goal 控件 | 点一下弹出原始 HTTP 409 JSON | inactive 时不提供控件；409 归类为可读文案 |
+| 中 | steer 传输失败时把消息放回队列 | agent 可能已注入，hub 会重放 → 消息跑两遍 | 改为 indeterminate 持有（对齐 cursor/codex），并持久化 dispatching 态 |
+| 中 | ACP 传输层丢弃 `error.data` | agent 的 "Unfinished thread goal already exists" 变成 "Internal error" | 保留 `error.data.details` |
+| 中 | 连接器 auth 读取失败被缓存 | 面板显示 "unknown" 整个 TTL | 读取失败不写缓存 |
+| 低 | agent 自行换模型后 hub 仍宣称旧模型 | 会话头显示的不是 agent 实际在跑的模型 | 监听 config options 更新并跟随 |
+| 低 | fork 边界错误码只覆盖 2 种拼写 | 另两种拼写把协议码抛给用户 | 覆盖 agent 的全部拼写 |
+
+### 11.2 被实机推翻的两条
+
+| 分支结论 | 实测结果 | 处置 |
+|---|---|---|
+| 切模型后 effort 描述符陈旧 | agent 的 `config_option_update` **先于** `set_config_option` 响应送达，launcher 的等待缓解有效；且 v0.5.9 的 effort 档位与模型无关 | 降级为潜在风险 |
+| agent 复述旧模式导致 hub 显示用户没选过的权限模式 | agent 复述的是**新**模式（`Yx()` 里 `a !== i` 才通知） | 不成立；但保留一条改进——`session/set_mode` 返回 `_meta["minimax-code/transition"]`（`next_prompt` / `settled`），HAPI 丢弃了它，模式实际是延迟生效的 |
+
+### 11.3 复核后确认是好的（别去动）
+
+扩展面宣告与文档完全一致（15 methods + 4 notifications）；权限模式双轴映射正确（agent 只接受 `default|auto|bypassPermissions`）；steer 回合生命周期对称置位；ask_user 问卷的 hint 在 `elicitation/create` 到达时消费；会话目录定位与 `runtime-state.sqlite` schema 吻合；`rewindToMessage: unsupported` 是对的（agent 的 ACP 面根本没有 rewind 方法）；用量统计与 agent 账本逐项一致；`session/prompt` 紧跟 `session/cancel` 确实能取消（实测 `stopReason: cancelled`）。
+
+### 11.4 验证
+
+| 检查 | 结果 |
+|---|---|
+| `bun typecheck`（cli/web/hub/relay） | ✅ exit 0 |
+| `bun run test:cli` | ✅ 3293 passed / 0 failed（新增 7 个用例） |
+| `bun run test:shared` | ✅ 353 passed / 0 failed |
+| `bun run test:web` | ✅ 3442 passed / 0 failed（新增 locale 对齐用例） |
+| `bun run test:hub` | ✅ 1411 passed / 0 failed |
+| `bun run test:relay` | ✅ 118 passed / 0 failed |
+| **真实 mcode 联调** | ✅ extensions / fork / steer 三个脚本全部通过 |
+| **新增实机探针** | 扩展面、模型 id 编码、config options、模式延迟切换、goal 重复创建的错误形状、prompt+cancel 取消时序 |

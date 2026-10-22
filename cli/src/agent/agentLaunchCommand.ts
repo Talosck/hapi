@@ -28,6 +28,10 @@ export function getAgentLaunchCommand(
     if (flavor === 'claude') return env.HAPI_CLAUDE_PATH?.trim() || DEFAULT_COMMANDS.claude
     if (flavor === 'copilot') return env.COPILOT_CLI_PATH?.trim() || DEFAULT_COMMANDS.copilot
     if (flavor === 'dsh') return env.HAPI_DSH_ACP_COMMAND?.trim() || DEFAULT_COMMANDS.dsh
+    // A pinned install matters for MiniMax Code: the connector catalog is read
+    // with the `mcode-tools` next to this binary, and only that one shares the
+    // oauth lease the agent itself uses.
+    if (flavor === 'mcode') return env.HAPI_MCODE_PATH?.trim() || DEFAULT_COMMANDS.mcode
     return DEFAULT_COMMANDS[flavor]
 }
 

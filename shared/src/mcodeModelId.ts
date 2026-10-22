@@ -3,12 +3,14 @@
  *
  * - The ACP config option (`session/set_config_option` with configId `model`)
  *   uses the runtime wire id:
- *   - `m:<provider>:<model>:u` for a model without a variant
  *   - `m:<provider>:<model>:v:<variant>` for a variant model
+ *   - `m:<provider>:<model>:v:` for a model without a variant
  *
  *   Provider, model and variant are URI-encoded; an empty variant (`...:v:`)
- *   is valid and is how the agent publishes a model without a variant.
- *   Examples: `m:minimax:MiniMax-M3:u`, `m:minimax:MiniMax-M3:v:thinking`.
+ *   is valid and is how the agent publishes a model without a variant. The
+ *   `u` form (`m:<provider>:<model>:u`) is accepted by the agent's decoder
+ *   but never published by it.
+ *   Examples: `m:minimax:MiniMax-M3:v:`, `m:minimax:MiniMax-M3:v:thinking`.
  * - The CLI (`mcode --model`, `mcode exec --model`) uses the user-facing id:
  *   `provider/model` or `provider/model#variant`, e.g.
  *   `minimax/MiniMax-M3#thinking`.

@@ -870,9 +870,9 @@ export type ListKimiModelsResponse = KimiModelsResponse
 export type McodeModelSummary = {
     /**
      * MiniMax Code ACP wire model id, as published by the agent's `model`
-     * config option: `m:<provider>:<model>:u` for a model without a variant,
-     * or `m:<provider>:<model>:v:<variant>` for a variant model. Provider,
-     * model, and variant are URI-encoded by the agent.
+     * config option: `m:<provider>:<model>:v:<variant>` for a variant model,
+     * or `m:<provider>:<model>:v:` for a model without one. Provider, model,
+     * and variant are URI-encoded by the agent.
      */
     modelId: string
     name?: string

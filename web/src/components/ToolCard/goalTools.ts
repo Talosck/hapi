@@ -1,4 +1,4 @@
-import { isObject } from '@hapi/protocol'
+import { isObject, toHapiGoalStatus } from '@hapi/protocol'
 import type { ChatToolCall } from '@/chat/types'
 
 const GOAL_TOOL_NAMES = ['create_goal', 'get_goal', 'update_goal'] as const
@@ -34,7 +34,13 @@ function parseSnapshot(value: unknown): GoalSnapshot | null {
     if (!isObject(value) || typeof value.objective !== 'string' || !value.objective.trim()
         || typeof value.status !== 'string' || !value.status.trim()) return null
 
-    const goal: GoalSnapshot = { objective: value.objective, status: value.status }
+    // The agent spells the two runtime-derived states in snake_case
+    // (`budget_limited`, `usage_limited`); the goal card renders HAPI's
+    // camelCase spelling, so the raw status would show up untranslated.
+    const status = toHapiGoalStatus(value.status)
+    if (!status) return null
+
+    const goal: GoalSnapshot = { objective: value.objective, status }
     const threadId = readField(value, 'threadId', 'thread_id')
     if (typeof threadId === 'string' && threadId.trim()) goal.threadId = threadId
 

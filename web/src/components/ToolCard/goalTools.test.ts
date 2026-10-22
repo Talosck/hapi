@@ -54,6 +54,13 @@ describe('goal tool results', () => {
         } })
     })
 
+    it('normalizes the agent snake_case goal states to the HAPI spelling', () => {
+        expect(parseGoalToolResult({ goal: { objective: 'ship', status: 'budget_limited' } }))
+            .toEqual({ kind: 'goal', goal: { objective: 'ship', status: 'budgetLimited' } })
+        expect(parseGoalToolResult({ goal: { objective: 'ship', status: 'usage_limited' } }))
+            .toEqual({ kind: 'goal', goal: { objective: 'ship', status: 'usageLimited' } })
+    })
+
     it('does not invent missing counters or display invalid numeric fields', () => {
         expect(parseGoalToolResult({ goal: {
             objective: 'ship', status: 'active', tokensUsed: -1,

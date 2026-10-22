@@ -26,8 +26,14 @@ describe('agent executable resolution', () => {
         })).toEqual({ agent: 'copilot', available: true })
     })
 
-    it('uses PATHEXT when resolving Windows commands', () => {
-        expect(executableCandidates('agent', {
+    it('pins the MiniMax Code install through HAPI_MCODE_PATH', () => {
+        expect(getAgentLaunchCommand('mcode', {})).toBe('mcode')
+        expect(getAgentLaunchCommand('mcode', { HAPI_MCODE_PATH: '  ' })).toBe('mcode')
+        expect(getAgentLaunchCommand('mcode', { HAPI_MCODE_PATH: '/opt/mcode/bin/mcode' }))
+            .toBe('/opt/mcode/bin/mcode')
+    })
+
+    it('uses PATHEXT when resolving Windows commands', () => {        expect(executableCandidates('agent', {
             platform: 'win32',
             pathValue: 'C:\\Tools;D:\\Bin',
             pathExt: '.EXE;.CMD',

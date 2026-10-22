@@ -1,9 +1,10 @@
-import type {
-    McodeDelegationStopReceipt,
-    McodeExtensionCapabilities,
-    McodeGoalStatus as SharedMcodeGoalStatus,
-    SubagentSnapshotMember,
-    ThreadGoal
+import {
+    MCODE_GOAL_STATUS_MAP,
+    type McodeDelegationStopReceipt,
+    type McodeExtensionCapabilities,
+    type McodeGoalStatus as SharedMcodeGoalStatus,
+    type SubagentSnapshotMember,
+    type ThreadGoal
 } from '@hapi/protocol';
 
 /**
@@ -164,15 +165,6 @@ const TERMINAL_DELEGATION_STATUSES = new Set<McodeDelegationStatus>([
     'failed',
     'stopped'
 ]);
-
-const GOAL_STATUS_MAP: Record<McodeGoalStatus, ThreadGoal['status']> = {
-    active: 'active',
-    paused: 'paused',
-    blocked: 'blocked',
-    complete: 'complete',
-    budget_limited: 'budgetLimited',
-    usage_limited: 'usageLimited'
-};
 
 function readString(value: unknown): string | undefined {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -390,7 +382,7 @@ export function toHapiThreadGoal(goal: McodeGoal, threadId: string): ThreadGoal 
     return {
         threadId,
         objective: goal.objective,
-        status: GOAL_STATUS_MAP[goal.status],
+        status: MCODE_GOAL_STATUS_MAP[goal.status],
         tokenBudget: goal.tokenBudget ?? undefined,
         tokensUsed: goal.tokensUsed,
         timeUsedSeconds: goal.timeUsedSeconds,
