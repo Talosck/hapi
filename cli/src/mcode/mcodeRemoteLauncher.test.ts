@@ -1543,6 +1543,162 @@ describe('mcodeRemoteLauncher abort handling', () => {
     })
 })
 
+describe('mcodeRemoteLauncher refused turn', () => {
+    const BUSY_ERROR = 'Internal error: MiniMax Code Runtime failed: Session already has an active Turn. Use queue send to deliver the message after it.'
+
+    it('keeps a message the agent refused because the session was busy', async () => {
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    // The agent refuses the turn: its session still has an
+                    // active one (a background task it is running, or another
+                    // client attached to the same native session).
+                    throw new Error(BUSY_ERROR)
+                }
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 5_000 })
+
+        // The message was not lost: the refused batch went back into the
+        // queue and was delivered on the retry.
+        const promptMock = backend.prompt as ReturnType<typeof vi.fn>
+        expect(promptMock.mock.calls[0][1]).toEqual([{ type: 'text', text: 'first' }])
+        expect(promptMock.mock.calls[1][1]).toEqual([{ type: 'text', text: 'first' }])
+        // The user is told what is going on, once - not once per attempt.
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        const notices = events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('busy'))
+        expect(notices).toHaveLength(1)
+        // The notice says the message is kept, so the user does not resend it.
+        expect((notices[0] as { message: string }).message).toContain('Your message is kept')
+        // The raw agent error is not shown: it is not actionable on its own.
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('prompt failed'))).toHaveLength(0)
+        queue.close()
+    })
+
+    it('keeps the message through several refusals in a row', async () => {
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls <= 3) {
+                    throw new Error(BUSY_ERROR)
+                }
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('kept', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(4)
+        }, { timeout: 20_000 })
+
+        const promptMock = backend.prompt as ReturnType<typeof vi.fn>
+        for (const call of promptMock.mock.calls) {
+            expect(call[1]).toEqual([{ type: 'text', text: 'kept' }])
+        }
+        // One notice for the wait, not one per refusal.
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('busy'))).toHaveLength(1)
+        queue.close()
+    }, 25_000)
+
+    it('still reports a failure that is not a busy session', async () => {
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                throw new Error('the model is gone')
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(1)
+        }, { timeout: 5_000 })
+
+        // A real failure is reported as it was - only the busy refusal is
+        // treated as "try again later".
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('prompt failed'))).toHaveLength(1)
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('busy'))).toHaveLength(0)
+        queue.close()
+    })
+
+    it('keeps the refused message ahead of the messages queued behind it', async () => {
+        // The refused batch goes back to the head of the queue, so the user
+        // still reads their messages in the order they wrote them.
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    throw new Error(BUSY_ERROR)
+                }
+            })
+        })
+        const { session, queue } = createSteerSession()
+        // Different modes: the two messages are not batched together.
+        queue.push('first', { permissionMode: 'default', model: null }, 'local-1')
+        queue.push('second', { permissionMode: 'auto', model: null }, 'local-2')
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(3)
+        }, { timeout: 10_000 })
+
+        const promptMock = backend.prompt as ReturnType<typeof vi.fn>
+        expect(promptMock.mock.calls[0][1]).toEqual([{ type: 'text', text: 'first' }])
+        expect(promptMock.mock.calls[1][1]).toEqual([{ type: 'text', text: 'first' }])
+        expect(promptMock.mock.calls[2][1]).toEqual([{ type: 'text', text: 'second' }])
+        queue.close()
+    })
+
+    it('keeps a message the agent refused while it compacts the conversation', async () => {
+        // The same refusal family, a different reason: the session is
+        // compacting, so it is not ready for a turn - and the message must not
+        // be lost either.
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    throw new Error('Internal error: MiniMax Code Runtime failed: Session compaction is active')
+                }
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 5_000 })
+
+        const promptMock = backend.prompt as ReturnType<typeof vi.fn>
+        expect(promptMock.mock.calls[1][1]).toEqual([{ type: 'text', text: 'first' }])
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('compacting'))).toHaveLength(1)
+        expect(events.filter((event: { message?: string } | undefined) =>
+            typeof event?.message === 'string' && event.message.includes('prompt failed'))).toHaveLength(0)
+        queue.close()
+    })
+})
+
 describe('mcodeRemoteLauncher local handoff', () => {
     afterEach(() => {
         harness.backend = {}

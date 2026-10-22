@@ -19,8 +19,9 @@ import { convertAgentMessage } from '@/agent/messageConverter';
 import type { AgentMessage, McpServerStdio, PromptContent } from '@/agent/types';
 import { RemoteLauncherBase, type RemoteLauncherDisplayContext, type RemoteLauncherExitReason } from '@/modules/common/remote/RemoteLauncherBase';
 import { McodeDisplay } from '@/ui/ink/McodeDisplay';
+import type { MessageBuffer } from '@/ui/ink/messageBuffer';
 import type { McodeSession } from './session';
-import type { PermissionMode } from './types';
+import type { McodeMode, PermissionMode } from './types';
 import { createMcodeBackend } from './utils/mcodeBackend';
 import type { AcpSessionStateUpdate } from '@/agent/backends/acp';
 import { isAcpIndeterminateError } from '@/agent/backends/acp/AcpStdioTransport';
@@ -56,6 +57,48 @@ import {
 } from './utils/mcodeExtensions';
 import { McodeExtensionControl } from './utils/mcodeExtensionControl';
 import { McodeConversationHistory } from './conversationHistory';
+
+/** First wait before retrying a turn the agent refused because it was busy. */
+const MCODE_BUSY_RETRY_BASE_MS = 1_000;
+/** Longest wait between two attempts at a refused turn. */
+const MCODE_BUSY_RETRY_MAX_MS = 10_000;
+/** How many refusals pass before the user is told the wait is not ending. */
+const MCODE_BUSY_STUCK_REFUSALS = 12;
+
+/**
+ * Why the agent refused the turn, if it refused it for a transient reason.
+ *
+ * MiniMax Code refuses a `session/prompt` while the session is not ready to
+ * take a turn, and it answers with 409 in three shapes:
+ *
+ * - `local_session_busy`: the session's turn lease is held. The lease is held
+ *   for the whole turn, and the common case inside HAPI is the agent's own
+ *   work: a background task (a subagent) runs as a turn on the same native
+ *   session, so a user message that arrives while it runs is refused. A
+ *   second live client attached to the same native session (the local TUI,
+ *   another runner) holds it as well.
+ * - `local_session_compacting`: the session is compacting its context.
+ * - `local_session_mutating`: the conversation is being changed (a fork, a
+ *   clear).
+ *
+ * All three end when the agent finishes what it is doing, so the message can
+ * simply be delivered later. Every other error is a real failure and is
+ * reported as it is.
+ */
+type McodeRefusalReason = 'busy' | 'compacting' | 'mutating';
+
+function classifyMcodeRefusal(message: string): McodeRefusalReason | null {
+    if (/session already has an active turn/i.test(message)) {
+        return 'busy';
+    }
+    if (/session compaction is active/i.test(message)) {
+        return 'compacting';
+    }
+    if (/session conversation is being changed/i.test(message)) {
+        return 'mutating';
+    }
+    return null;
+}
 
 export type McodeRemoteLauncherOptions = {
     model?: string;
@@ -121,6 +164,25 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * only offer the Steer button while a turn is actually in flight.
      */
     private steeringActive = false;
+    /**
+     * How often the agent refused a turn because the session was busy.
+     *
+     * The agent hands the message back when the session's turn lease is held
+     * by another turn - its own background task, or another live client
+     * attached to the same native session. The retry wait grows with this
+     * counter so a long-running turn does not turn into a prompt-per-second
+     * loop.
+     */
+    private busyRefusals = 0;
+    /** When the agent started refusing turns, for the "still busy" notice. */
+    private busySinceMs: number | null = null;
+    /**
+     * The local ids of the messages that are already in the display buffer.
+     *
+     * A refused turn goes back into the queue and is delivered on the retry:
+     * without this the message would show up twice in the transcript.
+     */
+    private readonly displayedLocalIds = new Set<string>();
 
     constructor(session: McodeSession, opts: McodeRemoteLauncherOptions) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -378,7 +440,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             batch.mode.permissionMode = this.appliedPermissionMode ?? 'default';
 
             this.applyDisplayMode(batch.mode.permissionMode, this.currentBackendModel ?? undefined);
-            messageBuffer.addMessage(batch.message, 'user');
+            this.showUserMessage(messageBuffer, batch);
 
             // skill_lookup discovery lives on the MCP tool description — do not
             // prepend instructions onto user turns (prompt-injection false positive).
@@ -395,6 +457,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // The agent can only be forked at the end of a finished turn, so the
             // fork control has to know that a turn is running.
             this.conversationHistory?.setBusy(true);
+
+            // Set when the agent refused the turn because the session was
+            // busy: the batch is back in the queue and the loop has to wait
+            // before it tries again.
+            let refusedAsBusy = false;
 
             try {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
@@ -417,14 +484,32 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                         }
                     }
                 });
+                this.busyRefusals = 0;
+                this.busySinceMs = null;
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                logger.warn('[mcode-remote] prompt failed', { message: errorMessage });
-                session.sendSessionEvent({
-                    type: 'message',
-                    message: `MiniMax Code prompt failed: ${errorMessage}`
-                });
-                messageBuffer.addMessage(`MiniMax Code prompt failed: ${errorMessage}`, 'status');
+                const refusal = classifyMcodeRefusal(errorMessage);
+                if (refusal && !waitSignal.aborted && !this.shouldExit) {
+                    // The agent refused the turn for a transient reason: the
+                    // session still has an active one - the common case is the
+                    // agent's own background task running as a turn on this
+                    // session, but a second live client attached to it (the
+                    // local TUI, another runner) holds it as well. It says to
+                    // deliver the message after the turn ends. The batch was
+                    // acknowledged when it left the queue, so dropping it
+                    // would lose the message - put it back and let the loop
+                    // deliver it once the session is ready again.
+                    this.requeueRefusedBatch(batch);
+                    this.reportRefusal(session, refusal, errorMessage);
+                    refusedAsBusy = true;
+                } else {
+                    logger.warn('[mcode-remote] prompt failed', { message: errorMessage });
+                    session.sendSessionEvent({
+                        type: 'message',
+                        message: `MiniMax Code prompt failed: ${errorMessage}`
+                    });
+                    messageBuffer.addMessage(`MiniMax Code prompt failed: ${errorMessage}`, 'status');
+                }
             } finally {
                 this.flushBackgroundTasks();
                 session.onThinkingChange(false);
@@ -440,7 +525,136 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                     sendReady();
                 }
             }
+
+            // The wait happens after the turn cleanup above: the agent is not
+            // running while it waits, so the session must not look busy - a
+            // client that offers "Steer" on a busy session would steer a turn
+            // that does not exist.
+            if (refusedAsBusy) {
+                await this.waitBeforeRetry(waitSignal);
+            }
         }
+    }
+
+    /**
+     * Tells the user why their message is waiting.
+     *
+     * The agent's own text ("Session already has an active Turn. Use queue
+     * send to deliver the message after it.") names a mechanism the user
+     * cannot reach, so the notice says what is actually going on: the
+     * session is busy, and the message is not lost.
+     */
+    private reportRefusal(session: McodeSession, reason: McodeRefusalReason, errorMessage: string): void {
+        this.busySinceMs ??= Date.now();
+        if (this.busyRefusals === 1) {
+            const what = reason === 'busy'
+                ? 'MiniMax Code is busy with another turn on this session - a task it is running, or another MiniMax Code window attached to it - and refused your message.'
+                : reason === 'compacting'
+                    ? 'MiniMax Code is compacting this conversation and refused your message.'
+                    : 'MiniMax Code is changing this conversation and refused your message.';
+            session.sendSessionEvent({
+                type: 'message',
+                message: `${what} Your message is kept and goes out as soon as that finishes.`
+            });
+            logger.debug('[mcode-remote] session refused the turn', { reason, message: errorMessage });
+            return;
+        }
+        if (this.busyRefusals === MCODE_BUSY_STUCK_REFUSALS) {
+            const waitedSeconds = Math.round((Date.now() - (this.busySinceMs ?? Date.now())) / 1000);
+            session.sendSessionEvent({
+                type: 'message',
+                message: `MiniMax Code is still busy after ${waitedSeconds} seconds. Your message is still queued and goes out on its own as soon as the session frees up. If nothing is running, close any leftover MiniMax Code process, or start a new session.`
+            });
+        }
+    }
+
+    /**
+     * Puts the user message in the terminal transcript, once.
+     *
+     * The message is added before the prompt so it shows up while the agent
+     * works. A turn the agent refused is delivered on a later attempt, and the
+     * retry must not repeat the line.
+     */
+    private showUserMessage(messageBuffer: MessageBuffer, batch: {
+        message: string;
+        items?: Array<{ localId?: string }>;
+    }): void {
+        const localIds = (batch.items ?? [])
+            .map((item) => item.localId)
+            .filter((localId): localId is string => Boolean(localId));
+        const alreadyShown = localIds.length > 0 && localIds.every((localId) => this.displayedLocalIds.has(localId));
+        if (!alreadyShown) {
+            messageBuffer.addMessage(batch.message, 'user');
+        }
+        for (const localId of localIds) {
+            this.displayedLocalIds.add(localId);
+        }
+    }
+
+    /**
+     * Puts a refused batch back into the queue.
+     *
+     * The batch was acknowledged when it left the queue, so a refused turn
+     * would lose the message otherwise. Every item goes back on its own, in
+     * reverse order, so each one keeps its local id (the hub row it belongs
+     * to) and the original order of the messages is restored - the same
+     * restore the claude flavor does when its SDK call fails.
+     *
+     * The batch keeps its shape: an isolated batch (a slash command that has
+     * to run alone) goes back isolated, and an ordinary batch goes back as an
+     * ordinary batch, so the messages are still delivered together.
+     *
+     * The re-queued message lives in this process only: the hub already
+     * marked it as delivered, so a runner that dies while it waits loses it.
+     * The alternative - leaving it unacknowledged in the hub - would change
+     * the delivery contract for every MiniMax Code message.
+     */
+    private requeueRefusedBatch(batch: {
+        message: string;
+        mode: McodeMode;
+        isolate?: boolean;
+        items?: Array<{ message: string; localId?: string }>;
+    }): void {
+        const items = batch.items?.length ? batch.items : [{ message: batch.message }];
+        for (const item of [...items].reverse()) {
+            try {
+                if (batch.isolate) {
+                    this.session.queue.unshiftIsolated(item.message, batch.mode, item.localId);
+                } else {
+                    this.session.queue.unshift(item.message, batch.mode, item.localId);
+                }
+            } catch (error) {
+                logger.warn('[mcode-remote] Failed to re-queue a refused message', error);
+            }
+        }
+        this.busyRefusals += 1;
+        logger.debug('[mcode-remote] Refused turn re-queued', { messages: items.length });
+    }
+
+    /**
+     * Waits before the next attempt at a refused turn.
+     *
+     * The lease the agent holds is released when the other turn ends, which
+     * can take a while - a background task can hold the session for minutes.
+     * The wait grows with the number of refusals so a long-running turn does
+     * not turn into a prompt-per-second loop.
+     */
+    private async waitBeforeRetry(signal: AbortSignal): Promise<void> {
+        const delay = Math.min(
+            MCODE_BUSY_RETRY_BASE_MS * this.busyRefusals,
+            MCODE_BUSY_RETRY_MAX_MS
+        );
+        await new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+                signal.removeEventListener('abort', onAbort);
+                resolve();
+            }, delay);
+            const onAbort = () => {
+                clearTimeout(timer);
+                resolve();
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+        });
     }
 
     /**

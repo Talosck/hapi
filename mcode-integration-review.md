@@ -656,3 +656,58 @@ P0–P4 落地之后，重新做了一次**实施后审计**：把实现逐条�
 | `bun run test:relay` | ✅ 118 passed / 0 failed |
 | **真实 mcode 联调** | ✅ extensions / fork / steer 三个脚本全部通过 |
 | **新增实机探针** | 扩展面、模型 id 编码、config options、模式延迟切换、goal 重复创建的错误形状、prompt+cancel 取消时序 |
+
+## 12. "Session already has an active Turn" —— 定位与修复
+
+### 12.1 现象
+
+用户在 web 里发消息，聊天里冒出一条：
+
+```
+MiniMax Code prompt failed: Internal error: MiniMax Code Runtime failed: Session already has an active Turn. Use queue send to deliver the message after it.
+```
+
+用户必须把同样的话再发一遍才生效。
+
+### 12.2 根因（实机证据链）
+
+1. **agent 侧**：MiniMax Code 给每个 native session 一把"轮次租约"（`local_runtime_session_locks`，`owner_kind='turn'`，`owner_id='turn-lease:<pid>:<uuid>.<uuid>'`）。持有租约期间再来一个 `session/prompt`，直接被拒，并让调用方"之后用 queue send 补发"。
+2. **时间线对齐**（`~/.hapi/logs/2026-10-22-07-59-30-pid-735953.log` + agent 的 `local_runtime_turn_ingress` 台账）：
+
+   | UTC 时刻 | 事件 |
+   |---|---|
+   | 00:26:46.366 | 一个 `source: background-task` 的轮次开始（`client_request_id: bg_c8b63d6e-…`，即 HAPI 自己派出的后台子代理任务），占用同一 native session 的租约 |
+   | 00:29:03.076 | 用户消息被取走 → `prompt failed: … active Turn`（**第 1 次拒绝**） |
+   | 00:29:26.639 | 用户重发 → 再次 `prompt failed`（**第 2 次拒绝**） |
+   | 00:29:29.920 | 后台轮次结束，租约释放 |
+   | 00:29:43.582 | 用户第 3 次发送 → **4ms 后轮次就被接受** |
+
+   也就是说：**refuse 的是"轮次还没结束"，不是消息本身**；后台子代理任务跑在同一 native session 上，前台消息撞进这个窗口就被拒。
+3. **另一个触发条件**：两个存活的 ACP 客户端挂在同一个 native session 上（本地 TUI、第二个 runner）同样触发——已用两个 `mcode acp` 进程实机复现，错误串完全一致。
+4. **同一族的另外两种拒绝**：agent 的错误映射里还有 `local_session_compacting`（"Session compaction is active"）和 `local_session_mutating`（"Session conversation is being changed"），都是 409、都会随 agent 做完手上的事而结束，属于同一类"临时拒绝 → 消息丢失"的缺陷，一并纳入修复。
+5. **租约不是"卡死 30 分钟"**：`expires_at_ms = acquired + 30min` 只是上限；agent 另有运行时恢复循环（约 10s 一轮，靠 pid + 进程启动 token 判活）。实测持有者被 `SIGKILL` 后，session 分别在 **31s / 78s** 后恢复，远早于 30 分钟。
+6. **被拒绝的 prompt 不进 transcript**：重试不会让消息在 agent 上下文里出现两次（实测 transcript 里只有 1 条 user + 1 条 assistant）。
+
+### 12.3 修复
+
+`cli/src/mcode/mcodeRemoteLauncher.ts`：把"临时拒绝"从**致命错误**改回**可重试状态**。
+
+- 识别 agent 的三种 409 拒绝（`session already has an active turn` / `session compaction is active` / `session conversation is being changed`）→ 把被拒的批次**原样放回队列**（`unshift` 逆序恢复，保住 `isolate` 形态、每条消息的 localId，**并保住用户消息的先后顺序**）→ 退避重试（1s 起，按次数递增，10s 封顶）。
+  - 这里跟 claude flavor 的既有做法对齐（`claudeRemoteLauncher` 在 SDK 调用失败时用 `queue.unshift()` 恢复在途批次）：如果改用"push 到队尾"，被拒的消息会被排在它后面那些消息的**后面**，用户读到的顺序就乱了。
+- 关键是**消息不能再丢**：批次出队时就已经 ack（`onBatchConsumed`），失败不回滚等于用户的话凭空消失——这正是用户当时不得不重发两遍的原因。
+- 用户提示改成可执行的话："MiniMax Code 正忙（它自己跑的任务，或另一个窗口占着这个 session），你的消息已保留，轮次一结束就发出去"，并在一分钟后升级为"仍然很忙"提示。原始 agent 错误串不再直接甩给用户（它指向一个用户够不到的机制）。
+- 等待放在轮次清理**之后**：等待期间 agent 并没有在跑，会话不该显示成 busy（否则会给"Steer"按钮一个不存在的轮次）。
+
+### 12.4 实机验证
+
+| 检查 | 结果 |
+|---|---|
+| launcher 回归测试（新增 5 个用例） | ✅ 50 passed；**把实现还原到 HEAD 后两个用例失败**（`expected "vi.fn()" to be called 4 times, but got 1 times`）；把 `unshift` 换回 `push`，保序用例失败（`expected "second" to deeply equal "first"`） |
+| 实机重试投递（A 占着轮次，B 用退避重试同一条消息） | ✅ 3 次拒绝后第 4 次被接受（9s），`stopReason: end_turn` |
+| 实机去重（检查 native transcript） | ✅ 只有 1 条 user + 1 条 assistant，被拒的 prompt 零残留 |
+| compaction / 会话变更两种拒绝 | ⚠️ 只做了单测（无法稳定触发实机 compaction）；依据是 agent 自己的 409 错误映射，两者与 busy 同族、同样会随 agent 收工而结束 |
+
+### 12.5 已知限制（未修，说明依据）
+
+重入队的消息只活在 CLI 进程内存里：hub 侧那条消息早已被 ack（`markMessagesInvoked` 只作用于 `invoked_at IS NULL` 的行），CLI 在等待期间被杀掉就会丢。彻底解决要把 ack 推迟到"agent 接受轮次"之后——`agy` flavor 已经是这个模型（`acknowledgeMessagesOnDequeue: false` + 手动 `emitMessagesConsumed`）——但那会改动 MiniMax Code **所有**消息的投递契约（hub 的排队浮条、取消语义、seq 回填都要跟着核），不属于本次修复范围，故留作后续项而不是顺手改掉。
+
