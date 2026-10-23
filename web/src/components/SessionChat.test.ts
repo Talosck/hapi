@@ -16,6 +16,7 @@ import {
     shouldClearReasoningEffortForModelChange,
     shouldRouteToScratchlist,
     isRewindForkFallbackError,
+    spendsMiniMaxAccount,
 } from './SessionChat'
 import { ApiError } from '@/api/client'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
@@ -165,6 +166,33 @@ describe('resolvePiContextWindow', () => {
 
     it('falls back to the legacy model id when selected-model metadata is absent', () => {
         expect(resolvePiContextWindow(models, undefined, 'shared-model')).toBe(100_000)
+    })
+})
+
+describe('spendsMiniMaxAccount', () => {
+    it('counts every MiniMax Code session', () => {
+        expect(spendsMiniMaxAccount('mcode', null, 'm:minimax:MiniMax-M3.1-Flash:v:')).toBe(true)
+    })
+
+    it('counts a Pi session that runs on a MiniMax model', () => {
+        expect(spendsMiniMaxAccount('pi', 'minimax-cn', 'MiniMax-M3.1-Flash')).toBe(true)
+        expect(spendsMiniMaxAccount('pi', 'minimax', 'MiniMax-M3.1-Flash')).toBe(true)
+    })
+
+    it('does not count a Pi session on another provider', () => {
+        expect(spendsMiniMaxAccount('pi', 'anthropic', 'claude-sonnet-4')).toBe(false)
+        expect(spendsMiniMaxAccount('pi', 'opencode', 'gpt-4o')).toBe(false)
+    })
+
+    it('falls back to the model id when the provider is not known yet', () => {
+        expect(spendsMiniMaxAccount('pi', null, 'MiniMax-M3.1-Flash')).toBe(true)
+        expect(spendsMiniMaxAccount('pi', null, 'claude-sonnet-4')).toBe(false)
+    })
+
+    it('does not count agents that never spend the account', () => {
+        expect(spendsMiniMaxAccount('claude', 'anthropic', 'claude-sonnet-4')).toBe(false)
+        expect(spendsMiniMaxAccount('codex', 'openai', 'gpt-5')).toBe(false)
+        expect(spendsMiniMaxAccount(null, null, null)).toBe(false)
     })
 })
 

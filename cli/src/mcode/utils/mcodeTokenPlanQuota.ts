@@ -1,0 +1,389 @@
+import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { connect } from 'node:net'
+import { isObject } from '@hapi/protocol'
+import { logger } from '@/ui/logger'
+import {
+    discoverMcodeConnectorBrokers,
+    findMcodeRegion,
+    type McodeConnectorBroker
+} from './mcodeConnectorTools'
+
+/**
+ * The usage the MiniMax Code account has left.
+ *
+ * The account's coding models share a five hour window, and that is the one
+ * worth showing - the weekly and the video windows are not interesting enough
+ * to put in front of the user.
+ *
+ * The account token never leaves the host that owns it: the host hands out a
+ * short lease over its broker socket instead, and only the numbers of the
+ * quota are reported from here. The lease is spent on a single request and
+ * dropped.
+ */
+
+/** One window of the account's usage. */
+export type McodeQuotaWindow = {
+    /** How much of the window is left, in percent. `null` when the account does not say. */
+    remainingPercent: number | null
+    /** When the window resets, in epoch milliseconds. */
+    resetAtMs: number | null
+    /** Whether the window has no limit at all. */
+    unlimited: boolean
+}
+
+export type McodeTokenPlanQuotaResult = {
+    quota: McodeQuotaWindow | null
+    error?: string
+}
+
+/** The version of the lease protocol the host speaks. */
+const LEASE_PROTOCOL_VERSION = 1
+
+/** A frame is a four byte length prefix and the JSON that follows it. */
+const FRAME_PREFIX_BYTES = 4
+const MAX_FRAME_BYTES = 64 * 1024
+
+/**
+ * How long the lease has to be valid for.
+ *
+ * One request is enough, so a minute is plenty - and a short lease cannot be
+ * replayed for long.
+ */
+const LEASE_MIN_VALIDITY_MS = 60_000
+
+const LEASE_TIMEOUT_MS = 5_000
+const QUOTA_TIMEOUT_MS = 10_000
+
+/**
+ * The quota moves slowly and the reset moment is absolute, so the answer is
+ * worth keeping for a minute: a browser tab that polls does not keep the
+ * account's API busy.
+ */
+const QUOTA_TTL_MS = 60_000
+
+/** Where the account's quota lives. One backend per region. */
+const QUOTA_PATH = '/v1/api/openplatform/coding_plan/remains'
+const QUOTA_BASES: Record<string, string> = {
+    cn: 'https://www.minimaxi.com',
+    en: 'https://platform.minimax.io'
+}
+
+let cachedQuota: { expiresAtMs: number; result: McodeTokenPlanQuotaResult } | null = null
+
+/** Encodes one frame of the lease protocol. */
+function encodeLeaseFrame(value: unknown): Uint8Array {
+    const payload = new TextEncoder().encode(JSON.stringify(value))
+    if (payload.length === 0 || payload.length > MAX_FRAME_BYTES) {
+        throw new Error('The lease request does not fit into a frame')
+    }
+    const frame = new Uint8Array(FRAME_PREFIX_BYTES + payload.length)
+    frame[0] = (payload.length >>> 24) & 0xff
+    frame[1] = (payload.length >>> 16) & 0xff
+    frame[2] = (payload.length >>> 8) & 0xff
+    frame[3] = payload.length & 0xff
+    frame.set(payload, FRAME_PREFIX_BYTES)
+    return frame
+}
+
+/** Joins the bytes that are still coming with the ones that are. */
+function concatBytes(first: Uint8Array, second: Uint8Array): Uint8Array {
+    const joined = new Uint8Array(first.length + second.length)
+    joined.set(first, 0)
+    joined.set(second, first.length)
+    return joined
+}
+
+/** Reads the length prefix of a frame. */
+function readUint32BE(bytes: Uint8Array, offset: number): number {
+    return ((bytes[offset] << 24) >>> 0)
+        + (bytes[offset + 1] << 16)
+        + (bytes[offset + 2] << 8)
+        + bytes[offset + 3]
+}
+
+/** Splits the frames the broker sent out of the bytes that are still coming. */
+function decodeLeaseFrames(buffer: Uint8Array): { frames: unknown[]; rest: Uint8Array } {
+    const frames: unknown[] = []
+    let rest = buffer
+    while (rest.length >= FRAME_PREFIX_BYTES) {
+        const payloadLength = readUint32BE(rest, 0)
+        if (payloadLength === 0 || payloadLength > MAX_FRAME_BYTES) {
+            throw new Error('The broker sent a frame that does not fit')
+        }
+        const frameLength = FRAME_PREFIX_BYTES + payloadLength
+        if (rest.length < frameLength) break
+        const payload = rest.subarray(FRAME_PREFIX_BYTES, frameLength)
+        frames.push(JSON.parse(new TextDecoder().decode(payload)))
+        rest = rest.subarray(frameLength)
+    }
+    return { frames, rest }
+}
+
+/**
+ * The capability the broker guards its socket with.
+ *
+ * It is useless without the socket, and the broker only hands it to the
+ * processes of the same user - so reading it here is what the host's own
+ * tools do.
+ */
+async function readCapability(capabilityFile: string): Promise<string> {
+    const secret = (await readFile(capabilityFile, 'utf8')).trim()
+    if (!/^[A-Za-z0-9_-]{43}$/u.test(secret)) {
+        throw new Error('The broker capability is not readable')
+    }
+    return secret
+}
+
+/** The answer of the broker to a lease request. */
+type LeaseResponse = {
+    requestId: string
+    ok: boolean
+    accessToken: string | null
+}
+
+function asLeaseResponse(value: unknown): LeaseResponse | null {
+    if (!isObject(value)) return null
+    const requestId = typeof value.requestId === 'string' ? value.requestId : null
+    if (!requestId) return null
+    const result = isObject(value.result) ? value.result : null
+    const accessToken = result && typeof result.accessToken === 'string' ? result.accessToken : null
+    return { requestId, ok: value.ok === true, accessToken }
+}
+
+/**
+ * Asks the broker of a running host for a short lease.
+ *
+ * The lease is the only way to reach the account's API from outside the host:
+ * the account token stays in the host, and what comes back is a token the host
+ * vouches for. The caller spends it and drops it.
+ */
+export async function requestMcodeAuthLease(
+    broker: McodeConnectorBroker,
+    options: { timeoutMs?: number } = {}
+): Promise<string> {
+    const timeoutMs = options.timeoutMs ?? LEASE_TIMEOUT_MS
+    const capability = await readCapability(broker.capabilityFile)
+    const requestId = randomUUID()
+    const frame = encodeLeaseFrame({
+        version: LEASE_PROTOCOL_VERSION,
+        requestId,
+        capability,
+        method: 'lease',
+        minValidityMs: LEASE_MIN_VALIDITY_MS
+    })
+
+    return await new Promise<string>((resolve, reject) => {
+        const socket = connect(broker.endpoint)
+        let buffer: Uint8Array = new Uint8Array(0)
+        let settled = false
+
+        const finish = (error: Error | null, token?: string): void => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            socket.destroy()
+            if (error) reject(error)
+            else resolve(token as string)
+        }
+
+        const timer = setTimeout(() => finish(new Error('The broker did not answer in time')), timeoutMs)
+
+        socket.on('error', (error) => finish(error))
+        socket.on('connect', () => socket.write(frame))
+        socket.on('data', (chunk) => {
+            try {
+                // The broker answers in bytes, but a socket may hand a string
+                // out when it was given an encoding.
+                const bytes = typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk
+                buffer = concatBytes(buffer, bytes)
+                const { frames, rest } = decodeLeaseFrames(buffer)
+                buffer = rest
+                for (const raw of frames) {
+                    const response = asLeaseResponse(raw)
+                    if (!response || response.requestId !== requestId) continue
+                    if (response.ok && response.accessToken) {
+                        finish(null, response.accessToken)
+                        return
+                    }
+                    finish(new Error('The broker refused to hand out a lease'))
+                    return
+                }
+            } catch (error) {
+                finish(error instanceof Error ? error : new Error(String(error)))
+            }
+        })
+    })
+}
+
+function readNumber(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * The share of a window that is left.
+ *
+ * The platform reports it as a percentage. When it does not, it is computed
+ * from the counts the platform does report - there the count is what is left
+ * of the window, not what was spent.
+ */
+function shareFromCounts(entry: Record<string, unknown>, prefix: string): number | null {
+    const total = readNumber(entry[`${prefix}_total_count`])
+    const left = readNumber(entry[`${prefix}_usage_count`])
+    if (total === null || total <= 0 || left === null) return null
+    return left / total * 100
+}
+
+/**
+ * The five hour window of the platform's answer.
+ *
+ * A window whose status is 3 has no limit at all, and then the platform's
+ * percentage means nothing.
+ */
+function parseFiveHourWindow(entry: Record<string, unknown>): McodeQuotaWindow {
+    const unlimited = readNumber(entry.current_interval_status) === 3
+    const percent = readNumber(entry.current_interval_remaining_percent)
+        ?? shareFromCounts(entry, 'current_interval')
+    const resetAtMs = readNumber(entry.end_time)
+    return {
+        remainingPercent: unlimited || percent === null
+            ? null
+            : Math.round(Math.min(100, Math.max(0, percent))),
+        resetAtMs: resetAtMs !== null && resetAtMs > 0 ? resetAtMs : null,
+        unlimited
+    }
+}
+
+/**
+ * The five hour window of the account.
+ *
+ * The platform answers with one entry per model, and the first one carries
+ * the coding models - the ones that share the window.
+ */
+export function parseFiveHourQuota(payload: unknown): McodeQuotaWindow | null {
+    if (!isObject(payload)) return null
+    const baseResp = isObject(payload.base_resp) ? payload.base_resp : null
+    const statusCode = baseResp ? readNumber(baseResp.status_code) : null
+    if (statusCode !== null && statusCode !== 0) return null
+
+    const entries = Array.isArray(payload.model_remains)
+        ? payload.model_remains.filter((entry): entry is Record<string, unknown> => isObject(entry))
+        : []
+    const general = entries[0]
+    if (!general) return null
+
+    const window = parseFiveHourWindow(general)
+    // A window that says neither how much is left nor when it resets tells
+    // the user nothing.
+    return window.remainingPercent === null && window.resetAtMs === null ? null : window
+}
+
+/** How the account's quota is asked for. */
+export type McodeQuotaFetch = (
+    accessToken: string,
+    base: string
+) => Promise<unknown>
+
+/**
+ * Asks the platform how much of the account's plan is left.
+ *
+ * The token is only ever a header of this one request - it is never written
+ * down, never logged and never leaves this function.
+ */
+export const fetchMcodeQuota: McodeQuotaFetch = async (accessToken, base) => {
+    const response = await fetch(`${base}${QUOTA_PATH}`, {
+        method: 'GET',
+        headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`
+        },
+        signal: AbortSignal.timeout(QUOTA_TIMEOUT_MS)
+    })
+    if (!response.ok) {
+        throw new Error(`The quota request failed with HTTP ${response.status}`)
+    }
+    return await response.json()
+}
+
+function messageOf(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The usage the account has left.
+ *
+ * The lease comes from the host that is running on this machine, and the
+ * account's API is asked with it. A host that is gone, a refused lease and an
+ * unreachable backend all end in an error the caller can report - never in a
+ * made up zero.
+ */
+export async function listMcodeTokenPlanQuota(options?: {
+    /** The brokers to ask. Exposed for tests. */
+    brokers?: McodeConnectorBroker[]
+    /** The region of the account. */
+    region?: string | null
+    env?: NodeJS.ProcessEnv
+    /** How the lease is obtained. Exposed for tests. */
+    requestLease?: (broker: McodeConnectorBroker) => Promise<string>
+    /** How the platform is asked. Exposed for tests. */
+    fetchQuota?: McodeQuotaFetch
+    now?: () => number
+    /** Skip the cache. Exposed for tests. */
+    forceRefresh?: boolean
+}): Promise<McodeTokenPlanQuotaResult> {
+    const now = options?.now ?? Date.now
+    if (!options?.forceRefresh && cachedQuota && cachedQuota.expiresAtMs > now()) {
+        return cachedQuota.result
+    }
+
+    const brokers = options?.brokers ?? discoverMcodeConnectorBrokers()
+    if (brokers.length === 0) {
+        logger.debug('No MiniMax Code host is running, so there is no usage quota to read')
+        return { quota: null, error: 'No MiniMax Code host is running on this machine' }
+    }
+
+    const requestLease = options?.requestLease ?? ((broker: McodeConnectorBroker) => requestMcodeAuthLease(broker))
+    const fetchQuota = options?.fetchQuota ?? fetchMcodeQuota
+    const region = options?.region ?? findMcodeRegion(options?.env ?? process.env)
+    // Two regions mean two accounts, and then only the backend knows which one
+    // this token belongs to.
+    const bases = region && QUOTA_BASES[region] ? [QUOTA_BASES[region]] : Object.values(QUOTA_BASES)
+    let lastError = 'The MiniMax Code broker did not hand out a lease'
+
+    for (const broker of brokers) {
+        let accessToken: string
+        try {
+            accessToken = await requestLease(broker)
+        } catch (error) {
+            lastError = messageOf(error)
+            logger.debug('Failed to get an auth lease from a MiniMax Code broker:', error)
+            continue
+        }
+
+        for (const base of bases) {
+            try {
+                const quota = parseFiveHourQuota(await fetchQuota(accessToken, base))
+                if (!quota) {
+                    lastError = 'The account reported no usage quota'
+                    continue
+                }
+                const result: McodeTokenPlanQuotaResult = { quota }
+                cachedQuota = { expiresAtMs: now() + QUOTA_TTL_MS, result }
+                return result
+            } catch (error) {
+                lastError = messageOf(error)
+                logger.debug('Failed to read the MiniMax Code usage quota:', error)
+            }
+        }
+    }
+
+    // The reason is not part of the answer the clients get - a missing quota
+    // is enough for them - so it goes to the log.
+    logger.debug('Could not read the MiniMax Code usage quota:', lastError)
+    return { quota: null, error: lastError }
+}
+
+/** Drops the cached answer. Exposed for tests. */
+export function _resetMcodeTokenPlanQuotaCacheForTests(): void {
+    cachedQuota = null
+}

@@ -2,10 +2,50 @@ import { describe, expect, it } from 'vitest'
 import {
     formatCompactContextUsageLabel,
     formatContextUsageLabel,
+    formatQuotaLabel,
     getContextWarning,
     getContextUsageDetails,
+    getQuotaWarning,
     shouldShowCodexFastBadge
 } from './StatusBar'
+
+describe('quota label', () => {
+    it('names the window and the share that is left', () => {
+        expect(formatQuotaLabel({ remainingPercent: 98, resetAtMs: 1792720800000, unlimited: false }))
+            .toBe('5h 98%')
+    })
+
+    it('says that a window without a limit has no share', () => {
+        expect(formatQuotaLabel({ remainingPercent: null, resetAtMs: 1792720800000, unlimited: true }))
+            .toBe('5h ∞')
+    })
+
+    it('has a placeholder for a window the account does not report', () => {
+        expect(formatQuotaLabel({ remainingPercent: null, resetAtMs: null, unlimited: false }))
+            .toBe('5h —')
+    })
+})
+
+describe('quota warning colors', () => {
+    it('keeps a window with room left muted', () => {
+        expect(getQuotaWarning(98).color).toBe('text-[var(--app-hint)]')
+        expect(getQuotaWarning(41).color).toBe('text-[var(--app-hint)]')
+    })
+
+    it('warns when the window runs low', () => {
+        expect(getQuotaWarning(40).color).toBe('text-amber-500')
+        expect(getQuotaWarning(21).color).toBe('text-amber-500')
+    })
+
+    it('shows danger when the window is nearly gone', () => {
+        expect(getQuotaWarning(20).color).toBe('text-red-500')
+        expect(getQuotaWarning(1).color).toBe('text-red-500')
+    })
+
+    it('stays muted when the account does not report a share', () => {
+        expect(getQuotaWarning(null).color).toBe('text-[var(--app-hint)]')
+    })
+})
 
 describe('context warning colors', () => {
     it('keeps usage below 70% muted', () => {

@@ -992,10 +992,28 @@ export type McodeConnectorAuth = {
     expiresAt: number | null
 }
 
+/**
+ * One window of the account's usage quota.
+ *
+ * The coding models share a five hour window, and that is the one the panel
+ * shows - the weekly and the video windows are not interesting enough to put
+ * in front of the user.
+ */
+export type McodeQuotaWindow = {
+    /** How much of the window is left, in percent. `null` when the account does not say. */
+    remainingPercent: number | null
+    /** When the window resets, in epoch milliseconds. */
+    resetAtMs: number | null
+    /** Whether the window has no limit at all. */
+    unlimited: boolean
+}
+
 export type McodeAppsResponse = {
     success: boolean
     apps?: McodeConnectorApp[]
     auth?: McodeConnectorAuth
+    /** The usage the account has left. Missing when it could not be read. */
+    quota?: McodeQuotaWindow | null
     error?: string
 }
 /**

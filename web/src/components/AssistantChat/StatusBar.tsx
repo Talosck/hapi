@@ -6,10 +6,11 @@ import {
 } from '@hapi/protocol'
 import type { PermissionModeTone } from '@hapi/protocol'
 import * as Popover from '@radix-ui/react-popover'
-import { useMemo } from 'react'
-import type { AgentState, CodexCollaborationMode, PermissionMode } from '@/types/api'
+import { useEffect, useMemo, useState } from 'react'
+import type { AgentState, CodexCollaborationMode, McodeQuotaWindow, PermissionMode } from '@/types/api'
 import type { ConversationStatus } from '@/realtime/types'
 import { getContextBudgetTokens } from '@/chat/modelConfig'
+import { formatDuration } from '@/chat/presentation'
 import { permissionModeLabelForAgent } from '@/lib/permissionModeLabels'
 import {
     formatReasoningLabel,
@@ -196,6 +197,64 @@ export function shouldShowCodexFastBadge(
     return agentFlavor === 'codex' && isFastServiceTier(serviceTier)
 }
 
+/**
+ * The label of the account's five hour window.
+ *
+ * Short on purpose: it sits next to the context usage, which is short too.
+ * The agent words it the same way.
+ */
+export function formatQuotaLabel(quota: McodeQuotaWindow): string {
+    if (quota.unlimited) return '5h ∞'
+    if (quota.remainingPercent === null) return '5h —'
+    return `5h ${quota.remainingPercent}%`
+}
+
+/**
+ * The color of the quota label.
+ *
+ * The window is the one that runs out: a low share has to be visible at a
+ * glance, the same way a full context window is.
+ */
+export function getQuotaWarning(remainingPercent: number | null): { color: string } {
+    if (remainingPercent === null) return { color: 'text-[var(--app-hint)]' }
+    if (remainingPercent <= 20) return { color: 'text-red-500' }
+    if (remainingPercent <= 40) return { color: 'text-amber-500' }
+    return { color: 'text-[var(--app-hint)]' }
+}
+
+/**
+ * The details of the five hour window.
+ *
+ * The countdown only has to move while this is open - the label next to the
+ * context usage carries the share, not the time.
+ */
+function QuotaDetails(props: { quota: McodeQuotaWindow }) {
+    const [now, setNow] = useState(() => Date.now())
+    useEffect(() => {
+        const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+        return () => window.clearInterval(timer)
+    }, [])
+
+    const left = props.quota.resetAtMs === null ? null : props.quota.resetAtMs - now
+
+    return (
+        <div className="flex max-w-[min(22rem,calc(100vw-1rem))] flex-col gap-1 text-xs leading-tight text-[var(--app-fg)]">
+            <span className="break-words">
+                {props.quota.unlimited
+                    ? 'unlimited'
+                    : props.quota.remainingPercent !== null
+                        ? `${props.quota.remainingPercent}% left`
+                        : 'usage unknown'}
+            </span>
+            {left !== null ? (
+                <span className="break-words">
+                    {left <= 0 ? 'reset pending' : `resets in ${formatDuration(left)}`}
+                </span>
+            ) : null}
+        </div>
+    )
+}
+
 export function StatusBar(props: {
     active: boolean
     thinking: boolean
@@ -220,6 +279,13 @@ export function StatusBar(props: {
     copilotAgentMode?: import('@hapi/protocol').CopilotAgentMode
     agentFlavor?: string | null
     voiceStatus?: ConversationStatus
+    /**
+     * What is left of the account's five hour window.
+     *
+     * Shown next to the context usage: both are "how much room is left", and
+     * the agent shows its own the same way.
+     */
+    quota?: McodeQuotaWindow | null
 }) {
     const { t } = useTranslation()
     const { preferences: headerMetadata } = useSessionHeaderMetadata()
@@ -297,6 +363,8 @@ export function StatusBar(props: {
         ? formatCompactReasoningLabel(reasoningEffort)
         : null
     const codexFastMode = shouldShowCodexFastBadge(props.agentFlavor, props.serviceTier)
+    const quotaLabel = props.quota ? formatQuotaLabel(props.quota) : null
+    const quotaColor = props.quota ? getQuotaWarning(props.quota.remainingPercent).color : null
 
     return (
         <div className="flex min-w-0 items-baseline justify-between gap-2 px-2 pb-1">
@@ -365,6 +433,30 @@ export function StatusBar(props: {
                                         </span>
                                     ) : null}
                                 </div>
+                            </Popover.Content>
+                        </Popover.Portal>
+                    </Popover.Root>
+                ) : null}
+                {props.quota ? (
+                    <Popover.Root>
+                        <Popover.Trigger asChild>
+                            <button
+                                type="button"
+                                aria-label="5-hour usage"
+                                className={`min-w-0 cursor-pointer whitespace-nowrap rounded-sm bg-transparent p-0 text-[10px] leading-4 outline-none focus-visible:ring-1 focus-visible:ring-[var(--app-link)] ${quotaColor}`}
+                            >
+                                {quotaLabel}
+                            </button>
+                        </Popover.Trigger>
+                        <Popover.Portal>
+                            <Popover.Content
+                                side="top"
+                                align="start"
+                                sideOffset={6}
+                                collisionPadding={8}
+                                className="z-50 rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 shadow-lg"
+                            >
+                                <QuotaDetails quota={props.quota} />
                             </Popover.Content>
                         </Popover.Portal>
                     </Popover.Root>

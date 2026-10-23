@@ -30,7 +30,7 @@ import {
 } from '@/components/AssistantChat/RichComposerInput'
 import { useFue } from '@/lib/use-fue'
 import { FueCallout, FueDot } from '@/components/Fue'
-import type { AgentState, CodexCollaborationMode, PermissionMode, PiModelSummary } from '@/types/api'
+import type { AgentState, CodexCollaborationMode, McodeQuotaWindow, PermissionMode, PiModelSummary } from '@/types/api'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import type { ConversationStatus } from '@/realtime/types'
 import { useActiveWord } from '@/hooks/useActiveWord'
@@ -307,6 +307,8 @@ export function HappyComposer(props: {
     contextWindow?: number | null
     /** Model for the context-window heuristic; see StatusBar.contextModel. */
     contextModel?: string | null
+    /** What is left of the account's five hour window; see StatusBar.quota. */
+    quota?: McodeQuotaWindow | null
     controlledByUser?: boolean
     concurrentClients?: boolean
     agentFlavor?: string | null
@@ -416,6 +418,7 @@ export function HappyComposer(props: {
         contextCacheRead,
         contextWindow,
         contextModel,
+        quota,
         controlledByUser = false,
         concurrentClients = false,
         agentFlavor,
@@ -2230,6 +2233,7 @@ export function HappyComposer(props: {
                         copilotAgentMode={copilotAgentMode}
                         agentFlavor={agentFlavor}
                         voiceStatus={effectiveVoiceStatus}
+                        quota={quota}
                     />
 
                     {dictationActive && dictation.partialTranscript ? (

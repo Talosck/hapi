@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
-import type { McodeConnectorApp, McodeConnectorAuth } from '@/types/api'
+import type { McodeConnectorApp, McodeConnectorAuth, McodeQuotaWindow } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 
 /**
@@ -25,6 +25,7 @@ export function useMcodeApps(args: {
 }): {
     apps: McodeConnectorApp[]
     auth: McodeConnectorAuth | null
+    quota: McodeQuotaWindow | null
     isLoading: boolean
     error: string | null
 } {
@@ -56,6 +57,7 @@ export function useMcodeApps(args: {
     return {
         apps: query.data?.apps ?? [],
         auth: query.data?.auth ?? null,
+        quota: query.data?.quota ?? null,
         isLoading: query.isLoading,
         error: query.data?.success === false
             ? (query.data.error ?? 'Failed to load the MiniMax Code apps')

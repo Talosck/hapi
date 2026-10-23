@@ -35,6 +35,7 @@ export type {
     McodeConnectorApp,
     McodeConnectorTool,
     McodeConnectorAuth,
+    McodeQuotaWindow,
     McodeGoalResponse,
     McodeGoalState,
     McodeGoalClearResponse,

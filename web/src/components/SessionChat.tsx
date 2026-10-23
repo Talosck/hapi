@@ -168,6 +168,28 @@ export function isRewindForkFallbackError(error: unknown): boolean {
     return error instanceof ApiError && error.code === 'ambiguous_native_boundary_fork_safe'
 }
 
+/**
+ * Whether a session spends the MiniMax account.
+ *
+ * The five hour window belongs to the account, not to the agent: MiniMax Code
+ * only ever talks to MiniMax, and a Pi session spends the very same account
+ * when it runs on a MiniMax model. Pi can talk to many providers, and only
+ * the MiniMax ones share the coding plan - so a Pi session on another
+ * provider must not show the account's usage.
+ */
+export function spendsMiniMaxAccount(
+    flavor: string | null | undefined,
+    provider: string | null | undefined,
+    model: string | null | undefined
+): boolean {
+    if (flavor === 'mcode') return true
+    if (flavor !== 'pi') return false
+    // The provider decides. The model id is the fallback for a session that
+    // has not reported its provider yet.
+    if (provider) return /^minimax/i.test(provider)
+    return typeof model === 'string' && /^minimax/i.test(model)
+}
+
 export function resolvePiContextWindow(
     models: PiModelSummary[] | undefined,
     selectedModel: { provider: string; modelId: string } | null | undefined,
@@ -1517,21 +1539,50 @@ function SessionChatInner(props: SessionChatProps) {
     const mcodeApps = useMcodeApps({
         api: props.api,
         machineId: props.session.metadata?.machineId,
-        enabled: props.session.metadata?.flavor === 'mcode'
+        // The usage of the MiniMax account is machine level: a Pi session
+        // that runs on a MiniMax model spends the same account as MiniMax
+        // Code does. The apps below stay MiniMax Code's own, so a Pi session
+        // on another provider has nothing to ask for.
+        enabled: spendsMiniMaxAccount(agentFlavor, piSelectedModel?.provider, props.session.model)
     })
 
     // Only an MiniMax Code session has apps to report, and only a machine
     // that answered has a list to show.
     const mcodeAppsState = useMemo(() => {
-        if (props.session.metadata?.flavor !== 'mcode') return null
+        if (agentFlavor !== 'mcode') return null
         if (mcodeApps.isLoading) return null
-        return { apps: mcodeApps.apps, auth: mcodeApps.auth, error: mcodeApps.error }
+        return {
+            apps: mcodeApps.apps,
+            auth: mcodeApps.auth,
+            error: mcodeApps.error
+        }
     }, [
-        props.session.metadata?.flavor,
+        agentFlavor,
         mcodeApps.isLoading,
         mcodeApps.apps,
         mcodeApps.auth,
         mcodeApps.error
+    ])
+
+    /**
+     * The usage of the MiniMax account.
+     *
+     * Shown where the account is actually spent: every MiniMax Code session,
+     * and a Pi session that runs on a MiniMax model. It rides along with the
+     * context usage in the status bar.
+     */
+    const miniMaxUsageState = useMemo(() => {
+        if (!spendsMiniMaxAccount(agentFlavor, piSelectedModel?.provider, props.session.model)) return null
+        if (mcodeApps.isLoading) return null
+        return {
+            quota: mcodeApps.quota
+        }
+    }, [
+        agentFlavor,
+        piSelectedModel?.provider,
+        props.session.model,
+        mcodeApps.isLoading,
+        mcodeApps.quota
     ])
 
     const sessionStatus = useMemo(
@@ -2279,6 +2330,7 @@ function SessionChatInner(props: SessionChatProps) {
                         contextCacheRead={reduced.latestUsage?.cacheRead}
                         contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}
                         contextModel={reduced.latestUsage?.model ?? props.session.model}
+                        quota={miniMaxUsageState?.quota ?? null}
                         controlledByUser={controlledByUser}
                         onCollaborationModeChange={
                             codexCollaborationModeSupported && props.session.active && !controlledByUser
