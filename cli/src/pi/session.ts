@@ -1,8 +1,20 @@
 import type { ApiClient, ApiSessionClient } from '@/lib';
 import type { Metadata } from '@/api/types';
-import type { PiCommandSummary, PiThinkingLevel } from './types';
+import type { PiCommandSummary, PiInputDisposition, PiPromptDispatch, PiThinkingLevel } from './types';
 import type { PiModelSummary } from '@hapi/protocol/apiTypes';
 import type { PiRpcResolver } from './loop';
+
+    /**
+     * Cap on the shell output streamed to the web while a command runs.
+     *
+     * Pi streams every chunk of a command's output without a limit (only the
+     * final result is capped), so without this a chatty command would push an
+     * unbounded amount of output through the hub. The live preview stops at
+     * the cap; the final card still carries Pi's own truncated output.
+     */
+    const PI_BASH_STREAM_LIMIT_CHARS = 32 * 1024;
+    /** How much new output has to arrive before the preview is refreshed. */
+    const PI_BASH_PREVIEW_STEP_CHARS = 4 * 1024;
 
 /**
  * The parts of `get_state` which must move atomically with a native session
@@ -15,6 +27,15 @@ export type PiNativeRuntimeState = {
     thinkingLevel?: PiThinkingLevel | null;
     steeringMode?: 'all' | 'one-at-a-time';
     isStreaming?: boolean;
+    /**
+     * What the active model accepts, as reported by Pi
+     * (`["text"]` or `["text","image"]`).
+     *
+     * Pi silently replaces an image with a text placeholder when the model
+     * cannot read it, so HAPI has to know before it promises the user that
+     * the attachment was sent.
+     */
+    modelInput?: string[];
 };
 
 /**
@@ -67,10 +88,153 @@ export class PiSession {
     private streamingGeneration = 0;
     private promptInFlight = false;
     currentSteeringMode: 'all' | 'one-at-a-time' = 'all';
+    /** What the active model accepts, as reported by Pi's get_state. */
+    private currentModelInput: string[] | undefined;
 
     // Cached data from Pi
     cachedPiModels: PiModelSummary[] = [];
     cachedPiCommands: PiCommandSummary[] = [];
+
+    /**
+     * Ledger of steering messages HAPI handed to Pi, in send order.
+     *
+     * Pi keeps accepted steers in its own queue until the agent delivers them
+     * as a user message. When a turn is aborted, Pi drops the turn but keeps
+     * the queued steers, so they would be replayed into the next turn. The
+     * ledger lets HAPI map the texts Pi reports back to the HAPI rows that
+     * produced them.
+     */
+    private readonly sentSteers: Array<{ text: string; localId?: string }> = [];
+    private static readonly MAX_TRACKED_STEERS = 200;
+
+    /** Record a steering message Pi accepted into its queue. */
+    recordSentSteer(text: string, localId?: string): void {
+        this.sentSteers.push(localId ? { text, localId } : { text });
+        while (this.sentSteers.length > PiSession.MAX_TRACKED_STEERS) {
+            this.sentSteers.shift();
+        }
+    }
+
+    /**
+     * Resolve the messages Pi dropped back to the HAPI rows that sent them.
+     *
+     * Matching is by **position**, not by text: Pi expands prompt templates
+     * and skill commands before it queues a message, so the text it reports
+     * back is not the text HAPI sent. Pi delivers steers in FIFO order, so
+     * the ones it still holds are the most recent ones HAPI sent — Pi's
+     * queue is a suffix of this ledger, and `clear_queue` drops all of it.
+     */
+    resolveDroppedSteers(texts: string[]): Array<{ text: string; localId?: string }> {
+        const count = texts.length;
+        const take = Math.min(count, this.sentSteers.length);
+        const entries = this.sentSteers.splice(this.sentSteers.length - take, take);
+        const dropped: Array<{ text: string; localId?: string }> = [];
+        for (let index = 0; index < count; index++) {
+            const text = texts[index]!;
+            const entry = entries[index];
+            dropped.push(entry ? { text, localId: entry.localId } : { text });
+        }
+        return dropped;
+    }
+
+    /**
+     * The shell commands Pi is currently running, keyed by the RPC id Pi
+     * repeats in its `bash_execution_update` events.
+     *
+     * The streamed chunks only carry the id, so the command text has to be
+     * remembered here to render the output as a Bash card in the web.
+     */
+    private readonly runningBashCommands = new Map<string, string>();
+    /** Streamed output seen so far, per bash command. */
+    private readonly bashStreamText = new Map<string, string>();
+    /** How much of the streamed output was already sent as a preview. */
+    private readonly bashStreamSent = new Map<string, number>();
+    /** Commands whose live preview hit the cap. */
+    private readonly bashStreamTruncated = new Set<string>();
+
+    registerBashCommand(rpcId: string, command: string): void {
+        this.runningBashCommands.set(rpcId, command);
+    }
+
+    getBashCommand(rpcId: string): string | undefined {
+        return this.runningBashCommands.get(rpcId);
+    }
+
+    /**
+     * Record a streamed chunk of a shell command.
+     *
+     * The web replaces the card body with every progress update, so the
+     * preview has to be the whole output seen so far — not just the newest
+     * chunk. Sending that on every chunk would be quadratic, so a preview is
+     * only produced once enough new output arrived.
+     *
+     * Returns the preview to show (null when nothing worth sending yet) and
+     * whether this chunk is the first one past the preview cap.
+     */
+    recordBashStream(rpcId: string, delta: string): { preview: string | null; truncated: boolean } {
+        const text = (this.bashStreamText.get(rpcId) ?? '') + delta;
+        this.bashStreamText.set(rpcId, text);
+
+        if (text.length > PI_BASH_STREAM_LIMIT_CHARS) {
+            const first = !this.bashStreamTruncated.has(rpcId);
+            this.bashStreamTruncated.add(rpcId);
+            return { preview: null, truncated: first };
+        }
+
+        const sent = this.bashStreamSent.get(rpcId) ?? 0;
+        if (text.length - sent < PI_BASH_PREVIEW_STEP_CHARS) {
+            return { preview: null, truncated: false };
+        }
+        this.bashStreamSent.set(rpcId, text.length);
+        return { preview: text, truncated: false };
+    }
+
+    unregisterBashCommand(rpcId: string): void {
+        this.runningBashCommands.delete(rpcId);
+        this.bashStreamText.delete(rpcId);
+        this.bashStreamSent.delete(rpcId);
+        this.bashStreamTruncated.delete(rpcId);
+    }
+
+    /** The id of the shell command Pi is running, if any. */
+    get activeBashRpcId(): string | undefined {
+        for (const id of this.runningBashCommands.keys()) return id;
+        return undefined;
+    }
+
+    /**
+     * The prompt Pi is about to be asked about.
+     *
+     * Pi answers a prompt with the disposition of the accepted input, but the
+     * answer arrives after the message was already handed over, so the text has
+     * to be remembered until the disposition shows up.
+     */
+    private pendingPromptDispatch: PiPromptDispatch | null = null;
+
+    /** Remember the prompt that Pi is about to be asked about. */
+    recordPromptDispatch(dispatch: PiPromptDispatch): void {
+        this.pendingPromptDispatch = dispatch;
+    }
+
+    /**
+     * Take the pending prompt dispatch and apply Pi's disposition.
+     *
+     * - `queued`: Pi parked the message in its own steering queue. It has to
+     *   be tracked like a steer, because an aborted turn would otherwise
+     *   replay it into the next turn.
+     * - `handled`: a Pi extension consumed the message. Pi creates no native
+     *   user entry for it, so the caller has to withdraw the history
+     *   registration.
+     */
+    consumePromptDispatch(disposition: PiInputDisposition | undefined): PiPromptDispatch | null {
+        const pending = this.pendingPromptDispatch;
+        this.pendingPromptDispatch = null;
+        if (!pending) return null;
+        if (disposition === 'queued') {
+            this.recordSentSteer(pending.text, pending.localId);
+        }
+        return pending;
+    }
 
     // RPC resolver — initialized by wireTransportEvents, session-scoped
     rpcResolver: PiRpcResolver | null = null;
@@ -298,6 +462,13 @@ export class PiSession {
         }
         this.expectedNativeSessionId = identity.sessionId;
         this.currentNativeSessionFile = identity.sessionFile;
+        if (identityChanged) {
+            // The new native session has its own (empty) steering queue, so the
+            // ledger of steers sent to the old one no longer lines up with
+            // what Pi holds. Dropping it keeps the positional match in
+            // resolveDroppedSteers() correct.
+            this.sentSteers.length = 0;
+        }
         this.applyNativeRuntimeState(runtime);
         this.updateMetadata((metadata) => {
             let next = metadataUpdater?.({
@@ -348,8 +519,25 @@ export class PiSession {
         if (runtime.provider !== undefined) this.currentProvider = runtime.provider;
         if (runtime.thinkingLevel !== undefined) this.currentThinkingLevel = runtime.thinkingLevel;
         if (runtime.steeringMode !== undefined) this.currentSteeringMode = runtime.steeringMode;
+        if (runtime.modelInput !== undefined) this.currentModelInput = runtime.modelInput;
         if (runtime.isStreaming !== undefined) this.piIsStreaming = runtime.isStreaming;
         this.pushKeepAlive();
+    }
+
+    /**
+     * True when the active model reads images.
+     *
+     * undefined means Pi did not report the model's input capabilities, so the
+     * caller must not claim the model cannot read images.
+     */
+    get currentModelSupportsImages(): boolean | undefined {
+        if (!this.currentModelInput) return undefined;
+        return this.currentModelInput.includes('image');
+    }
+
+    /** Record what the active model accepts, as reported by Pi. */
+    setCurrentModelInput(input: string[]): void {
+        this.currentModelInput = input;
     }
 
     /** Wait for queued metadata writes before exposing a native history result. */

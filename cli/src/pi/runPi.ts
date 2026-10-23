@@ -10,11 +10,12 @@ import { PiTransport } from './piTransport';
 import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
 import { PiSession } from './session';
 import { PiConversationHistory, PiHistoryRestoreError } from './conversationHistory';
-import { parsePiModels, parsePiCommands, PiRpcTimeoutError, sendPiRpcAndWait, wireTransportEvents } from './loop';
+import { parsePiModels, parsePiCommands, PiRpcTimeoutError, piBashMessageId, sendPiRpcAndWait, sendPiRpcAndWaitWithId, wireTransportEvents } from './loop';
 import { convertPiCompactionUsage } from './piEventConverter';
-import { PiThinkingLevelSchema, SetSessionConfigPayloadSchema, PiCompactResultSchema, PiFullSessionStatsSchema } from './schemas';
+import { PiThinkingLevelSchema, SetSessionConfigPayloadSchema, PiBashResultSchema, PiCompactResultSchema, PiFullSessionStatsSchema } from './schemas';
 import type { PiImageContent, PiThinkingLevel } from './types';
 import { parsePiSpecialCommand, parseLeadingSlashName, type PiSpecialCommand } from './specialCommands';
+import { formatPiSessionTree } from './sessionTree';
 import { PiPromptQueue, isPiSpecialQueued, type PiPreparedPrompt } from './promptQueue';
 import { PiSteerDispatcher } from './steerDispatcher';
 import { materializePiTitleExtension } from './titleExtension';
@@ -35,12 +36,18 @@ const PI_ABORT_OPERATION_TIMEOUT_MS = 25_000;
 // Manual compaction runs an LLM summarization pass; give it a generous window
 // far above the 10s default Pi RPC timeout.
 const PI_COMPACT_TIMEOUT_MS = 120_000;
+// A shell command can legitimately run for minutes (builds, test suites), so
+// the bash RPC gets the same generous window as a compaction.
+const PI_BASH_TIMEOUT_MS = 120_000;
 
 const PI_HELP_TEXT = [
     'Supported HAPI Pi commands:',
     '/compact [instructions] — compress conversation history to save context',
     '/session — show session stats (tokens, cost, context usage)',
     '/model [modelId] — show or switch the active model',
+    '/bash <command> — run a shell command and add its output to the conversation',
+    '/tree — show the session entry tree (branches from rewinds and forks)',
+    '/name <name> — rename the session',
     '/help — show this message',
 ].join('\n');
 
@@ -590,6 +597,10 @@ export async function runPi(opts: {
             conversationHistory.registerUserEntry(dequeued.localId);
             pendingLocalIds.push(dequeued.localId);
         }
+        // Remember the prompt until Pi answers with its disposition. A 'queued'
+        // disposition means Pi took the message into its own steering queue,
+        // which an aborted turn has to take back.
+        piSession.recordPromptDispatch({ text: dequeued.message, localId: dequeued.localId });
         transport.send({ id: promptId, type: 'prompt', message: dequeued.message, ...(dequeued.images.length > 0 ? { images: dequeued.images } : {}) });
     };
 
@@ -614,7 +625,10 @@ export async function runPi(opts: {
                 return;
             }
             void sendPiRpcAndWait(piSession, transport, { type: 'abort' }, Math.min(10_000, remainingMs))
-                .then(() => {
+                .then(async () => {
+                    // The late-started turn was aborted as well, so any steer
+                    // it still holds must not survive into the next turn.
+                    await transportEvents?.clearAbandonedQueue();
                     if (activeAbortGuard !== guard) return;
                     guard.compensationConfirmed = true;
                     maybeResolveAbortGuard();
@@ -1007,6 +1021,88 @@ export async function runPi(opts: {
                 }
                 return;
             }
+            case 'bash': {
+                if (!command.command) {
+                    sendEvent('⚠️ Usage: /bash <command>');
+                    return;
+                }
+                // Pi runs the command inside the agent's own runtime (its cwd,
+                // environment and permission model) and adds the output to the
+                // conversation, so the model sees what the command printed on
+                // the next turn.
+                const { id: bashRpcId, result: bashResult } = sendPiRpcAndWaitWithId(
+                    piSession,
+                    transport,
+                    { type: 'bash', command: command.command },
+                    PI_BASH_TIMEOUT_MS,
+                );
+                piSession.registerBashCommand(bashRpcId, command.command);
+                try {
+                    const data = await bashResult;
+                    const parsed = PiBashResultSchema.safeParse(data);
+                    const output = parsed.success ? parsed.data.output : '';
+                    const exitCode = parsed.success ? parsed.data.exitCode : undefined;
+                    const cancelled = parsed.success && parsed.data.cancelled === true;
+                    const messageId = piBashMessageId(bashRpcId);
+                    const toolCall = convertAgentMessage({
+                        type: 'tool_call',
+                        id: messageId,
+                        name: 'Bash',
+                        input: { command: command.command },
+                        status: 'completed',
+                    }, piSession.currentModel);
+                    if (toolCall) piSession.sendAgentMessage(toolCall);
+                    const toolResult = convertAgentMessage({
+                        type: 'tool_result',
+                        id: messageId,
+                        output: output || (cancelled ? 'Command cancelled' : ''),
+                        status: cancelled ? 'failed' : exitCode === 0 || exitCode === undefined ? 'completed' : 'failed',
+                    }, piSession.currentModel);
+                    if (toolResult) piSession.sendAgentMessage(toolResult);
+                    if (cancelled) {
+                        sendEvent('⚠️ Shell command cancelled.');
+                    } else if (exitCode !== undefined && exitCode !== 0) {
+                        sendEvent(`⚠️ Shell command exited with code ${exitCode}.`);
+                    }
+                } catch (error) {
+                    const messageId = piBashMessageId(bashRpcId);
+                    const toolCall = convertAgentMessage({
+                        type: 'tool_call',
+                        id: messageId,
+                        name: 'Bash',
+                        input: { command: command.command },
+                        status: 'failed',
+                    }, piSession.currentModel);
+                    if (toolCall) piSession.sendAgentMessage(toolCall);
+                    sendEvent(`⚠️ Shell command failed: ${errorDetail(error)}`);
+                } finally {
+                    piSession.unregisterBashCommand(bashRpcId);
+                }
+                return;
+            }
+            case 'tree': {
+                try {
+                    const data = await sendPiRpcAndWait(piSession, transport, { type: 'get_tree' });
+                    const tree = formatPiSessionTree(data);
+                    sendEvent(tree || 'This session has no entries yet.');
+                } catch (error) {
+                    sendEvent(`⚠️ Could not read the Pi session tree: ${errorDetail(error)}`);
+                }
+                return;
+            }
+            case 'name': {
+                if (!command.name) {
+                    sendEvent('⚠️ Usage: /name <name>');
+                    return;
+                }
+                try {
+                    await sendPiRpcAndWait(piSession, transport, { type: 'set_session_name', name: command.name });
+                    sendEvent(`Session renamed to "${command.name}".`);
+                } catch (error) {
+                    sendEvent(`⚠️ Could not rename the Pi session: ${errorDetail(error)}`);
+                }
+                return;
+            }
             case 'compact': {
                 // A compaction run can take minutes without any Pi streaming
                 // event, so mark the session as thinking for the duration;
@@ -1099,7 +1195,7 @@ export async function runPi(opts: {
                 return;
             }
             case 'unsupported':
-                sendEvent(`⚠️ /${command.name} is a Pi terminal-only command and cannot run from HAPI web. Supported here: /compact, /session, /model, /help.`);
+                sendEvent(`⚠️ /${command.name} is a Pi terminal-only command and cannot run from HAPI web. Supported here: /compact, /session, /model, /bash, /tree, /name, /help.`);
                 return;
         }
     };
@@ -1174,6 +1270,16 @@ export async function runPi(opts: {
             }
             for (const imageReadError of prepared.imageReadErrors) {
                 piSession.sendSessionEvent({ type: 'message', message: imageReadError });
+            }
+            // Pi silently replaces an image with the text placeholder
+            // "(image omitted: model does not support images)" when the active
+            // model cannot read it. The user would see the attachment accepted
+            // and never learn that the model never saw it, so say it here.
+            if (prepared.images.length > 0 && piSession.currentModelSupportsImages === false) {
+                piSession.sendSessionEvent({
+                    type: 'message',
+                    message: `⚠️ The active model (${piSession.currentModel ?? 'unknown'}) cannot read images — ${prepared.images.length} attachment${prepared.images.length === 1 ? '' : 's'} will be sent as text placeholders.`,
+                });
             }
             if (!prepared.message.trim() && prepared.images.length === 0) {
                 // An image-only prompt can lose every image during asynchronous
@@ -1279,7 +1385,11 @@ export async function runPi(opts: {
         transportEvents?.cancelPendingExtensionUi('Pi prompt aborted', { sendResponse: true });
         const abortedLocalId = activePromptLocalId;
         const hadActivePrompt = promptCommandInFlight;
-        const hadNativeWork = hadActivePrompt || piSession.piIsStreaming;
+        // A running shell command is native work too: the turn abort does not
+        // stop it, so the abort has to reach Pi to cancel it.
+        const hadNativeWork = hadActivePrompt
+            || piSession.piIsStreaming
+            || piSession.activeBashRpcId !== undefined;
         const abortBoundary = hadActivePrompt ? createAbortGuard(deadlineAt) : null;
         if (abortBoundary) {
             activeAbortGuard = abortBoundary.guard;
@@ -1334,6 +1444,36 @@ export async function runPi(opts: {
                         Math.min(10_000, remainingMs),
                     );
                     firstAbortConfirmed = true;
+                    // A shell command Pi is running is not part of the agent
+                    // turn, so the turn abort does not stop it. Cancel it
+                    // explicitly, otherwise it keeps running unattended.
+                    const bashRpcId = piSession.activeBashRpcId;
+                    if (bashRpcId !== undefined) {
+                        try {
+                            // The abort RPC above already consumed part of the
+                            // deadline, so the remaining time has to be
+                            // recomputed — a stale value could be negative and
+                            // would make this RPC time out before it is sent.
+                            const bashRemainingMs = Math.floor(deadlineAt - Date.now());
+                            if (bashRemainingMs > 0) {
+                                await sendPiRpcAndWait(
+                                    piSession,
+                                    transport,
+                                    { type: 'abort_bash' },
+                                    Math.min(5_000, bashRemainingMs),
+                                );
+                            }
+                        } catch (error) {
+                            logger.debug(`[pi] abort_bash failed: ${error instanceof Error ? error.message : String(error)}`);
+                        }
+                    }
+                    // Pi's abort stops the turn but keeps its steering queue, so
+                    // an accepted steer that was never delivered would be
+                    // replayed into the next turn as a fresh user message.
+                    // Clear the queue while the runtime mutation lease is still
+                    // held: the next prompt must not start before the abandoned
+                    // steers are gone.
+                    await transportEvents?.clearAbandonedQueue();
                 }
                 if (abortBoundary) await abortBoundary.promise;
                 // Invalidate the aborted turn while still holding the runtime

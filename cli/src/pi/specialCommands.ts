@@ -13,8 +13,6 @@ export const PI_TERMINAL_ONLY_COMMANDS = [
     'settings',
     'resume',
     'new',
-    'name',
-    'tree',
     'trust',
     'fork',
     'clone',
@@ -34,6 +32,9 @@ export type PiSpecialCommand =
     | { type: 'compact'; instructions?: string }
     | { type: 'session' }
     | { type: 'model'; modelId?: string }
+    | { type: 'bash'; command: string }
+    | { type: 'tree' }
+    | { type: 'name'; name: string }
     | { type: 'help' }
     | { type: 'unsupported'; name: string };
 
@@ -76,6 +77,16 @@ export function parsePiSpecialCommand(message: string): PiSpecialCommand | null 
             return { type: 'session' };
         case 'model':
             return { type: 'model', ...(args ? { modelId: args } : {}) };
+        case 'bash':
+            // An empty command is reported by the executor, which knows how to
+            // explain the usage — it is not a terminal-only command.
+            return { type: 'bash', command: args };
+        case 'tree':
+            return { type: 'tree' };
+        case 'name':
+            // An empty name is reported by the executor, which knows how to
+            // explain the usage — it is not a terminal-only command.
+            return { type: 'name', name: args };
         case 'help':
             return { type: 'help' };
         default:

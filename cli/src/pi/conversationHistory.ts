@@ -99,6 +99,10 @@ function readState(data: unknown): PiState {
     const thinkingLevel = asString(state?.thinkingLevel)
     const hasModelId = model !== null && ('id' in model || 'modelId' in model)
     const hasProvider = model !== null && 'provider' in model
+    // Pi reports what the active model accepts, e.g. ["text","image"].
+    const modelInput = Array.isArray(model?.input)
+        ? model.input.filter((entry): entry is string => typeof entry === 'string')
+        : undefined
     return {
         sessionId,
         sessionFile,
@@ -112,6 +116,7 @@ function readState(data: unknown): PiState {
                 ? state.steeringMode
                 : undefined,
             isStreaming: typeof state?.isStreaming === 'boolean' ? state.isStreaming : undefined,
+            ...(modelInput && modelInput.length > 0 ? { modelInput } : {}),
         },
     }
 }

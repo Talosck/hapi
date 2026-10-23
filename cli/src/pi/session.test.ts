@@ -307,3 +307,154 @@ describe('PiSession native runtime reconciliation', () => {
         expect(session.currentProvider).toBe('new-provider');
     });
 });
+
+// --- Abandoned steering ledger ---
+//
+// Pi keeps accepted steers in its own queue until the agent delivers them as
+// a user message. When a turn is aborted the queue survives, so HAPI tracks
+// what it sent in order to map Pi's "dropped" report back to its own rows.
+
+describe('PiSession abandoned steering ledger', () => {
+    it('resolves a dropped steer back to the row that sent it', () => {
+        const session = createMockSession();
+        session.recordSentSteer('first', 'local-1');
+        session.recordSentSteer('second', 'local-2');
+
+        expect(session.resolveDroppedSteers(['second'])).toEqual([
+            { text: 'second', localId: 'local-2' },
+        ]);
+    });
+
+    it('resolves an undelivered steer to the newest row with that text', () => {
+        const session = createMockSession();
+        session.recordSentSteer('same', 'local-1');
+        session.recordSentSteer('same', 'local-2');
+
+        // Pi delivers steers FIFO, so an undelivered "same" is the newest one.
+        expect(session.resolveDroppedSteers(['same'])).toEqual([
+            { text: 'same', localId: 'local-2' },
+        ]);
+    });
+
+    it('reports an unknown dropped steer without a local id', () => {
+        const session = createMockSession();
+        expect(session.resolveDroppedSteers(['unknown'])).toEqual([{ text: 'unknown' }]);
+    });
+
+    it('does not resolve the same dropped steer twice', () => {
+        const session = createMockSession();
+        session.recordSentSteer('once', 'local-1');
+
+        expect(session.resolveDroppedSteers(['once'])).toEqual([{ text: 'once', localId: 'local-1' }]);
+        expect(session.resolveDroppedSteers(['once'])).toEqual([{ text: 'once' }]);
+    });
+});
+
+describe('PiSession prompt disposition', () => {
+    it('tracks a queued prompt as a steer so an abort can take it back', () => {
+        const session = createMockSession();
+        session.recordPromptDispatch({ text: 'queued prompt', localId: 'local-1' });
+
+        const dispatch = session.consumePromptDispatch('queued');
+        expect(dispatch).toEqual({ text: 'queued prompt', localId: 'local-1' });
+
+        session.resolveDroppedSteers(['queued prompt']);
+        expect(session.resolveDroppedSteers(['queued prompt'])).toEqual([{ text: 'queued prompt' }]);
+    });
+
+    it('does not track a started prompt as a steer', () => {
+        const session = createMockSession();
+        session.recordPromptDispatch({ text: 'started prompt', localId: 'local-1' });
+
+        expect(session.consumePromptDispatch('started')).toEqual({
+            text: 'started prompt',
+            localId: 'local-1',
+        });
+        expect(session.resolveDroppedSteers(['started prompt'])).toEqual([{ text: 'started prompt' }]);
+    });
+
+    it('returns the dispatch for a prompt a Pi extension handled', () => {
+        const session = createMockSession();
+        session.recordPromptDispatch({ text: 'extension prompt', localId: 'local-1' });
+
+        expect(session.consumePromptDispatch('handled')).toEqual({
+            text: 'extension prompt',
+            localId: 'local-1',
+        });
+    });
+
+    it('reports no dispatch when Pi never dispositioned a prompt', () => {
+        const session = createMockSession();
+        expect(session.consumePromptDispatch(undefined)).toBeNull();
+    });
+});
+
+describe('PiSession bash output stream cap', () => {
+    it('holds back the preview until enough new output arrived', () => {
+        const session = createMockSession();
+        // The web replaces the card body on every update, so a preview is the
+        // whole output so far — and it is only sent once it grew enough.
+        expect(session.recordBashStream('b1', 'a'.repeat(10))).toEqual({ preview: null, truncated: false });
+        const preview = session.recordBashStream('b1', 'b'.repeat(8 * 1024));
+        expect(preview.preview).not.toBeNull();
+        expect(preview.preview!.length).toBeGreaterThan(8 * 1024);
+        expect(preview.truncated).toBe(false);
+    });
+
+    it('reports the cut-off once when the preview cap is crossed', () => {
+        const session = createMockSession();
+        const first = session.recordBashStream('b1', 'x'.repeat(40 * 1024));
+        expect(first.preview).toBeNull();
+        expect(first.truncated).toBe(true);
+
+        const second = session.recordBashStream('b1', 'y'.repeat(10));
+        expect(second.preview).toBeNull();
+        expect(second.truncated).toBe(false);
+    });
+
+    it('forgets the stream state when the command ends', () => {
+        const session = createMockSession();
+        session.recordBashStream('b1', 'x'.repeat(40 * 1024));
+        session.unregisterBashCommand('b1');
+        expect(session.recordBashStream('b1', 'z'.repeat(8 * 1024)).preview).not.toBeNull();
+    });
+});
+
+describe('PiSession dropped steer resolution', () => {
+    it('resolves by position even when Pi expanded the text', () => {
+        const session = createMockSession();
+        session.recordSentSteer('/skill:deploy raw text', 'local-1');
+
+        // Pi expands prompt templates and skill commands before it queues the
+        // message, so the text it reports back is not the text HAPI sent.
+        expect(session.resolveDroppedSteers(['<expanded deploy skill> raw text'])).toEqual([
+            { text: '<expanded deploy skill> raw text', localId: 'local-1' },
+        ]);
+    });
+
+    it('takes the most recent steers, since Pi delivers in FIFO order', () => {
+        const session = createMockSession();
+        session.recordSentSteer('first', 'local-1');
+        session.recordSentSteer('second', 'local-2');
+        session.recordSentSteer('third', 'local-3');
+
+        // "first" was already delivered, so Pi still holds the last two.
+        expect(session.resolveDroppedSteers(['second', 'third'])).toEqual([
+            { text: 'second', localId: 'local-2' },
+            { text: 'third', localId: 'local-3' },
+        ]);
+    });
+
+    it('reports messages it cannot attribute to a row', () => {
+        const session = createMockSession();
+        expect(session.resolveDroppedSteers(['unknown'])).toEqual([{ text: 'unknown' }]);
+    });
+
+    it('does not resolve the same dropped steer twice', () => {
+        const session = createMockSession();
+        session.recordSentSteer('once', 'local-1');
+
+        expect(session.resolveDroppedSteers(['once'])).toEqual([{ text: 'once', localId: 'local-1' }]);
+        expect(session.resolveDroppedSteers(['once'])).toEqual([{ text: 'once' }]);
+    });
+});

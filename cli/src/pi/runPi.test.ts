@@ -10,6 +10,8 @@ const harness = vi.hoisted(() => ({
     onError: null as ((error: Error) => void) | null,
     onEvent: null as ((event: Record<string, unknown>) => void) | null,
     rpcHandlers: new Map<string, (payload: unknown) => Promise<unknown>>(),
+    clearQueueResult: { steering: [] as string[], followUp: [] as string[] },
+    autoRespondClearQueue: true,
     killCount: 0,
     cleanupCount: 0,
     session: {
@@ -86,6 +88,19 @@ vi.mock('./piTransport', () => ({
             harness.sent.push(command);
             if (harness.throwOnGetCommands && (command as { type?: string }).type === 'get_commands') {
                 throw new Error('stop test transport');
+            }
+            // Pi answers the abort-path cleanup RPC on its own. The harness
+            // mimics that so the abort path never waits for the RPC timeout.
+            const type = (command as { type?: string }).type;
+            if (type === 'clear_queue' && harness.autoRespondClearQueue) {
+                const id = (command as { id?: string }).id;
+                harness.onEvent?.({
+                    type: 'response',
+                    id,
+                    command: 'clear_queue',
+                    success: true,
+                    data: harness.clearQueueResult,
+                });
             }
         }
 
@@ -993,6 +1008,237 @@ describe('Pi native steering delivery mode', () => {
     });
 });
 
+describe('Pi abandoned steering queue', () => {
+    beforeEach(() => {
+        harness.sent.length = 0;
+        harness.throwOnGetCommands = false;
+        harness.onEvent = null;
+        harness.onError = null;
+        harness.rpcHandlers.clear();
+        harness.clearQueueResult = { steering: [], followUp: [] };
+        harness.autoRespondClearQueue = true;
+        harness.session.onUserMessage.mockReset();
+        harness.session.onCancelQueuedMessage.mockReset();
+        harness.session.emitMessagesConsumed.mockReset();
+        harness.session.sendSessionEvent.mockReset();
+        harness.session.updateMetadata.mockReset();
+        harness.cleanupCount = 0;
+        harness.killCount = 0;
+        harness.session.rpcHandlerManager.registerHandler.mockReset();
+        harness.session.rpcHandlerManager.registerHandler.mockImplementation((method: string, handler: (payload: unknown) => Promise<unknown>) => {
+            harness.rpcHandlers.set(method, handler);
+        });
+    });
+
+    type UserMessageHandler = (message: {
+        role: 'user';
+        content: { type: 'text'; text: string };
+        meta?: { deliveryMode?: 'queue' | 'steer' };
+    }, localId: string) => void;
+
+    async function startStreamingSession(): Promise<{ running: ReturnType<typeof runPi> }> {
+        const running = runPi({ workingDirectory: '/work' });
+        await vi.waitFor(() => expect(harness.onEvent).not.toBeNull());
+        harness.onEvent!({
+            type: 'response', command: 'get_state', success: true,
+            data: { sessionId: 'pi-abandoned-session', sessionFile: '/tmp/pi-abandoned.jsonl', isStreaming: true },
+        });
+        await completeHistoryInitialization();
+        // Wrapped, not returned directly: an async function adopts a returned
+        // promise, which would block until the session ends.
+        return { running };
+    }
+
+    function steerHandler(): UserMessageHandler {
+        return harness.session.onUserMessage.mock.calls.at(-1)![0] as UserMessageHandler;
+    }
+
+    it('clears Pi\'s steering queue when the turn is aborted so an abandoned steer cannot replay', async () => {
+        const { running } = await startStreamingSession();
+        const recordSentSteer = vi.spyOn(PiSession.prototype, 'recordSentSteer');
+        recordSentSteer.mockClear();
+
+        steerHandler()({
+            role: 'user',
+            content: { type: 'text', text: 'remember to use pnpm' },
+            meta: { deliveryMode: 'steer' },
+        }, 'abandoned-steer-id');
+
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'steer', message: 'remember to use pnpm',
+        })));
+        const steer = harness.sent.find((item) => (item as { type?: string }).type === 'steer') as { id: string };
+        harness.onEvent!({
+            type: 'response', id: steer.id, command: 'steer', success: true,
+            data: { disposition: 'queued' },
+        });
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['abandoned-steer-id'], undefined));
+        // A queued steer belongs to Pi until it is delivered, so it has to be
+        // tracked for the abort cleanup.
+        expect(recordSentSteer).toHaveBeenCalledWith('remember to use pnpm', 'abandoned-steer-id');
+
+        // Pi keeps the queued steer when the turn is aborted.
+        harness.clearQueueResult = { steering: ['remember to use pnpm'], followUp: [] };
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        const abortPromise = abort({});
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'abort')).toHaveLength(1));
+        const abortCommand = harness.sent.find((item) => (item as { type?: string }).type === 'abort') as { id: string };
+        harness.onEvent!({ type: 'response', id: abortCommand.id, command: 'abort', success: true });
+
+        // The abandoned steer has to leave Pi's queue, otherwise Pi replays it
+        // into the next turn as a fresh user message.
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'clear_queue' })));
+        await expect(abortPromise).resolves.toEqual({ success: true });
+        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('remember to use pnpm'),
+        });
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('holds the next prompt until the abandoned steer left Pi\'s queue', async () => {
+        const { running } = await startStreamingSession();
+
+        steerHandler()({
+            role: 'user',
+            content: { type: 'text', text: 'abandoned instruction' },
+            meta: { deliveryMode: 'steer' },
+        }, 'abandoned-steer-id');
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'steer', message: 'abandoned instruction',
+        })));
+        const steer = harness.sent.find((item) => (item as { type?: string }).type === 'steer') as { id: string };
+        harness.onEvent!({
+            type: 'response', id: steer.id, command: 'steer', success: true,
+            data: { disposition: 'queued' },
+        });
+
+        // Pi keeps the queued steer when the turn is aborted, so the cleanup
+        // RPC has to be answered by the test to observe the ordering.
+        harness.autoRespondClearQueue = false;
+        harness.clearQueueResult = { steering: ['abandoned instruction'], followUp: [] };
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        const abortPromise = abort({});
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'abort')).toHaveLength(1));
+        const abortCommand = harness.sent.find((item) => (item as { type?: string }).type === 'abort') as { id: string };
+        harness.onEvent!({ type: 'response', id: abortCommand.id, command: 'abort', success: true });
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'clear_queue' })));
+        const clearQueue = harness.sent.find((item) => (item as { type?: string }).type === 'clear_queue') as { id: string };
+
+        // The next turn must not start while the abandoned steer is still in
+        // Pi's queue, or Pi would replay it into that turn.
+        steerHandler()({
+            role: 'user',
+            content: { type: 'text', text: 'next turn' },
+            meta: { deliveryMode: 'queue' },
+        }, 'next-turn-id');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({
+            type: 'prompt', message: 'next turn',
+        }));
+
+        harness.onEvent!({
+            type: 'response', id: clearQueue.id, command: 'clear_queue', success: true,
+            data: harness.clearQueueResult,
+        });
+        await expect(abortPromise).resolves.toEqual({ success: true });
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'prompt', message: 'next turn',
+        })));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({
+            type: 'prompt', message: 'abandoned instruction',
+        }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('clears the queue when Pi reports an aborted settle', async () => {
+        const { running } = await startStreamingSession();
+
+        steerHandler()({
+            role: 'user',
+            content: { type: 'text', text: 'late abandoned instruction' },
+            meta: { deliveryMode: 'steer' },
+        }, 'late-steer-id');
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'steer', message: 'late abandoned instruction',
+        })));
+        const steer = harness.sent.find((item) => (item as { type?: string }).type === 'steer') as { id: string };
+        harness.onEvent!({
+            type: 'response', id: steer.id, command: 'steer', success: true,
+            data: { disposition: 'queued' },
+        });
+
+        harness.clearQueueResult = { steering: ['late abandoned instruction'], followUp: [] };
+        harness.onEvent!({ type: 'agent_settled', aborted: true });
+
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'clear_queue' })));
+        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('late abandoned instruction'),
+        });
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('leaves the queue alone when Pi settles without an abort', async () => {
+        const { running } = await startStreamingSession();
+
+        harness.onEvent!({ type: 'agent_settled' });
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'clear_queue' }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('does not track a steer that a Pi extension handled', async () => {
+        const { running } = await startStreamingSession();
+        const recordSentSteer = vi.spyOn(PiSession.prototype, 'recordSentSteer');
+        recordSentSteer.mockClear();
+
+        steerHandler()({
+            role: 'user',
+            content: { type: 'text', text: 'extension handled' },
+            meta: { deliveryMode: 'steer' },
+        }, 'handled-steer-id');
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'steer', message: 'extension handled',
+        })));
+        const steer = harness.sent.find((item) => (item as { type?: string }).type === 'steer') as { id: string };
+        harness.onEvent!({
+            type: 'response', id: steer.id, command: 'steer', success: true,
+            data: { disposition: 'handled' },
+        });
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['handled-steer-id'], undefined));
+        // Pi consumed the message itself, so it is not in Pi's queue and must
+        // not be tracked as an abandoned steer.
+        expect(recordSentSteer).not.toHaveBeenCalledWith('extension handled', 'handled-steer-id');
+
+        // Pi never queued it, so an abort must not report it as discarded.
+        harness.clearQueueResult = { steering: [], followUp: [] };
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        const abortPromise = abort({});
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'abort')).toHaveLength(1));
+        const abortCommand = harness.sent.find((item) => (item as { type?: string }).type === 'abort') as { id: string };
+        harness.onEvent!({ type: 'response', id: abortCommand.id, command: 'abort', success: true });
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'clear_queue' })));
+        await expect(abortPromise).resolves.toEqual({ success: true });
+        expect(harness.session.sendSessionEvent).not.toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('extension handled'),
+        });
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+});
+
 describe('Pi prompt preparation', () => {
     it('reads image attachments into Pi RPC image content while retaining safe text references', async () => {
         const { mkdtemp, writeFile, rm, symlink } = await import('node:fs/promises');
@@ -1261,6 +1507,150 @@ describe('Pi steer-queued-message RPC', () => {
 });
 
 describe('Pi built-in slash commands', () => {
+    it('runs a shell command through Pi and reports it as a Bash card', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash git status' } }, 'bash-id');
+
+        const bash = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'bash') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'bash', command: 'git status' }));
+        // The command is run by Pi, not delivered to the model as a prompt.
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt', message: '/bash git status' }));
+
+        harness.onEvent!({
+            type: 'response', id: bash.id, command: 'bash', success: true,
+            data: { output: 'On branch main\n', exitCode: 0, cancelled: false, truncated: false },
+        });
+
+        // The web already renders a 'Bash' card, so the command is reported
+        // through the canonical tool-call messages.
+        await vi.waitFor(() => expect(harness.session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'tool-call',
+            name: 'Bash',
+            input: { command: 'git status' },
+        })));
+        await vi.waitFor(() => expect(harness.session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'tool-call-result',
+            output: 'On branch main\n',
+            is_error: false,
+        })));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('streams the command output while it runs', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash ls -la' } }, 'bash-stream-id');
+
+        const bash = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'bash') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+
+        // Pi repeats the command id in its streamed chunks. The preview is the
+        // whole output so far (the web replaces the card body on every
+        // update) and is only sent once enough new output arrived.
+        harness.onEvent!({ type: 'bash_execution_update', id: bash.id, delta: 'total 4\n'.repeat(1000) });
+        await vi.waitFor(() => expect(harness.session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'tool-call',
+            name: 'Bash',
+            status: 'in_progress',
+            progress: expect.stringContaining('total 4'),
+        })));
+
+        harness.onEvent!({
+            type: 'response', id: bash.id, command: 'bash', success: true,
+            data: { output: 'total 4\n', exitCode: 0, cancelled: false, truncated: false },
+        });
+        await vi.waitFor(() => expect(harness.session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'tool-call-result',
+            output: 'total 4\n',
+        })));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('reports a failed shell command', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash false' } }, 'bash-fail-id');
+
+        const bash = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'bash') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({
+            type: 'response', id: bash.id, command: 'bash', success: true,
+            data: { output: 'boom\n', exitCode: 1, cancelled: false, truncated: false },
+        });
+
+        await vi.waitFor(() => expect(harness.session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'tool-call-result',
+            output: 'boom\n',
+            is_error: true,
+        })));
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('exited with code 1'),
+        }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('cancels a running shell command when the turn is aborted', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash sleep 600' } }, 'bash-long-id');
+
+        const bash = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'bash') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        // The command is still running when the abort lands.
+        harness.onEvent!({ type: 'bash_execution_update', id: bash.id, delta: 'running\n' });
+
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        const abortPromise = abort({});
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'abort')).toHaveLength(1));
+        const abortCommand = harness.sent.find((item) => (item as { type?: string }).type === 'abort') as { id: string };
+        harness.onEvent!({ type: 'response', id: abortCommand.id, command: 'abort', success: true });
+
+        // The turn abort does not stop a shell command, so it is cancelled
+        // explicitly instead of running unattended.
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'abort_bash' })));
+        const abortBash = harness.sent.find((item) => (item as { type?: string }).type === 'abort_bash') as { id: string };
+        harness.onEvent!({ type: 'response', id: abortBash.id, command: 'abort_bash', success: true });
+        await expect(abortPromise).resolves.toEqual({ success: true });
+
+        harness.onEvent!({
+            type: 'response', id: bash.id, command: 'bash', success: true,
+            data: { output: '', exitCode: undefined, cancelled: true, truncated: false },
+        });
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('explains the usage when /bash has no command', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash' } }, 'bash-empty-id');
+
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('/bash <command>'),
+        }));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'bash' }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
     beforeEach(() => {
         vi.useRealTimers();
         harness.sent.length = 0;
@@ -1845,12 +2235,94 @@ describe('Pi built-in slash commands', () => {
             message: expect.stringContaining('/compact [instructions]'),
         })));
 
-        onUserMessage({ role: 'user', content: { type: 'text', text: '/tree 42' } }, 'tree-id');
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/settings' } }, 'settings-id');
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
-            message: expect.stringContaining('/tree is a Pi terminal-only command'),
+            message: expect.stringContaining('/settings is a Pi terminal-only command'),
         })));
-        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['tree-id'], { clearQueuedThinkingGrace: true }));
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['settings-id'], { clearQueuedThinkingGrace: true }));
         expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('reports a crashed Pi extension instead of dropping the error', async () => {
+        const { running } = await startReadySession();
+
+        harness.onEvent!({
+            type: 'extension_error',
+            extensionPath: '/home/user/.pi/agent/npm/node_modules/pi-goal-x/extensions/goal-state.ts',
+            event: 'tool_call',
+            error: 'boom',
+        });
+
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('pi-goal-x'),
+        }));
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('boom'),
+        }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('shows the Pi session tree for /tree', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/tree' } }, 'tree-id');
+
+        const tree = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'get_tree') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({
+            type: 'response', id: tree.id, command: 'get_tree', success: true,
+            data: {
+                tree: [
+                    {
+                        entry: { type: 'message', id: 'a1', message: { role: 'user', content: 'first question' } },
+                        children: [
+                            {
+                                entry: { type: 'message', id: 'b2', message: { role: 'assistant', content: [{ type: 'text', text: 'the answer' }] } },
+                                children: [],
+                            },
+                        ],
+                    },
+                ],
+                leafId: 'b2',
+            },
+        });
+
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: expect.stringContaining('first question'),
+        })));
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: expect.stringContaining('the answer'),
+        })));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('renames the Pi session for /name', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/name my-feature' } }, 'name-id');
+
+        const setName = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_session_name') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'set_session_name', name: 'my-feature' }));
+        harness.onEvent!({ type: 'response', id: setName.id, command: 'set_session_name', success: true });
+
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: 'Session renamed to "my-feature".',
+        }));
 
         harness.onError?.(new Error('finish test'));
         await running;

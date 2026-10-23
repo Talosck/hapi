@@ -1,4 +1,5 @@
 import { PiRpcTimeoutError, sendPiRpcAndWait } from './loop';
+import { readPiDisposition } from './schemas';
 import type { PiConversationHistory } from './conversationHistory';
 import type { PiSession } from './session';
 import type { PiTransport } from './piTransport';
@@ -118,11 +119,31 @@ export class PiSteerDispatcher {
                 // FIFO-correlated even with identical message text.
                 this.options.conversationHistory.registerUserEntry(active.entry.localId);
                 active.nativeSent = true;
-                await sendPiRpcAndWait(this.options.session, this.options.transport, {
+                const response = await sendPiRpcAndWait(this.options.session, this.options.transport, {
                     type: 'steer',
                     message: active.entry.message,
                     ...(active.entry.images.length > 0 ? { images: active.entry.images } : {}),
                 });
+
+                // Pi reports how it took the steer:
+                // - 'queued': Pi owns the message in its steering queue until it
+                //   delivers it as a user message. Track it, because an aborted
+                //   turn has to take those messages back instead of letting
+                //   Pi replay them into the next turn.
+                // - 'handled': a Pi extension input handler consumed the
+                //   message. Pi never delivers it as a user message, so the
+                //   history registration has to be withdrawn.
+                //
+                // This is recorded before the stopped check: Pi may have queued
+                // the message even though the dispatcher was stopped while the
+                // RPC was in flight, and the ledger has to mirror Pi's queue for
+                // the abort cleanup to resolve the right rows.
+                const disposition = readPiDisposition(response);
+                if (disposition === 'handled') {
+                    this.options.conversationHistory.rejectPendingEntry(active.entry.localId);
+                } else {
+                    this.options.session.recordSentSteer(active.entry.message, active.entry.localId);
+                }
 
                 if (this.stopped) return;
                 if (active.entry.localId) this.options.session.emitMessagesConsumed([active.entry.localId]);

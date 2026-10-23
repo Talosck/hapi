@@ -5,7 +5,7 @@ import { PiTransport } from './piTransport';
 import { convertPiEvent, convertPiTurnUsage } from './piEventConverter';
 import { PiMessageAccumulator } from './piMessageAccumulator';
 import { PiExtensionUiHandler } from './extensionUiHandler';
-import { parsePiModels, parsePiCommands, parsePiContextUsage, PiAgentEndEventSchema, PiAgentSettledEventSchema, PiExtensionUiRequestSchema, PiLifecycleEventSchema, PiResponseEventSchema, PiSessionInfoChangedEventSchema, PiStateDataSchema, PiSetModelDataSchema } from './schemas';
+import { parsePiModels, parsePiCommands, parsePiContextUsage, readPiDisposition, PiAgentEndEventSchema, PiAgentSettledEventSchema, PiBashExecutionUpdateEventSchema, PiClearQueueResultSchema, PiExtensionErrorEventSchema, PiExtensionUiRequestSchema, PiLifecycleEventSchema, PiResponseEventSchema, PiSessionInfoChangedEventSchema, PiStateDataSchema, PiSetModelDataSchema } from './schemas';
 import type { PiContextUsage, PiResponseEvent, PiRpcCommand, PiThinkingLevel, PiTurnEndEvent } from './types';
 import type { PiSession } from './session';
 import type { PiConversationHistory } from './conversationHistory';
@@ -39,9 +39,19 @@ export class PiRpcResolver {
     }>();
 
     sendAndWait(transport: PiTransport, command: Record<string, unknown>, timeoutMs = 10_000): Promise<unknown> {
-        if (this.terminalError) return Promise.reject(this.terminalError);
+        return this.sendAndWaitWithId(transport, command, timeoutMs).result;
+    }
+
+    /**
+     * Like {@link sendAndWait}, but also hands back the RPC id.
+     *
+     * Commands whose streamed events repeat the originating id (Pi's `bash`)
+     * need that id to correlate the chunks with the command that produced them.
+     */
+    sendAndWaitWithId(transport: PiTransport, command: Record<string, unknown>, timeoutMs = 10_000): { id: string; result: Promise<unknown> } {
+        if (this.terminalError) return { id: '', result: Promise.reject(this.terminalError) };
         const id = ++this.idCounter;
-        return new Promise((resolve, reject) => {
+        const result = new Promise<unknown>((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.pending.delete(id);
                 reject(new PiRpcTimeoutError(String(command.type), id, timeoutMs));
@@ -55,6 +65,7 @@ export class PiRpcResolver {
 
             transport.send({ ...command, id: String(id) } as unknown as PiRpcCommand);
         });
+        return { id: String(id), result };
     }
 
     rejectAll(error: Error): void {
@@ -92,6 +103,20 @@ export function sendPiRpcAndWait(session: PiSession, transport: PiTransport, com
     return session.rpcResolver.sendAndWait(transport, command, timeoutMs);
 }
 
+/**
+ * Same as {@link sendPiRpcAndWait}, but also returns the RPC id Pi echoes in
+ * the streamed events of the command.
+ */
+export function sendPiRpcAndWaitWithId(session: PiSession, transport: PiTransport, command: Record<string, unknown>, timeoutMs = 10_000): { id: string; result: Promise<unknown> } {
+    if (!session.rpcResolver) throw new Error('Pi RPC resolver not initialized');
+    return session.rpcResolver.sendAndWaitWithId(transport, command, timeoutMs);
+}
+
+/** Chat-card id for the shell command Pi runs under the given RPC id. */
+export function piBashMessageId(rpcId: string): string {
+    return `pi-bash-${rpcId}`;
+}
+
 function resolvePendingRpc(resolver: PiRpcResolver, response: PiResponseEvent): void {
     resolver.resolveResponse(response);
 }
@@ -116,7 +141,7 @@ function persistSelectedPiModel(session: PiSession): void {
 
 function applyGetState(
     data: {
-        model?: { id?: string; modelId?: string; provider?: string };
+        model?: { id?: string; modelId?: string; provider?: string; input?: unknown };
         sessionId?: string;
         sessionName?: string;
         thinkingLevel?: string;
@@ -149,6 +174,15 @@ function applyGetState(
         // selection so the web can disambiguate (a startup --model overrides this
         // once get_available_models confirms and applies it below).
         persistSelectedPiModel(session);
+        // Pi reports what the active model accepts, e.g. ["text","image"].
+        // Without this HAPI cannot tell the user that an image will not
+        // reach a text-only model.
+        const modelInput = Array.isArray(data.model.input)
+            ? data.model.input.filter((entry): entry is string => typeof entry === 'string')
+            : undefined;
+        if (modelInput && modelInput.length > 0) {
+            session.setCurrentModelInput(modelInput);
+        }
     }
 
     if (data.sessionId) {
@@ -434,6 +468,14 @@ export type PiTransportEventController = {
     terminatePendingRpc: (error: Error) => void;
     beginPromptLifecycle: (promptId: string) => void;
     abortPromptLifecycle: () => void;
+    /**
+     * Drop the steering messages Pi still holds after an aborted turn.
+     *
+     * Pi's `abort` stops the turn but keeps its steering queue, so an
+     * abandoned steer would be replayed into the next turn. Clearing the
+     * queue is idempotent and safe to call more than once.
+     */
+    clearAbandonedQueue: () => Promise<void>;
 };
 
 type PiTransportEventOptions = {
@@ -451,6 +493,7 @@ type PiTransportEventOptions = {
 const PI_LEGACY_SETTLE_GRACE_MS = 500;
 const PI_PROMPT_LIFECYCLE_GRACE_MS = 1_000;
 const PI_COMPACTION_RETRY_START_GRACE_MS = 1_000;
+const PI_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
 
 class PiLifecycleTimeline {
     private compacting = false;
@@ -637,6 +680,66 @@ export function wireTransportEvents(
             options.onAgentSettled?.();
         }
     };
+    /**
+     * Drop the steering messages Pi still holds after an aborted turn.
+     *
+     * Pi answers `abort` with the turn stopped but its steering queue intact,
+     * so an accepted steer that was never delivered would be injected into the
+     * next turn as a fresh user message. Clearing the queue is the only way to
+     * take those messages back, and Pi reports them so the user learns what
+     * was dropped instead of silently losing it.
+     *
+     * The shared promise makes concurrent callers (the abort path and the
+     * aborted-settle event) join one cleanup instead of racing two.
+     */
+    let abandonedQueueClear: Promise<void> | null = null;
+    const clearAbandonedQueue = (): Promise<void> => {
+        if (abandonedQueueClear) return abandonedQueueClear;
+        abandonedQueueClear = (async () => {
+            try {
+                const data = await sendPiRpcAndWait(
+                    session,
+                    transport,
+                    { type: 'clear_queue' },
+                    PI_CLEAR_QUEUE_TIMEOUT_MS,
+                );
+                const parsed = PiClearQueueResultSchema.safeParse(data);
+                if (!parsed.success) return;
+                const dropped = session.resolveDroppedSteers(parsed.data.steering);
+                if (dropped.length === 0) return;
+                // A dropped steer never produced a native user entry, so its
+                // history registration has to be withdrawn. Otherwise the next
+                // turn's user entry would inherit this message's association.
+                for (const entry of dropped) {
+                    options.conversationHistory?.rejectPendingEntry(entry.localId);
+                }
+                // Pi reports the expanded message, which can be a whole skill
+                // block, so the preview is clipped.
+                const preview = dropped
+                    .map((entry) => entry.text.length > 80 ? `${entry.text.slice(0, 80)}…` : entry.text)
+                    .join(' / ');
+                session.sendSessionEvent({
+                    type: 'message',
+                    message: `Pi discarded ${dropped.length} queued steer${dropped.length === 1 ? '' : 's'} when the turn was aborted: ${preview}`,
+                });
+            } catch (error) {
+                // The turn is already gone, but a failed cleanup means Pi may
+                // still hold the steer and replay it into the next turn. That
+                // has to be visible — a silently failed cleanup looks exactly
+                // like the bug this cleanup exists to prevent.
+                const detail = error instanceof Error ? error.message : String(error);
+                logger.debug(`[pi] clear_queue after abort failed: ${detail}`);
+                session.sendSessionEvent({
+                    type: 'message',
+                    message: `⚠️ Could not clear Pi's queued steering messages (${detail}). A queued steer may reappear in the next turn.`,
+                });
+            }
+        })().finally(() => {
+            abandonedQueueClear = null;
+        });
+        return abandonedQueueClear;
+    };
+
     const scheduleLegacySettleFallback = (): void => {
         if ((activePromptId !== null && !activePromptResponseAccepted) || !agentEndObserved || maintenanceActive.size > 0 || deliveredSettlement || legacySettleTimer) return;
         legacySettleTimer = setTimeout(() => {
@@ -645,6 +748,7 @@ export function wireTransportEvents(
         }, PI_LEGACY_SETTLE_GRACE_MS);
         legacySettleTimer.unref?.();
     };
+
     const schedulePromptLifecycleFallback = (): void => {
         const generation = lifecycleGeneration;
         clearPromptLifecycleFallback();
@@ -746,6 +850,18 @@ export function wireTransportEvents(
                 }
                 if (isCurrentPrompt && parsed.data.success) {
                     activePromptResponseAccepted = true;
+                    // Pi reports how it took the prompt:
+                    // - 'queued': Pi parked the message in its own steering
+                    //   queue, so it has to be tracked like a steer — an
+                    //   aborted turn would otherwise replay it.
+                    // - 'handled': a Pi extension consumed the message, so no
+                    //   native user entry will ever appear for it and the
+                    //   history registration has to be withdrawn.
+                    const disposition = readPiDisposition(parsed.data.data);
+                    const promptDispatch = session.consumePromptDispatch(disposition);
+                    if (disposition === 'handled' && promptDispatch?.localId) {
+                        options.conversationHistory?.rejectPendingEntry(promptDispatch.localId);
+                    }
                     if (activeAgentSettledSeen) {
                         deliverSettlement();
                     } else if (agentLifecycleSeen) {
@@ -852,6 +968,49 @@ export function wireTransportEvents(
             }
         }
 
+        if (event.type === 'bash_execution_update') {
+            // Pi streams the output of a shell command it runs through its
+            // `bash` RPC. The chunks only carry the command id, so the command
+            // text comes from the session registry.
+            const parsed = PiBashExecutionUpdateEventSchema.safeParse(event);
+            if (parsed.success && parsed.data.id !== undefined) {
+                const command = session.getBashCommand(parsed.data.id);
+                if (command !== undefined) {
+                    const stream = session.recordBashStream(parsed.data.id, parsed.data.delta);
+                    if (stream.preview !== null) {
+                        const converted = convertAgentMessage({
+                            type: 'tool_call',
+                            id: piBashMessageId(parsed.data.id),
+                            name: 'Bash',
+                            input: { command },
+                            status: 'in_progress',
+                            progress: stream.preview,
+                        }, session.currentModel);
+                        if (converted) session.sendAgentMessage(converted);
+                    } else if (stream.truncated) {
+                        // Pi's stream has no cap of its own, so the live
+                        // preview is stopped here instead of flooding the hub.
+                        session.sendSessionEvent({
+                            type: 'message',
+                            message: '⚠️ The command is producing a lot of output — the live preview was stopped. The result card still shows the (truncated) output.',
+                        });
+                    }
+                }
+            }
+        } else if (event.type === 'extension_error') {
+            // A crashed Pi extension handler is otherwise invisible: the tool
+            // simply never answers and the web shows nothing at all.
+            const parsed = PiExtensionErrorEventSchema.safeParse(event);
+            if (parsed.success) {
+                const source = parsed.data.extensionPath ?? parsed.data.event ?? 'Pi extension';
+                const detail = parsed.data.error ?? 'unknown error';
+                session.sendSessionEvent({
+                    type: 'message',
+                    message: `⚠️ Pi extension error (${source}): ${detail}`,
+                });
+            }
+        }
+
         if (event.type === 'agent_start') {
             session.updateThinkingState(true);
         } else if (event.type === 'turn_start') {
@@ -887,9 +1046,17 @@ export function wireTransportEvents(
         } else if (event.type === 'agent_settled') {
             // A command-only generation has no Pi agent lifecycle; a delayed
             // settled event from an earlier prompt must not settle this one.
-            if (agentLifecycleSeen && PiAgentSettledEventSchema.safeParse(event).success) {
+            const settled = PiAgentSettledEventSchema.safeParse(event);
+            if (agentLifecycleSeen && settled.success) {
                 activeAgentSettledSeen = true;
                 deliverSettlement();
+            }
+            // Pi reports whether the run was aborted. An aborted turn leaves
+            // every undelivered steer in Pi's queue, where it would be
+            // replayed into the next turn. Clear it as soon as the abort is
+            // observable, so the abort path can await the same cleanup.
+            if (settled.success && settled.data.aborted === true) {
+                void clearAbandonedQueue().catch(() => {});
             }
         }
 
@@ -904,5 +1071,6 @@ export function wireTransportEvents(
         terminatePendingRpc: (error) => session.rpcResolver?.rejectAll(error),
         beginPromptLifecycle,
         abortPromptLifecycle,
+        clearAbandonedQueue,
     };
 }

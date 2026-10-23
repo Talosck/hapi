@@ -45,7 +45,15 @@ export interface PiContextUsage {
 // Individual event types for proper type narrowing
 export interface PiAgentStartEvent { type: 'agent_start' }
 export interface PiAgentEndEvent { type: 'agent_end'; messages: unknown[]; willRetry?: boolean }
-export interface PiAgentSettledEvent { type: 'agent_settled' }
+export interface PiAgentSettledEvent {
+    type: 'agent_settled';
+    /**
+     * Pi reports whether the agent run was aborted. An aborted settle means the
+     * turn died mid-flight, so any steering message Pi still holds is an
+     * orphan that must not survive into the next turn.
+     */
+    aborted?: boolean;
+}
 export interface PiTurnStartEvent { type: 'turn_start' }
 export interface PiTurnEndEvent {
     type: 'turn_end';
@@ -53,6 +61,17 @@ export interface PiTurnEndEvent {
     toolResults?: unknown[];
 }
 export interface PiMessageStartEvent { type: 'message_start'; message: unknown }
+/**
+ * Streaming output of a shell command Pi is running through its `bash` RPC.
+ *
+ * Pi repeats the id of the originating command, so the output can be
+ * attributed to the command that produced it.
+ */
+export interface PiBashExecutionUpdateEvent {
+    type: 'bash_execution_update';
+    id: string;
+    delta: string;
+}
 export interface PiMessageUpdateEvent {
     type: 'message_update';
     assistantMessageEvent?: PiAssistantMessageEvent;
@@ -191,6 +210,11 @@ export type PiRpcCommand =
     | { id?: string; type: 'steer'; message: string; images?: PiImageContent[] }
     | { id?: string; type: 'follow_up'; message: string; images?: PiImageContent[] }
     | { id?: string; type: 'abort' }
+    | { id?: string; type: 'clear_queue' }
+    | { id?: string; type: 'bash'; command: string; excludeFromContext?: boolean }
+    | { id?: string; type: 'abort_bash' }
+    | { id?: string; type: 'get_tree' }
+    | { id?: string; type: 'set_session_name'; name: string }
     | PiExtensionUiResponse
     | { type: 'new_session' }
     | { type: 'get_state' }
@@ -203,7 +227,26 @@ export type PiRpcCommand =
     | { id?: string; type: 'fork'; entryId: string }
     | { id?: string; type: 'clone' }
     | { id?: string; type: 'get_fork_messages' }
-    | { id?: string; type: 'get_entries'; since?: string };
+    | { id?: string; type: 'get_entries'; since?: string }
+    | { id?: string; type: 'compact'; customInstructions?: string };
+
+/**
+ * How Pi accepted a `prompt` / `steer` / `follow_up` command.
+ *
+ * - `started`: Pi began the turn immediately.
+ * - `queued`: Pi took the message into its own steering/follow-up queue and
+ *   will deliver it into the running turn. The message is owned by Pi until a
+ *   user `message_start` shows it being delivered.
+ * - `handled`: an extension input handler consumed the message. Pi will never
+ *   deliver it as a user message.
+ */
+export type PiInputDisposition = 'started' | 'queued' | 'handled';
+
+/** A prompt HAPI handed to Pi, kept until Pi reports its disposition. */
+export type PiPromptDispatch = {
+    text: string;
+    localId?: string;
+};
 
 // ============================================================================
 // Pi RPC Responses (stdout)

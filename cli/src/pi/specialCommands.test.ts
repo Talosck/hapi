@@ -22,11 +22,26 @@ describe('parsePiSpecialCommand', () => {
         expect(parsePiSpecialCommand('/COMPACT')).toEqual({ type: 'compact' });
     });
 
+    it('parses /tree and /name', () => {
+        expect(parsePiSpecialCommand('/tree')).toEqual({ type: 'tree' });
+        expect(parsePiSpecialCommand('/tree extra args')).toEqual({ type: 'tree' });
+        expect(parsePiSpecialCommand('/name my-feature')).toEqual({ type: 'name', name: 'my-feature' });
+        expect(parsePiSpecialCommand('/name')).toEqual({ type: 'name', name: '' });
+    });
+
     it('flags terminal-only Pi builtins as unsupported', () => {
-        for (const name of ['tree', 'export', 'import', 'reload', 'settings', 'new', 'name', 'login', 'logout', 'quit', 'hotkeys', 'changelog', 'share', 'resume', 'trust', 'fork', 'clone', 'copy', 'scoped-models', 'llama']) {
+        for (const name of ['export', 'import', 'reload', 'settings', 'new', 'login', 'logout', 'quit', 'hotkeys', 'changelog', 'share', 'resume', 'trust', 'fork', 'clone', 'copy', 'scoped-models', 'llama']) {
             expect(parsePiSpecialCommand(`/${name}`)).toEqual({ type: 'unsupported', name });
         }
-        expect(parsePiSpecialCommand('/tree some entry')).toEqual({ type: 'unsupported', name: 'tree' });
+        expect(parsePiSpecialCommand('/export some entry')).toEqual({ type: 'unsupported', name: 'export' });
+    });
+
+    it('parses /bash with the shell command to run', () => {
+        expect(parsePiSpecialCommand('/bash git status')).toEqual({ type: 'bash', command: 'git status' });
+        expect(parsePiSpecialCommand('  /bash   ls -la /tmp  ')).toEqual({ type: 'bash', command: 'ls -la /tmp' });
+        expect(parsePiSpecialCommand('/bash')).toEqual({ type: 'bash', command: '' });
+        expect(parsePiSpecialCommand('/bash echo "a b"')).toEqual({ type: 'bash', command: 'echo "a b"' });
+        expect(parsePiSpecialCommand('/BASH git status')).toEqual({ type: 'bash', command: 'git status' });
     });
 
     it('requires a command-token boundary (no path-like prefixes)', () => {

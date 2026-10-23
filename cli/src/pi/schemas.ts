@@ -12,7 +12,7 @@
 import { z } from 'zod';
 import { PI_THINKING_LEVELS } from '@hapi/protocol';
 import type { PiModelSummary } from '@hapi/protocol/apiTypes';
-import type { PiContextUsage, PiExtensionUiRequest } from './types';
+import type { PiContextUsage, PiExtensionUiRequest, PiInputDisposition } from './types';
 
 // ============================================================================
 // 字段级容错 schema
@@ -443,7 +443,57 @@ export const PiAgentEndEventSchema = z.object({
 
 export const PiAgentSettledEventSchema = z.object({
     type: z.literal('agent_settled'),
+    aborted: z.boolean().optional(),
 });
+
+/**
+ * Result of Pi's `clear_queue` command: the steering and follow-up messages
+ * that Pi dropped, in the order they were queued.
+ */
+export const PiClearQueueResultSchema = z.object({
+    steering: z.array(z.string()).default([]),
+    followUp: z.array(z.string()).default([]),
+});
+
+/**
+ * Result of Pi's `bash` command. Pi stores the output in the session and, unless
+ * `excludeFromContext` was set, converts it to user-role text before the next
+ * model request — so the agent sees what the command printed.
+ */
+export const PiBashResultSchema = z.object({
+    output: z.string().default(''),
+    exitCode: z.number().optional(),
+    cancelled: z.boolean().optional(),
+    truncated: z.boolean().optional(),
+    fullOutputPath: z.string().optional(),
+}).passthrough();
+
+/** Streaming chunk of a shell command Pi is running. */
+export const PiBashExecutionUpdateEventSchema = z.object({
+    type: z.literal('bash_execution_update'),
+    // Pi repeats the id of the originating command, but older builds may omit it.
+    id: z.string().optional(),
+    delta: z.string(),
+}).passthrough();
+
+/**
+ * Pi reports a crashed extension handler. Without this the web never learns
+ * that an extension failed and the tool simply never answers.
+ */
+export const PiExtensionErrorEventSchema = z.object({
+    type: z.literal('extension_error'),
+    extensionPath: z.string().optional(),
+    event: z.string().optional(),
+    error: z.string().optional(),
+}).passthrough();
+
+/**
+ * Pi answers `prompt` / `steer` / `follow_up` with the disposition of the
+ * accepted input. Older Pi builds omit it, so it stays optional.
+ */
+export const PiInputDispositionSchema = z.object({
+    disposition: z.enum(['started', 'queued', 'handled']).optional(),
+}).passthrough();
 
 // ============================================================================
 // Parse helpers — replace hand-written type guards in loop.ts
@@ -457,6 +507,17 @@ export function parsePiCommands(data: unknown) {
 export function parsePiModels(data: unknown) {
     const result = PiModelsResponseDataSchema.safeParse(data)
     return result.success ? result.data : []
+}
+
+/**
+ * Read the disposition Pi reported for a `prompt` / `steer` / `follow_up`.
+ *
+ * undefined: the Pi build does not report it (or reports something unknown),
+ * so callers keep their previous behaviour.
+ */
+export function readPiDisposition(data: unknown): PiInputDisposition | undefined {
+    const result = PiInputDispositionSchema.safeParse(data);
+    return result.success ? result.data.disposition : undefined;
 }
 
 /**

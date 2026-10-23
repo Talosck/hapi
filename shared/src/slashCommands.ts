@@ -89,6 +89,9 @@ export const BUILTIN_SLASH_COMMANDS = {
         { name: 'compact', description: 'Compress conversation history to save context (optional custom instructions)', source: 'builtin' },
         { name: 'session', description: 'Show Pi session stats (tokens, cost, context usage)', source: 'builtin' },
         { name: 'model', description: 'Show or switch the Pi model, e.g. /model gpt-5.2', source: 'builtin' },
+        { name: 'bash', description: 'Run a shell command in the Pi session and add its output to the conversation, e.g. /bash git status', source: 'builtin' },
+        { name: 'tree', description: 'Show the Pi session entry tree (branches from rewinds and forks)', source: 'builtin' },
+        { name: 'name', description: 'Rename the Pi session, e.g. /name my-feature', source: 'builtin' },
     ],
 } as const satisfies Record<string, readonly SlashCommand[]>
 
