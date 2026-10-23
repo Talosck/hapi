@@ -1191,6 +1191,12 @@ export default {
   'misc.contextUsed': 'Used: {value} ({percent}%)',
   'misc.contextUsedTokens': 'Used: {value}',
   'misc.contextRemaining': 'Remaining: {value} ({percent}%)',
+  'misc.quotaDetails': '5-hour usage details',
+  'misc.quotaUnlimited': 'Unlimited',
+  'misc.quotaRemaining': '{percent}% left',
+  'misc.quotaUnknown': 'Usage unknown',
+  'misc.quotaResetPending': 'Reset pending',
+  'misc.quotaResetsIn': 'Resets in {duration}',
 
   // Web Share Target picker
   'share.title': 'Share to HAPI',

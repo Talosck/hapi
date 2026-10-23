@@ -1194,6 +1194,12 @@ export default {
   'misc.contextUsed': '使用：{value}（{percent}%）',
   'misc.contextUsedTokens': '使用：{value}',
   'misc.contextRemaining': '剩余：{value}（{percent}%）',
+  'misc.quotaDetails': '5 小时用量详情',
+  'misc.quotaUnlimited': '不限量',
+  'misc.quotaRemaining': '剩余 {percent}%',
+  'misc.quotaUnknown': '用量未知',
+  'misc.quotaResetPending': '等待重置',
+  'misc.quotaResetsIn': '距离重置还有 {duration}',
 
   // Web Share Target 分享面板
   'share.title': '分享到 HAPI',

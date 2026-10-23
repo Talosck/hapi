@@ -227,8 +227,12 @@ export function getQuotaWarning(remainingPercent: number | null): { color: strin
  *
  * The countdown only has to move while this is open - the label next to the
  * context usage carries the share, not the time.
+ *
+ * The chip itself stays English (`5h 42%`), but the popover speaks the
+ * reader's language, the same way the context popover does.
  */
 function QuotaDetails(props: { quota: McodeQuotaWindow }) {
+    const { t } = useTranslation()
     const [now, setNow] = useState(() => Date.now())
     useEffect(() => {
         const timer = window.setInterval(() => setNow(Date.now()), 30_000)
@@ -241,14 +245,16 @@ function QuotaDetails(props: { quota: McodeQuotaWindow }) {
         <div className="flex max-w-[min(22rem,calc(100vw-1rem))] flex-col gap-1 text-xs leading-tight text-[var(--app-fg)]">
             <span className="break-words">
                 {props.quota.unlimited
-                    ? 'unlimited'
+                    ? t('misc.quotaUnlimited')
                     : props.quota.remainingPercent !== null
-                        ? `${props.quota.remainingPercent}% left`
-                        : 'usage unknown'}
+                        ? t('misc.quotaRemaining', { percent: props.quota.remainingPercent })
+                        : t('misc.quotaUnknown')}
             </span>
             {left !== null ? (
                 <span className="break-words">
-                    {left <= 0 ? 'reset pending' : `resets in ${formatDuration(left)}`}
+                    {left <= 0
+                        ? t('misc.quotaResetPending')
+                        : t('misc.quotaResetsIn', { duration: formatDuration(left) })}
                 </span>
             ) : null}
         </div>
@@ -442,7 +448,7 @@ export function StatusBar(props: {
                         <Popover.Trigger asChild>
                             <button
                                 type="button"
-                                aria-label="5-hour usage"
+                                aria-label={t('misc.quotaDetails')}
                                 className={`min-w-0 cursor-pointer whitespace-nowrap rounded-sm bg-transparent p-0 text-[10px] leading-4 outline-none focus-visible:ring-1 focus-visible:ring-[var(--app-link)] ${quotaColor}`}
                             >
                                 {quotaLabel}

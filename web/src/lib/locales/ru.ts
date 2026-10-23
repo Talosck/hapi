@@ -1193,6 +1193,12 @@ export default {
   'misc.contextUsed': 'Использовано: {value} ({percent}%)',
   'misc.contextUsedTokens': 'Использовано: {value}',
   'misc.contextRemaining': 'Осталось: {value} ({percent}%)',
+  'misc.quotaDetails': 'Сведения о 5-часовом окне',
+  'misc.quotaUnlimited': 'Без ограничений',
+  'misc.quotaRemaining': 'Осталось {percent}%',
+  'misc.quotaUnknown': 'Использование неизвестно',
+  'misc.quotaResetPending': 'Ожидание сброса',
+  'misc.quotaResetsIn': 'Сброс через {duration}',
 
   // Выбор цели Web Share
   'share.title': 'Поделиться в HAPI',
