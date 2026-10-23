@@ -149,6 +149,7 @@ function createBackend(overrides: Record<string, unknown> = {}) {
         respondToPermission: vi.fn(async () => {}),
         onStderrError: vi.fn(),
         setSessionInfoUpdateListener: vi.fn(),
+        setUsageUpdateListener: vi.fn(),
         setExtensionNotificationListener: vi.fn(),
         setSessionStateListener: vi.fn(),
         onPermissionRequest: vi.fn(),
@@ -365,6 +366,40 @@ describe('mcodeRemoteLauncher config sync', () => {
 
         expect(harness.mcpBridgeOptions?.enableChangeTitle).toBe(true)
         expect(backend.setModel).not.toHaveBeenCalled()
+    })
+
+    it('keeps the context usage the agent publishes outside a turn', async () => {
+        // MiniMax Code publishes its context usage over ACP when a turn ends,
+        // from the agent's own task queue - so the notification can land after
+        // the prompt was answered. The prompt callback is gone by then, so the
+        // update has to reach the session through the usage listener. Without
+        // it the context window never arrives, the usage the transcript
+        // watcher reports has no denominator, and the context bar cannot show
+        // "used / window".
+        const backend = createBackend()
+        const session = createSession([{ message: 'hi', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const registerUsageListener = backend.setUsageUpdateListener as unknown as ReturnType<typeof vi.fn>
+        expect(registerUsageListener).toHaveBeenCalledTimes(1)
+
+        const listener = registerUsageListener.mock.calls[0]?.[0] as ((message: unknown) => void) | undefined
+        expect(listener).toBeDefined()
+
+        listener?.({
+            type: 'usage',
+            inputTokens: 0,
+            outputTokens: 0,
+            contextTokens: 15_928,
+            contextWindow: 512_000
+        })
+
+        const sent = session.sendAgentMessage.mock.calls
+            .map((call) => call[0] as { type?: string; info?: { contextTokens?: number; modelContextWindow?: number } })
+            .filter((message) => message.type === 'token_count')
+        expect(sent.length).toBeGreaterThan(0)
+        expect(sent[sent.length - 1].info?.modelContextWindow).toBe(512_000)
     })
 
     it('reports the model discovered from session/new when none was requested', async () => {

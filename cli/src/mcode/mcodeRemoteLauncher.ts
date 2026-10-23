@@ -528,6 +528,15 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         this.appliedPermissionMode = null;
         registerAcpSessionTitleSync(backend, session.client);
 
+        // MiniMax Code publishes its context usage over ACP when a turn ends,
+        // and it sends that notification from the agent's own task queue - so
+        // it can land after the prompt has already been answered. The prompt
+        // callback is gone by then, and without this listener the update is
+        // dropped: the context window never reaches the session, so the usage
+        // the transcript watcher reports has no denominator and the context bar
+        // cannot show "used / window".
+        backend.setUsageUpdateListener((message) => this.handleAgentMessage(message));
+
         backend.onStderrError((error) => {
             logger.debug('[mcode-remote] stderr error', error);
             session.sendSessionEvent({ type: 'message', message: error.message });

@@ -20,6 +20,7 @@ import {
 } from "@/modules/common/generatedImages";
 import type { InlineMediaSource } from "@/modules/common/inlineMediaSource";
 import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_MEDIA_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from "@/modules/common/displayImagePrompt";
+import { CHANGE_TITLE_TOOL_DESCRIPTION } from "@/modules/common/hapiMcpBridgePrompt";
 import { resolveSkill } from "@/modules/common/skills";
 import {
     INSPECT_PEER_TOOL_DESCRIPTION,
@@ -187,7 +188,10 @@ function createHapiMcpServer(
             // clear yet and starts working instead. Asking for exactly one
             // call at the start of every chat, and saying not to postpone it,
             // is what makes the call happen.
-            description: 'Set the title of the current HAPI chat session. You MUST call this tool exactly once at the start of every new chat, before reading any file, before planning and before any other tool call. Do not skip it and do not postpone it until later. Pass a concise task title (under 20 characters, no quotes and no trailing punctuation). Do not call it again for routine progress, substeps, implementation details or a slightly better wording.',
+            //
+            // The stdio bridge - the one every ACP agent talks to - carries the
+            // same text, so both paths tell the model the same thing.
+            description: CHANGE_TITLE_TOOL_DESCRIPTION,
             title: 'Change Chat Title',
             inputSchema: changeTitleInputSchema,
         }, async (args: { title: string }) => {

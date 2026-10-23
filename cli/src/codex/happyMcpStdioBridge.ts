@@ -17,6 +17,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { z } from 'zod';
 import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_MEDIA_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from '@/modules/common/displayImagePrompt';
+import { CHANGE_TITLE_TOOL_DESCRIPTION } from '@/modules/common/hapiMcpBridgePrompt';
 import {
   INSPECT_PEER_TOOL_DESCRIPTION,
   PING_PEER_TOOL_DESCRIPTION,
@@ -90,7 +91,14 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
       server.registerTool<any, any>(
         'change_title',
         {
-          description: 'Change the title of the current chat session',
+          // The description is the only instruction an ACP agent gets: it never
+          // sees the title instruction the native ones get in their system
+          // prompt. Without saying when to call the tool, an agent like
+          // MiniMax Code simply never calls it and the chat stays untitled
+          // until the agent publishes a title of its own at the end of the
+          // first turn. The same text the HTTP server carries is used here, so
+          // both paths tell the model the same thing.
+          description: CHANGE_TITLE_TOOL_DESCRIPTION,
           title: 'Change Chat Title',
           inputSchema: changeTitleInputSchema,
         },

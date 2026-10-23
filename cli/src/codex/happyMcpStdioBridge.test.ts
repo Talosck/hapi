@@ -43,6 +43,7 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 }))
 
 import { runHappyMcpStdioBridge } from './happyMcpStdioBridge'
+import { CHANGE_TITLE_TOOL_DESCRIPTION } from '@/modules/common/hapiMcpBridgePrompt'
 
 describe('runHappyMcpStdioBridge tool forwarding', () => {
     beforeEach(() => {
@@ -63,6 +64,25 @@ describe('runHappyMcpStdioBridge tool forwarding', () => {
         expect(description).toContain('human user')
         expect(description).toContain('does not provide image input to the model')
         expect(description).toContain('cannot be used to read, inspect, or analyze image contents')
+    })
+
+    it('tells the model when to call change_title', async () => {
+        // The ACP agents talk to this bridge, and they never see the title
+        // instruction the native ones get in their system prompt - the tool
+        // description is all they get. A description that only names the tool
+        // is too weak: MiniMax Code then never calls it and the chat stays
+        // untitled until the agent publishes a title of its own at the end of
+        // the first turn.
+        await runHappyMcpStdioBridge([
+            '--url',
+            'http://127.0.0.1:43006',
+            '--tools',
+            'change_title'
+        ])
+
+        const description = harness.configs.get('change_title')?.description
+        expect(description).toBe(CHANGE_TITLE_TOOL_DESCRIPTION)
+        expect(description).toContain('MUST call this tool exactly once at the start of every new chat')
     })
 
     it('registers and forwards skill_lookup when the HTTP server enables it', async () => {
