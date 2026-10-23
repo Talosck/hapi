@@ -2,6 +2,7 @@ import { access, open, readdir, readFile, stat } from 'fs/promises';
 import { basename, dirname, join, resolve } from 'path';
 import { homedir } from 'os';
 import { parse as parseYaml } from 'yaml';
+import { getMcodeDataDir } from '@/mcode/utils/mcodeSessionDirs';
 
 export interface SkillSummary {
     name: string;
@@ -55,12 +56,12 @@ function getAgentConfigDir(flavor?: string): string {
             return process.env.CODEX_HOME || join(getHomeDirectory(), '.codex');
         case 'grok':
             return process.env.GROK_HOME || join(getHomeDirectory(), '.grok');
-        case 'mcode': {
+        case 'mcode':
             // MiniMax Code's data directory is `~/.minimax` (or the configured
-            // MINIMAX_DATA_DIR/MAVIS_DATA_DIR), not `~/.mcode`.
-            const dataDir = process.env.MINIMAX_DATA_DIR?.trim() || process.env.MAVIS_DATA_DIR?.trim();
-            return dataDir || join(getHomeDirectory(), '.minimax');
-        }
+            // MINIMAX_DATA_DIR/MAVIS_DATA_DIR), not `~/.mcode`. The rule lives
+            // with the rest of the mcode paths, so the skills and the runtime
+            // read the same directory.
+            return getMcodeDataDir();
         default:
             return join(getHomeDirectory(), `.${normalizedFlavor}`);
     }
