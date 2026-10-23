@@ -209,7 +209,15 @@ export class PermissionAdapter {
         this.pendingRequests.clear();
 
         for (const request of pending) {
-            await this.backend.respondToPermission(request.sessionId, request, { outcome: 'cancelled' });
+            try {
+                await this.backend.respondToPermission(request.sessionId, request, { outcome: 'cancelled' });
+            } catch (error) {
+                // The agent that asked for the approval may already be gone -
+                // it cannot be told anything anymore. The request is still
+                // taken down below: a card nobody can answer must not stay on
+                // the screen.
+                logger.debug('[ACP] Could not cancel a permission request with the agent', error);
+            }
         }
 
         this.session.updateAgentState((currentState) => {

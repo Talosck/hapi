@@ -1016,6 +1016,17 @@ export type McodeAppsResponse = {
     quota?: McodeQuotaWindow | null
     error?: string
 }
+
+/**
+ * What a client asks for when it lists the connected apps.
+ *
+ * The machine caches the catalog, because reading it costs two subprocess
+ * spawns. A client that knows the list may have changed - the user connected
+ * an app outside HAPI - asks for a fresh answer instead of the cached one.
+ */
+export type McodeAppsRequest = {
+    forceRefresh?: boolean
+}
 /**
  * The body of a "patch the MiniMax Code goal" request.
  *

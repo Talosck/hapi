@@ -89,6 +89,15 @@ const MCODE_TURN_LEASE_STUCK_MS = 60_000;
  * turn into a restart loop.
  */
 const MCODE_MAX_AGENT_RESTARTS = 3;
+/**
+ * The span in which restarts are counted as one failure.
+ *
+ * The consecutive counter is reset by every turn that ran, so an agent that
+ * answers a turn and dies right after would restart forever without ever
+ * reaching the limit. Restarts that pile up inside this window are the same
+ * failure, however many turns ran between them.
+ */
+const MCODE_AGENT_RESTART_WINDOW_MS = 5 * 60_000;
 
 /**
  * Why the agent refused the turn.
@@ -323,6 +332,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * agent alive ends with a clear message instead of spinning.
      */
     private agentRestarts = 0;
+    /**
+     * When the agent process was started again, for the restart window.
+     *
+     * The counter above is reset by every turn that ran, so an agent that
+     * answers a turn and *then* dies would restart forever without ever
+     * reaching the limit. The window closes that hole: restarts that pile up
+     * inside a short span are the same failure, however many turns ran
+     * between them.
+     */
+    private readonly agentRestartTimes: number[] = [];
     /** Last delegation snapshot forwarded to the hub (state dedupe). */
     private lastDelegationSignature: string | null = null;
     /** Last goal lifecycle state rendered as a chat card. */
@@ -331,6 +350,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private currentSessionMode: string | null = null;
     /** The permission mode the hub currently shows for this session. */
     private hubPermissionMode: PermissionMode | null = null;
+    /**
+     * Whether the user was already told that this build cannot run the mode
+     * they asked for. The answer does not change while the session runs, so
+     * it is said once instead of on every turn.
+     */
+    private warnedAboutUnsupportedMode = false;
     /** Drives the goal and delegation extension methods the agent advertised. */
     private extensionControl: McodeExtensionControl | null = null;
     /** Drives MiniMax Code's conversation history controls (fork). */
@@ -415,10 +440,22 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     } | null> {
         const session = this.session;
         this.agentRestarts += 1;
-        if (this.agentRestarts > MCODE_MAX_AGENT_RESTARTS) {
+        this.agentRestartTimes.push(Date.now());
+        // Restarts that pile up inside the window are the same failure, even
+        // when turns ran between them: an agent that answers a turn and dies
+        // right after would otherwise restart forever.
+        const windowStart = Date.now() - MCODE_AGENT_RESTART_WINDOW_MS;
+        while (this.agentRestartTimes.length > 0 && this.agentRestartTimes[0] < windowStart) {
+            this.agentRestartTimes.shift();
+        }
+        const tooManyInARow = this.agentRestarts > MCODE_MAX_AGENT_RESTARTS;
+        const tooManyInTheWindow = this.agentRestartTimes.length > MCODE_MAX_AGENT_RESTARTS;
+        if (tooManyInARow || tooManyInTheWindow) {
             session.sendSessionEvent({
                 type: 'message',
-                message: `MiniMax Code stopped ${this.agentRestarts - 1} times in a row; ending this session.`
+                message: tooManyInARow
+                    ? `MiniMax Code stopped ${this.agentRestarts - 1} times in a row; ending this session.`
+                    : `MiniMax Code stopped ${this.agentRestartTimes.length} times in the last few minutes; ending this session.`
             });
             this.shouldExit = true;
             return null;
@@ -468,8 +505,27 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         const session = this.session;
         const messageBuffer = this.messageBuffer;
 
+        // The backend of the agent that died is replaced here. It is closed
+        // first: a backend that is dropped still holds its session-info timers
+        // and, when the agent never came up, a child process.
+        await this.closeBackend(this.backend);
+        // The approvals and the questionnaire of the dead agent belong to a
+        // process that is gone: they cannot be answered any more, so they are
+        // taken down instead of being left on the screen as a card that no
+        // handler answers.
+        await this.discardDeadRequests();
+
         const backend = createMcodeBackend();
         this.backend = backend;
+        // The permission policy is a per-process config option and the plan
+        // mode is an ACP session mode: a new agent process starts without
+        // either of them. The state that says "already applied" belongs to the
+        // process that died, so it is dropped here - otherwise the apply
+        // below would be skipped and the session would run under the agent's
+        // own default while the web still shows the mode the user picked.
+        this.hasAppliedPermissionMode = false;
+        this.requestedPermissionMode = null;
+        this.appliedPermissionMode = null;
         registerAcpSessionTitleSync(backend, session.client);
 
         backend.onStderrError((error) => {
@@ -597,16 +653,40 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         // pick.
         await this.applyPermissionMode(acpSessionId, session.getPermissionMode() as PermissionMode | undefined);
 
-        const effectiveModel = await this.applyInitialModel(acpSessionId, this.opts.model);
+        // A respawn loads the same native session again: the agent restores
+        // the model and the effort it was running with. HAPI's start-time
+        // request must not be applied on top of that - it would silently drop
+        // a model the user picked in the middle of the session. The model in
+        // effect before the crash is the one the user sees, so it is applied
+        // again; when HAPI does not know one, the agent's own answer wins.
+        const requestedModel = options.isRespawn
+            ? (this.currentBackendModel ?? undefined)
+            : this.opts.model;
+        const effectiveModel = await this.applyInitialModel(acpSessionId, requestedModel);
         this.currentBackendModel = effectiveModel;
-        this.defaultBackendModel = effectiveModel;
+        if (!options.isRespawn) {
+            this.defaultBackendModel = effectiveModel;
+        }
         if (effectiveModel && !options.isRespawn) {
             this.displayModel = effectiveModel;
             messageBuffer.addMessage(`[MODEL:${effectiveModel}]`, 'system');
         }
-        const effectiveEffort = await this.applyInitialEffort(acpSessionId, this.opts.effort);
+        // A model switch can change the advertised thinking-effort levels: the
+        // agent re-publishes its config options right after the switch, so the
+        // option list has to be read after that update - the cached one still
+        // belongs to the previous model otherwise, and an effort the new model
+        // supports would be rejected as "not advertised".
+        if (requestedModel) {
+            await backend.waitForSessionUpdateQueue(500);
+        }
+        const requestedEffort = options.isRespawn
+            ? (this.currentBackendEffort ?? undefined)
+            : this.opts.effort;
+        const effectiveEffort = await this.applyInitialEffort(acpSessionId, requestedEffort);
         this.currentBackendEffort = effectiveEffort;
-        this.defaultBackendEffort = effectiveEffort;
+        if (!options.isRespawn) {
+            this.defaultBackendEffort = effectiveEffort;
+        }
         this.applyDisplayMode(session.getPermissionMode() as PermissionMode | undefined, effectiveModel ?? undefined);
         // The native session's current model/effort are only known after
         // session/new (or session/load). Report them so the hub does not keep
@@ -622,8 +702,13 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         this.setSteeringActive(false);
         // The goal notification is a one-way push: a resumed session would
         // otherwise show no goal even though the agent is still running one.
-        await this.restoreGoalState(acpSessionId);
-        await this.restoreDelegationState(acpSessionId);
+        // The goal and the delegation tree are independent reads, so they are
+        // asked for at the same time - one round trip instead of two on every
+        // connect.
+        await Promise.all([
+            this.restoreGoalState(acpSessionId),
+            this.restoreDelegationState(acpSessionId)
+        ]);
 
         return acpSessionId;
     }
@@ -1326,6 +1411,59 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     }
 
     /**
+     * Closes the backend of the agent that died.
+     *
+     * The close is bounded: the update queue of a dead agent can still be
+     * busy, and a session that waits for it forever would never bring the
+     * agent back.
+     */
+    private async closeBackend(backend: McodeBackend | null): Promise<void> {
+        if (!backend) return;
+        try {
+            await Promise.race([
+                backend.disconnect(),
+                new Promise<void>((resolve) => {
+                    const timer = setTimeout(resolve, 2_000);
+                    timer.unref?.();
+                })
+            ]);
+        } catch (error) {
+            logger.debug('[mcode-remote] Could not close the backend of the dead agent', error);
+        }
+    }
+
+    /**
+     * Takes down the requests of the agent that died.
+     *
+     * A pending approval and a pending questionnaire belong to the process
+     * that asked for them. When that process is gone the card the user sees
+     * cannot be answered any more: the handler behind it is replaced with the
+     * one of the new agent, which does not know the old requests. They are
+     * dropped here, so the web does not keep a card that nothing answers.
+     */
+    private async discardDeadRequests(): Promise<void> {
+        const questionHandler = this.questionHandler;
+        const permissionHandler = this.permissionHandler;
+        this.questionHandler = null;
+        this.permissionHandler = null;
+
+        if (questionHandler) {
+            try {
+                await questionHandler.cancelAll('The agent restarted');
+            } catch (error) {
+                logger.debug('[mcode-remote] Could not close the questionnaire of the dead agent', error);
+            }
+        }
+        if (permissionHandler) {
+            try {
+                await permissionHandler.cancelAll('The agent restarted');
+            } catch (error) {
+                logger.debug('[mcode-remote] Could not close the approvals of the dead agent', error);
+            }
+        }
+    }
+
+    /**
      * Applies the requested permission mode and reports whether the agent
      * accepted it. A failure can leave the policy half-applied (the config
      * option is process-scoped and the mode is a separate session axis), so
@@ -1344,6 +1482,19 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 // HAPI's own request decides the session mode the agent runs with:
                 // MiniMax Code applies a mode transition on the next prompt.
                 this.currentSessionMode = mapMcodePermissionMode(mode).sessionMode;
+            } else if (applied.mode !== (mode ?? 'default')) {
+                // The agent cannot run the mode the user asked for: a build
+                // without `session/set_mode` cannot run in plan mode. The hub
+                // must be told what the agent really runs, or the web keeps
+                // advertising a mode the session does not have.
+                this.opts.onPermissionModeChanged?.(applied.mode);
+                if (!this.warnedAboutUnsupportedMode) {
+                    this.warnedAboutUnsupportedMode = true;
+                    this.session.sendSessionEvent({
+                        type: 'message',
+                        message: `MiniMax Code cannot run in ${mode} mode on this build; it runs in ${applied.mode} mode instead.`
+                    });
+                }
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);

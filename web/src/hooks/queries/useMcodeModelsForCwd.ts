@@ -23,9 +23,14 @@ export function useMcodeModelsForCwd(args: {
     const enabled = Boolean(args.enabled && api && machineId && trimmedCwd)
 
     const query = useQuery({
-        queryKey: machineId && trimmedCwd
-            ? queryKeys.machineMcodeModelsForCwd(machineId, trimmedCwd)
-            : ['machine-mcode-models', 'unknown', 'unknown'] as const,
+        // The catalog comes from the provider configuration of the machine,
+        // not from the workspace: every directory on a machine shares one
+        // answer, so the query is keyed by the machine alone. Keying it by
+        // the directory asked the machine again for every path the user
+        // typed.
+        queryKey: machineId
+            ? queryKeys.machineMcodeModels(machineId)
+            : ['machine-mcode-models', 'unknown'] as const,
         queryFn: async () => {
             if (!api || !machineId || !trimmedCwd) {
                 throw new Error('MiniMax Code models target unavailable')

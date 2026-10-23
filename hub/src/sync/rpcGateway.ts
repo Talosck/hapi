@@ -558,11 +558,11 @@ export class RpcGateway {
      * The connector tools are not part of the ACP surface, so the CLI asks
      * the `mcode-tools` CLI directly and reports what it finds.
      */
-    async listMcodeApps(machineId: string): Promise<McodeAppsResponse> {
+    async listMcodeApps(machineId: string, options?: { forceRefresh?: boolean }): Promise<McodeAppsResponse> {
         return await this.machineRpc(
             machineId,
             RPC_METHODS.ListMcodeApps,
-            {},
+            { forceRefresh: options?.forceRefresh === true },
             MODEL_LIST_RPC_TIMEOUT_MS
         ) as McodeAppsResponse
     }

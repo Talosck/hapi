@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useRef } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { McodeModelSummary } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
@@ -8,12 +9,19 @@ import type { McodeModelsResponse } from '@hapi/protocol/apiTypes'
  * How often the catalog is re-read while it is still empty.
  *
  * The agent publishes its catalog when it starts, so a session that is not
- * connected yet answers with an empty list. Polling for a short while lets
- * the picker fill in as soon as the agent is up, instead of waiting for an
- * unrelated refresh.
+ * connected yet answers with an empty list. Polling lets the picker fill in
+ * as soon as the agent is up, instead of waiting for an unrelated refresh.
  */
 const MCODE_MODEL_DISCOVERY_POLL_MS = 1000
-const MAX_MCODE_MODEL_DISCOVERY_POLLS = 10
+/**
+ * How long the catalog is looked for before the discovery gives up.
+ *
+ * The budget is a span of time and not a number of polls: an agent that
+ * starts slowly answers with an empty list many times in a row, and a budget
+ * that counts those answers runs out before the agent is up. A picker that
+ * gave up then stayed empty until something else invalidated the query.
+ */
+const MCODE_MODEL_DISCOVERY_BUDGET_MS = 60_000
 
 export function shouldRetryMcodeModelsQuery(failureCount: number): boolean {
     return failureCount < 3
@@ -22,18 +30,20 @@ export function shouldRetryMcodeModelsQuery(failureCount: number): boolean {
 export function getMcodeModelsRefetchInterval(
     enabled: boolean,
     data: McodeModelsResponse | undefined,
-    pollCount: number
+    discoveryStartedAt: number,
+    now: number
 ): 1000 | false {
-    if (!enabled || pollCount >= MAX_MCODE_MODEL_DISCOVERY_POLLS) {
+    if (!enabled) {
         return false
     }
-    if (!data) {
-        return MCODE_MODEL_DISCOVERY_POLL_MS
+    const hasModels = data?.success !== false && (data?.availableModels?.length ?? 0) > 0
+    if (hasModels) {
+        return false
     }
-    if (data.success === false) {
-        return MCODE_MODEL_DISCOVERY_POLL_MS
+    if (now - discoveryStartedAt >= MCODE_MODEL_DISCOVERY_BUDGET_MS) {
+        return false
     }
-    return (data.availableModels?.length ?? 0) > 0 ? false : MCODE_MODEL_DISCOVERY_POLL_MS
+    return MCODE_MODEL_DISCOVERY_POLL_MS
 }
 
 export function useMcodeModelsForSession(args: {
@@ -49,6 +59,11 @@ export function useMcodeModelsForSession(args: {
     error: string | null
 } {
     const enabled = Boolean(args.enabled && args.api && args.sessionId)
+    // When the discovery started, per session. The span of time is what the
+    // budget is measured against, so it must not be a number of polls.
+    const discovery = useRef<{ key: string; startedAt: number } | null>(null)
+    const sessionKey = args.sessionId ?? ''
+
     const query = useQuery({
         queryKey: args.sessionId
             ? queryKeys.sessionMcodeModels(args.sessionId)
@@ -60,11 +75,22 @@ export function useMcodeModelsForSession(args: {
         enabled,
         staleTime: 30_000,
         retry: (failureCount) => shouldRetryMcodeModelsQuery(failureCount),
-        refetchInterval: (query) => getMcodeModelsRefetchInterval(
-            enabled,
-            query.state.data as McodeModelsResponse | undefined,
-            query.state.dataUpdateCount + query.state.errorUpdateCount
-        ),
+        // A session that was opened before its agent was up keeps an empty
+        // catalog until something else invalidates the query. Coming back to
+        // the tab asks again.
+        refetchOnWindowFocus: true,
+        refetchInterval: (query) => {
+            const now = Date.now()
+            if (discovery.current?.key !== sessionKey) {
+                discovery.current = { key: sessionKey, startedAt: now }
+            }
+            return getMcodeModelsRefetchInterval(
+                enabled,
+                query.state.data as McodeModelsResponse | undefined,
+                discovery.current.startedAt,
+                now
+            )
+        },
     })
 
     return {

@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useRef } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { McodeConnectorApp, McodeConnectorAuth, McodeQuotaWindow } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
@@ -10,6 +11,16 @@ import { queryKeys } from '@/lib/query-keys'
  * only ask for the answer it already has.
  */
 const APPS_REFRESH_MS = 5 * 60_000
+
+/**
+ * How long a read counts as "just now" for the forced refresh.
+ *
+ * The machine caches the catalog for minutes, because reading it costs two
+ * subprocess spawns. A user who connects an app comes back to the tab right
+ * after, so a later read asks for a fresh answer - but not when the last
+ * read was a moment ago, or every tab switch would spawn them.
+ */
+const APPS_FORCE_REFRESH_GRACE_MS = 15_000
 
 /**
  * The apps connected to a machine's MiniMax Code installation.
@@ -31,6 +42,7 @@ export function useMcodeApps(args: {
 } {
     const { api, machineId } = args
     const enabled = Boolean(args.enabled && api && machineId)
+    const lastReadAt = useRef(0)
 
     const query = useQuery({
         queryKey: machineId
@@ -38,7 +50,15 @@ export function useMcodeApps(args: {
             : ['machine-mcode-apps', 'unknown'] as const,
         queryFn: async () => {
             if (!api || !machineId) throw new Error('MiniMax Code apps target unavailable')
-            return await api.getMachineMcodeApps(machineId)
+            const now = Date.now()
+            // The first read may use the machine's cache. A later read is the
+            // user coming back to the tab after connecting an app, so it asks
+            // for a fresh answer.
+            const forceRefresh = lastReadAt.current > 0
+                && now - lastReadAt.current > APPS_FORCE_REFRESH_GRACE_MS
+            const result = await api.getMachineMcodeApps(machineId, { forceRefresh })
+            lastReadAt.current = Date.now()
+            return result
         },
         enabled,
         // The connected apps change when the user connects one, which happens

@@ -2404,3 +2404,125 @@ describe('mcodeRemoteLauncher turn lease', () => {
         queue.close()
     })
 })
+
+describe('mcodeRemoteLauncher agent restart', () => {
+    it('applies the permission policy again when the agent is started again', async () => {
+        // The tool permission policy is a per-process config option: an agent
+        // that was started again runs without it. The policy has to be applied
+        // again, or the session runs under the agent's own default while the
+        // web still shows the mode the user picked.
+        let promptCalls = 0
+        let agentDead = false
+        const backend = createBackend({
+            isClosed: vi.fn(() => agentDead),
+            initialize: vi.fn(async () => {
+                agentDead = false
+            }),
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    agentDead = true
+                    throw new Error('ACP transport is closed')
+                }
+            })
+        })
+        const { session, queue } = createSteerSession()
+        ;(session as unknown as { getPermissionMode: () => string }).getPermissionMode = () => 'auto'
+        queue.push('first', { permissionMode: 'auto', model: null })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 20_000 })
+
+        const configMock = backend.setConfigOption as ReturnType<typeof vi.fn>
+        const policyWrites = configMock.mock.calls.filter((call) => call[1] === 'permissionMode')
+        // Once for the agent that started the session, once for the agent that
+        // was started again.
+        expect(policyWrites.length).toBeGreaterThanOrEqual(2)
+        expect(policyWrites[policyWrites.length - 1][2]).toBe('auto')
+        queue.close()
+    }, 25_000)
+
+    it('keeps the model the user picked when the agent is started again', async () => {
+        // The model the user picked in the middle of the session is not the
+        // one the session was started with: a restart must not put the old
+        // one back, and the hub must not be told that it did.
+        let promptCalls = 0
+        let agentDead = false
+        const reportedModels: (string | null)[] = []
+        const backend = createBackend({
+            isClosed: vi.fn(() => agentDead),
+            initialize: vi.fn(async () => {
+                agentDead = false
+            }),
+            getSessionModelsMetadata: vi.fn(() => ({
+                currentModelId: 'm:good',
+                availableModels: [{ modelId: 'm:good' }, { modelId: 'm:fast' }]
+            })),
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) {
+                    agentDead = true
+                    throw new Error('ACP transport is closed')
+                }
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: 'm:fast' })
+
+        void mcodeRemoteLauncher(session as never, {
+            onConfigDiscovered: (config: { model: string | null }) => {
+                reportedModels.push(config.model)
+            }
+        })
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 20_000 })
+
+        // The model that is in effect after the restart is the one the user
+        // asked for, not the one the session was started with.
+        expect(reportedModels[reportedModels.length - 1]).toBe('m:fast')
+        queue.close()
+    }, 25_000)
+
+    it('ends the session when the agent keeps dying after it answered a turn', async () => {
+        // An agent that answers a turn and dies right after it resets the
+        // "died in a row" counter every time, so the session would restart it
+        // forever. The restarts that pile up in a short span are the same
+        // failure and end the session.
+        let agentDead = false
+        let turns = 0
+        const backend = createBackend({
+            isClosed: vi.fn(() => agentDead),
+            initialize: vi.fn(async () => {
+                agentDead = false
+            })
+        })
+        const { session, queue } = createSteerSession()
+        const mode = { permissionMode: 'default' as const, model: null }
+        queue.push('first', mode)
+
+        backend.prompt = vi.fn(async () => {
+            if (agentDead) {
+                throw new Error('ACP transport is closed')
+            }
+            // The agent answered the turn and died right after it.
+            agentDead = true
+            turns += 1
+            // The next message finds the agent gone.
+            queue.push(`follow up ${turns}`, mode)
+        })
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+            expect(events.filter((event: { message?: string } | undefined) =>
+                typeof event?.message === 'string' && event.message.includes('ending this session'))).toHaveLength(1)
+        }, { timeout: 40_000 })
+
+        // The agent was started again a bounded number of times.
+        expect((backend.initialize as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(5)
+        queue.close()
+    }, 45_000)
+})

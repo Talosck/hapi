@@ -88,6 +88,28 @@ describe('mcode apps route', () => {
 
         expect(res.status).toBe(404)
     })
+
+    it('asks the machine for a fresh catalog when the client asks for one', async () => {
+        const calls: Array<{ machineId: string; forceRefresh?: boolean }> = []
+        const app = createMachineApp({
+            listMcodeApps: (async (machineId: string, options?: { forceRefresh?: boolean }) => {
+                calls.push({ machineId, forceRefresh: options?.forceRefresh })
+                return {
+                    success: true,
+                    apps: [],
+                    auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+                }
+            }) as SyncEngine['listMcodeApps']
+        })
+
+        const plain = await app.request('/api/machines/machine-1/mcode-apps')
+        const forced = await app.request('/api/machines/machine-1/mcode-apps?forceRefresh=1')
+
+        expect(plain.status).toBe(200)
+        expect(forced.status).toBe(200)
+        expect(calls[0]).toEqual({ machineId: 'machine-1', forceRefresh: false })
+        expect(calls[1]).toEqual({ machineId: 'machine-1', forceRefresh: true })
+    })
 })
 
 describe('machines routes', () => {

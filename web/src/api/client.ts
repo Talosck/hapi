@@ -1022,9 +1022,10 @@ export class ApiClient {
      * The connector tools are not part of the ACP surface, so this is the
      * only way a client learns what the agent can reach.
      */
-    async getMachineMcodeApps(machineId: string): Promise<McodeAppsResponse> {
+    async getMachineMcodeApps(machineId: string, options?: { forceRefresh?: boolean }): Promise<McodeAppsResponse> {
+        const query = options?.forceRefresh ? '?forceRefresh=1' : ''
         return await this.request<McodeAppsResponse>(
-            `/api/machines/${encodeURIComponent(machineId)}/mcode-apps`
+            `/api/machines/${encodeURIComponent(machineId)}/mcode-apps${query}`
         )
     }
 

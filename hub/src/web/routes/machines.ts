@@ -404,7 +404,11 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         if (machine instanceof Response) return machine
 
         try {
-            return c.json(await engine.listMcodeApps(machineId))
+            // A client that knows the connected apps may have changed asks for
+            // a fresh answer instead of the machine's cached one.
+            const forceRefresh = c.req.query('forceRefresh') === '1'
+                || c.req.query('forceRefresh') === 'true'
+            return c.json(await engine.listMcodeApps(machineId, { forceRefresh }))
         } catch (error) {
             return c.json({
                 success: false,

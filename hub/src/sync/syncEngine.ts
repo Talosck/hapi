@@ -4410,8 +4410,8 @@ export class SyncEngine {
     }
 
     /** Lists the apps connected to the machine's MiniMax Code installation. */
-    async listMcodeApps(machineId: string): Promise<McodeAppsResponse> {
-        return await this.rpcGateway.listMcodeApps(machineId)
+    async listMcodeApps(machineId: string, options?: { forceRefresh?: boolean }): Promise<McodeAppsResponse> {
+        return await this.rpcGateway.listMcodeApps(machineId, options)
     }
 
     async listMcodeModelsForSession(sessionId: string): Promise<RpcListMcodeModelsResponse> {

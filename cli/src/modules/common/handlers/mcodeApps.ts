@@ -1,6 +1,6 @@
 import { logger } from '@/ui/logger'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
-import type { McodeAppsResponse } from '@hapi/protocol/apiTypes'
+import type { McodeAppsResponse, McodeAppsRequest } from '@hapi/protocol/apiTypes'
 import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager'
 import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand'
 import { listMcodeConnectorApps } from '@/mcode/utils/mcodeConnectorTools'
@@ -15,12 +15,16 @@ import { getErrorMessage, rpcError } from '../rpcResponses'
  * way an external client learns which apps the agent can reach.
  */
 export function registerMcodeAppHandlers(rpcHandlerManager: RpcHandlerManager): void {
-    rpcHandlerManager.registerHandler<Record<string, never>, McodeAppsResponse>(
+    rpcHandlerManager.registerHandler<McodeAppsRequest, McodeAppsResponse>(
         RPC_METHODS.ListMcodeApps,
-        async () => {
+        async (payload) => {
             try {
                 const catalog = await listMcodeConnectorApps({
-                    mcodeCommand: getAgentLaunchCommand('mcode')
+                    mcodeCommand: getAgentLaunchCommand('mcode'),
+                    // The connected apps change outside HAPI. A client that
+                    // asks for a fresh answer gets one instead of the cached
+                    // catalog of the last few minutes.
+                    forceRefresh: payload?.forceRefresh === true
                 })
                 // The usage of the account is read on its own: a host that
                 // cannot hand out a lease must not cost the user the list of
