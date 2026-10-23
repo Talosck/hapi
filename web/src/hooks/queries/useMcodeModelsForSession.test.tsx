@@ -155,3 +155,31 @@ describe('useMcodeModelsForSession', () => {
         }
     })
 })
+
+describe('the lists of a session that has no catalog yet', () => {
+    it('keeps the same list identity across renders', () => {
+        // A list that is new on every render invalidates the memos that read
+        // it, so the model picker is rebuilt on every render of the chat.
+        const api = {
+            getSessionMcodeModels: vi.fn(async () => ({
+                success: true,
+                availableModels: [] as Array<{ modelId: string }>,
+                currentModelId: null
+            }))
+        } as unknown as ApiClient
+        const queryClient = createQueryClient()
+
+        const { result, rerender } = renderHook(
+            () => useMcodeModelsForSession({ api, sessionId: 'session-1', enabled: true }),
+            { wrapper: wrapper(queryClient) }
+        )
+
+        const models = result.current.availableModels
+        const efforts = result.current.effortOptions
+
+        rerender()
+
+        expect(result.current.availableModels).toBe(models)
+        expect(result.current.effortOptions).toBe(efforts)
+    })
+})

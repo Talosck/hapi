@@ -23,6 +23,16 @@ const MCODE_MODEL_DISCOVERY_POLL_MS = 1000
  */
 const MCODE_MODEL_DISCOVERY_BUDGET_MS = 60_000
 
+/**
+ * The lists of a session that has no catalog yet.
+ *
+ * They are the same list on every render: a list that is new each time
+ * invalidates the memos that read it, so the model picker is rebuilt on every
+ * render of the chat.
+ */
+const NO_MODELS: McodeModelSummary[] = []
+const NO_EFFORT_OPTIONS: Array<{ value: string; name?: string }> = []
+
 export function shouldRetryMcodeModelsQuery(failureCount: number): boolean {
     return failureCount < 3
 }
@@ -103,9 +113,9 @@ export function useMcodeModelsForSession(args: {
     })
 
     return {
-        availableModels: query.data?.availableModels ?? [],
+        availableModels: query.data?.availableModels ?? NO_MODELS,
         currentModelId: query.data?.currentModelId ?? null,
-        effortOptions: query.data?.effortOptions ?? [],
+        effortOptions: query.data?.effortOptions ?? NO_EFFORT_OPTIONS,
         currentEffort: query.data?.currentEffort ?? null,
         isLoading: query.isLoading,
         error: query.data?.success === false

@@ -3,6 +3,16 @@ import type { ApiClient } from '@/api/client'
 import type { McodeModelSummary } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 
+/**
+ * The lists of a machine that has no catalog yet.
+ *
+ * They are the same list on every render: a list that is new each time
+ * invalidates the memos that read it, so the model picker is rebuilt on every
+ * render of the form.
+ */
+const NO_MODELS: McodeModelSummary[] = []
+const NO_EFFORT_OPTIONS: Array<{ value: string; name?: string }> = []
+
 export function useMcodeModelsForCwd(args: {
     api: ApiClient | null
     machineId?: string | null
@@ -43,9 +53,9 @@ export function useMcodeModelsForCwd(args: {
     })
 
     return {
-        availableModels: query.data?.availableModels ?? [],
+        availableModels: query.data?.availableModels ?? NO_MODELS,
         currentModelId: query.data?.currentModelId ?? null,
-        effortOptions: query.data?.effortOptions ?? [],
+        effortOptions: query.data?.effortOptions ?? NO_EFFORT_OPTIONS,
         currentEffort: query.data?.currentEffort ?? null,
         isLoading: query.isLoading,
         error: query.data?.success === false
