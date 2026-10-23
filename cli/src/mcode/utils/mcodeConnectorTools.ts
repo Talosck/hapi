@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process'
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, posix, win32 } from 'node:path'
 import { promisify } from 'node:util'
 import { asString, isObject } from '@hapi/protocol'
 import { logger } from '@/ui/logger'
+import { getMcodeDataDir } from './mcodeSessionDirs'
 
 const execFileAsync = promisify(execFile)
 
@@ -106,6 +107,17 @@ const BROKER_RUN_DIR = 'run'
 const BROKER_SOCKET_FILE = 'mcode-auth-lease-v1.sock'
 const BROKER_CAPABILITY_FILE = 'mcode-auth-lease-v1.cap'
 
+/**
+ * The directory the current MiniMax Code keeps its broker in.
+ *
+ * The host no longer keeps it in the temp directory under a name that carries
+ * its pid: it keeps it in the data directory, either as one shared instance or
+ * as one instance per host under a generated name.
+ */
+const BROKER_DATA_DIR = 'run'
+/** The prefix of the per-host instance directories. */
+const BROKER_INSTANCE_PREFIX = 'mt-'
+
 /** The variables the MiniMax Code host publishes to its children. */
 const HOST_ENV_PREFIX = '__MAVIS_MCODE_TOOLS_'
 
@@ -143,6 +155,127 @@ function brokerTmpRoots(): string[] {
 }
 
 /**
+ * The pid that owns each unix socket of the machine.
+ *
+ * The broker of the current MiniMax Code carries no pid in its name, so the
+ * kernel is the only one that can say which host a broker belongs to - and a
+ * broker whose owner is gone cannot be asked.
+ *
+ * Linux keeps the unix sockets of the machine in one file, with the inode of
+ * each socket, and every process lists its open sockets under `/proc`. The two
+ * together answer "who holds this socket".
+ */
+function unixSocketOwners(): Map<string, number> {
+    const owners = new Map<string, number>()
+    if (process.platform !== 'linux') return owners
+
+    let inodesByPath = new Map<string, string>()
+    try {
+        for (const line of readFileSync('/proc/net/unix', 'utf8').split('\n')) {
+            const columns = line.trim().split(/\s+/)
+            // Num RefCount Protocol Flags Type St Inode Path
+            if (columns.length < 8) continue
+            const path = columns[7]
+            const inode = columns[6]
+            if (!path || !inode) continue
+            inodesByPath.set(path, inode)
+        }
+    } catch {
+        return owners
+    }
+    if (inodesByPath.size === 0) return owners
+
+    let entries: string[]
+    try {
+        entries = readdirSync('/proc')
+    } catch {
+        return owners
+    }
+
+    const pidBySocket = new Map<string, number>()
+    for (const entry of entries) {
+        if (!/^\d+$/.test(entry)) continue
+        let fds: string[]
+        try {
+            fds = readdirSync(`/proc/${entry}/fd`)
+        } catch {
+            continue
+        }
+        for (const fd of fds) {
+            let target: string
+            try {
+                target = readlinkSync(`/proc/${entry}/fd/${fd}`)
+            } catch {
+                // The descriptor went away while it was read.
+                continue
+            }
+            const match = /^socket:\[(\d+)\]$/.exec(target)
+            if (!match) continue
+            if (!pidBySocket.has(match[1])) pidBySocket.set(match[1], Number(entry))
+        }
+    }
+
+    for (const [path, inode] of inodesByPath) {
+        const pid = pidBySocket.get(inode)
+        if (pid !== undefined) owners.set(path, pid)
+    }
+    return owners
+}
+
+/**
+ * The brokers the current MiniMax Code keeps in its data directory.
+ *
+ * The host keeps one instance per host under a generated name, next to one
+ * shared instance. The name carries no pid, so the owner of the socket is
+ * what tells a live broker from the one a crashed host left behind.
+ */
+export function discoverMcodeDataDirBrokers(options?: {
+    dataDir?: string
+    owners?: Map<string, number>
+    isProcessAlive?: (pid: number) => boolean
+}): McodeConnectorBroker[] {
+    const runDir = join(options?.dataDir ?? getMcodeDataDir(), BROKER_DATA_DIR)
+    const owners = options?.owners ?? unixSocketOwners()
+    const alive = options?.isProcessAlive ?? isProcessAlive
+
+    let entries: string[]
+    try {
+        entries = readdirSync(runDir)
+    } catch {
+        return []
+    }
+
+    const found: { broker: McodeConnectorBroker; startedAt: number }[] = []
+    for (const name of entries) {
+        // The shared instance sits in the run directory itself, the per-host
+        // ones in a generated directory below it.
+        const instanceDir = name.startsWith(BROKER_INSTANCE_PREFIX)
+            ? join(runDir, name)
+            : runDir
+        const endpoint = join(instanceDir, BROKER_SOCKET_FILE)
+        const capabilityFile = join(instanceDir, BROKER_CAPABILITY_FILE)
+        if (!existsSync(endpoint) || !existsSync(capabilityFile)) continue
+
+        // A host that is gone leaves its instance behind, and nobody can ask
+        // that one. The owner of the socket says whether it is still there.
+        const owner = owners.get(endpoint)
+        if (owner !== undefined && !alive(owner)) continue
+
+        let startedAt = 0
+        try {
+            startedAt = statSync(instanceDir).mtimeMs
+        } catch {
+            // The directory went away between the listing and the stat.
+        }
+        found.push({ broker: { endpoint, capabilityFile }, startedAt })
+    }
+
+    return found
+        .sort((a, b) => b.startedAt - a.startedAt)
+        .map((entry) => entry.broker)
+}
+
+/**
  * The brokers of the MiniMax Code hosts running on this machine.
  *
  * The broker dies with its host, so a leftover directory from a session that
@@ -151,6 +284,8 @@ function brokerTmpRoots(): string[] {
  */
 export function discoverMcodeConnectorBrokers(options?: {
     tmpRoot?: string
+    dataDir?: string
+    owners?: Map<string, number>
     isProcessAlive?: (pid: number) => boolean
 }): McodeConnectorBroker[] {
     const roots = options?.tmpRoot ? [options.tmpRoot] : brokerTmpRoots()
@@ -190,6 +325,16 @@ export function discoverMcodeConnectorBrokers(options?: {
         }
     }
 
+    for (const broker of discoverMcodeDataDirBrokers({
+        dataDir: options?.dataDir,
+        owners: options?.owners,
+        isProcessAlive: options?.isProcessAlive
+    })) {
+        if (seen.has(broker.endpoint)) continue
+        seen.add(broker.endpoint)
+        found.push({ broker, startedAt: 0 })
+    }
+
     // The newest host is the one the user is working in.
     return found
         .sort((a, b) => b.startedAt - a.startedAt)
@@ -202,10 +347,18 @@ export function discoverMcodeConnectorBrokers(options?: {
  * The host names its broker directory after its own pid, so a host HAPI
  * launched is found exactly - no scan of the temp directory, and no guess
  * about which of the running hosts the user meant.
+ *
+ * The current MiniMax Code names the directory after nothing, so the owner
+ * of the socket is what identifies the host.
  */
 export function findMcodeConnectorBrokerForPid(
     pid: number,
-    options?: { tmpRoot?: string }
+    options?: {
+        tmpRoot?: string
+        dataDir?: string
+        owners?: Map<string, number>
+        isProcessAlive?: (pid: number) => boolean
+    }
 ): McodeConnectorBroker | null {
     if (!Number.isSafeInteger(pid) || pid <= 0) return null
     const roots = options?.tmpRoot ? [options.tmpRoot] : brokerTmpRoots()
@@ -230,6 +383,15 @@ export function findMcodeConnectorBrokerForPid(
             if (!existsSync(endpoint) || !existsSync(capabilityFile)) continue
             return { endpoint, capabilityFile }
         }
+    }
+
+    const owners = options?.owners ?? unixSocketOwners()
+    for (const broker of discoverMcodeDataDirBrokers({
+        dataDir: options?.dataDir,
+        owners,
+        isProcessAlive: options?.isProcessAlive
+    })) {
+        if (owners.get(broker.endpoint) === pid) return broker
     }
 
     return null
@@ -272,10 +434,11 @@ export function knownMcodeAgentHostPids(): number[] {
  */
 export function knownAgentConnectorBrokers(options?: {
     tmpRoot?: string
+    dataDir?: string
 }): McodeConnectorBroker[] {
     const brokers: McodeConnectorBroker[] = []
     for (const pid of knownMcodeAgentHostPids()) {
-        const broker = findMcodeConnectorBrokerForPid(pid, { tmpRoot: options?.tmpRoot })
+        const broker = findMcodeConnectorBrokerForPid(pid, { tmpRoot: options?.tmpRoot, dataDir: options?.dataDir })
         if (!broker) continue
         if (brokers.some((known) => known.endpoint === broker.endpoint)) continue
         brokers.push(broker)
@@ -292,9 +455,10 @@ export function knownAgentConnectorBrokers(options?: {
  */
 export function preferredMcodeConnectorBrokers(options?: {
     tmpRoot?: string
+    dataDir?: string
 }): McodeConnectorBroker[] {
     const brokers = knownAgentConnectorBrokers(options)
-    for (const broker of discoverMcodeConnectorBrokers({ tmpRoot: options?.tmpRoot })) {
+    for (const broker of discoverMcodeConnectorBrokers({ tmpRoot: options?.tmpRoot, dataDir: options?.dataDir })) {
         if (brokers.some((known) => known.endpoint === broker.endpoint)) continue
         brokers.push(broker)
     }
@@ -433,6 +597,8 @@ export function mcodeConnectorProbes(options?: {
     brokers?: McodeConnectorBroker[]
     /** Where the hosts keep their brokers. Exposed for tests. */
     tmpRoot?: string
+    /** Where the current MiniMax Code keeps its brokers. Exposed for tests. */
+    dataDir?: string
 }): McodeConnectorProbe[] {
     const command = options?.command ?? resolveMcodeToolsCommand('mcode')
     const env = options?.env ?? process.env
@@ -454,7 +620,7 @@ export function mcodeConnectorProbes(options?: {
     // The agent this process launched is next. It is known by its pid, so
     // the answer is about the agent the user is actually looking at and not
     // about whichever host happens to be running on the machine.
-    for (const broker of knownAgentConnectorBrokers({ tmpRoot: options?.tmpRoot })) {
+    for (const broker of knownAgentConnectorBrokers({ tmpRoot: options?.tmpRoot, dataDir: options?.dataDir })) {
         if (probes.some((probe) => probeBrokerEndpoint(probe) === broker.endpoint)) continue
         probes.push({
             command,
@@ -462,7 +628,10 @@ export function mcodeConnectorProbes(options?: {
         })
     }
 
-    const brokers = options?.brokers ?? discoverMcodeConnectorBrokers()
+    const brokers = options?.brokers ?? discoverMcodeConnectorBrokers({
+        tmpRoot: options?.tmpRoot,
+        dataDir: options?.dataDir
+    })
     for (const broker of brokers) {
         const endpoint = broker.endpoint
         if (probes.some((probe) => probeBrokerEndpoint(probe) === endpoint)) continue

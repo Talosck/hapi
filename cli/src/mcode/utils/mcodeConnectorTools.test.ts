@@ -39,6 +39,44 @@ function makeBrokerRoot(hosts: { dir: string; withBroker: boolean }[]): string {
     return root
 }
 
+/**
+ * A data directory that looks like the one of a machine with MiniMax Code
+ * hosts running in it.
+ *
+ * The current MiniMax Code keeps its broker in the data directory: one
+ * instance per host under a generated name, next to one shared instance.
+ */
+function makeDataDir(instances: { dir: string; withBroker: boolean }[]): string {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hapi-mcode-data-'))
+    tempRoots.push(dataDir)
+    const runDir = join(dataDir, 'run')
+    mkdirSync(runDir, { recursive: true })
+    for (const instance of instances) {
+        const dir = instance.dir ? join(runDir, instance.dir) : runDir
+        mkdirSync(dir, { recursive: true })
+        if (instance.withBroker) {
+            writeFileSync(join(dir, 'mcode-auth-lease-v1.cap'), 'secret')
+            writeFileSync(join(dir, 'mcode-auth-lease-v1.sock'), '')
+        }
+    }
+    return dataDir
+}
+
+/**
+ * A data directory without a broker in it.
+ *
+ * The tests ask through a fixed machine, so the data directory of the machine
+ * they run on has to stay out of the way.
+ */
+function emptyDataDir(): string {
+    return makeDataDir([])
+}
+
+/** The socket of a broker instance in a data directory. */
+function instanceSocket(dataDir: string, instance: string): string {
+    return join(dataDir, 'run', instance, 'mcode-auth-lease-v1.sock')
+}
+
 afterEach(() => {
     for (const root of tempRoots.splice(0)) {
         rmSync(root, { recursive: true, force: true })
@@ -154,7 +192,7 @@ describe('discoverMcodeConnectorBrokers', () => {
             { dir: 'mcode-tools-tui-4242-abc', withBroker: true }
         ])
 
-        const brokers = discoverMcodeConnectorBrokers({ tmpRoot: root, isProcessAlive: () => true })
+        const brokers = discoverMcodeConnectorBrokers({ tmpRoot: root, dataDir: emptyDataDir(), isProcessAlive: () => true })
 
         expect(brokers).toEqual([{
             endpoint: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.sock'),
@@ -170,6 +208,7 @@ describe('discoverMcodeConnectorBrokers', () => {
 
         const brokers = discoverMcodeConnectorBrokers({
             tmpRoot: root,
+            dataDir: emptyDataDir(),
             isProcessAlive: (pid) => pid === 222
         })
 
@@ -181,7 +220,73 @@ describe('discoverMcodeConnectorBrokers', () => {
     it('skips a directory without a broker in it', () => {
         const root = makeBrokerRoot([{ dir: 'mcode-tools-tui-333-empty', withBroker: false }])
 
-        expect(discoverMcodeConnectorBrokers({ tmpRoot: root, isProcessAlive: () => true })).toEqual([])
+        expect(discoverMcodeConnectorBrokers({ tmpRoot: root, dataDir: emptyDataDir(), isProcessAlive: () => true })).toEqual([])
+    })
+
+    it('finds the brokers the current MiniMax Code keeps in its data directory', () => {
+        // The host no longer keeps its broker in the temp directory under a
+        // name that carries its pid - it keeps it in the data directory, one
+        // instance per host under a generated name.
+        const dataDir = makeDataDir([
+            { dir: 'mt-aaaaaa', withBroker: true },
+            { dir: 'mt-bbbbbb', withBroker: true }
+        ])
+        const owners = new Map([
+            [instanceSocket(dataDir, 'mt-aaaaaa'), 111],
+            [instanceSocket(dataDir, 'mt-bbbbbb'), 222]
+        ])
+
+        const brokers = discoverMcodeConnectorBrokers({
+            tmpRoot: makeBrokerRoot([]),
+            dataDir,
+            owners,
+            isProcessAlive: () => true
+        })
+
+        expect(brokers.map((broker) => broker.capabilityFile).sort()).toEqual([
+            join(dataDir, 'run', 'mt-aaaaaa', 'mcode-auth-lease-v1.cap'),
+            join(dataDir, 'run', 'mt-bbbbbb', 'mcode-auth-lease-v1.cap')
+        ])
+    })
+
+    it('finds the shared instance of the data directory', () => {
+        const dataDir = makeDataDir([{ dir: '', withBroker: true }])
+
+        const brokers = discoverMcodeConnectorBrokers({
+            tmpRoot: makeBrokerRoot([]),
+            dataDir,
+            owners: new Map([[instanceSocket(dataDir, ''), 333]]),
+            isProcessAlive: () => true
+        })
+
+        expect(brokers).toEqual([{
+            endpoint: join(dataDir, 'run', 'mcode-auth-lease-v1.sock'),
+            capabilityFile: join(dataDir, 'run', 'mcode-auth-lease-v1.cap')
+        }])
+    })
+
+    it('skips an instance whose host is gone', () => {
+        // A host that crashed leaves its instance behind, and nobody can ask
+        // that one.
+        const dataDir = makeDataDir([
+            { dir: 'mt-aaaaaa', withBroker: true },
+            { dir: 'mt-bbbbbb', withBroker: true }
+        ])
+        const owners = new Map([
+            [instanceSocket(dataDir, 'mt-aaaaaa'), 111],
+            [instanceSocket(dataDir, 'mt-bbbbbb'), 222]
+        ])
+
+        const brokers = discoverMcodeConnectorBrokers({
+            tmpRoot: makeBrokerRoot([]),
+            dataDir,
+            owners,
+            isProcessAlive: (pid) => pid === 222
+        })
+
+        expect(brokers.map((broker) => broker.capabilityFile)).toEqual([
+            join(dataDir, 'run', 'mt-bbbbbb', 'mcode-auth-lease-v1.cap')
+        ])
     })
 })
 
@@ -194,7 +299,7 @@ describe('findMcodeConnectorBrokerForPid', () => {
             { dir: 'mcode-tools-tui-5252-def', withBroker: true }
         ])
 
-        const broker = findMcodeConnectorBrokerForPid(5252, { tmpRoot: root })
+        const broker = findMcodeConnectorBrokerForPid(5252, { tmpRoot: root, dataDir: emptyDataDir() })
 
         expect(broker).toEqual({
             endpoint: join(root, 'mcode-tools-tui-5252-def', 'run', 'mcode-auth-lease-v1.sock'),
@@ -205,7 +310,7 @@ describe('findMcodeConnectorBrokerForPid', () => {
     it('has no broker for a host that is not running', () => {
         const root = makeBrokerRoot([{ dir: 'mcode-tools-tui-4242-abc', withBroker: true }])
 
-        expect(findMcodeConnectorBrokerForPid(9999, { tmpRoot: root })).toBeNull()
+        expect(findMcodeConnectorBrokerForPid(9999, { tmpRoot: root, dataDir: emptyDataDir() })).toBeNull()
     })
 
     it('has no broker for a host that is still starting up', () => {
@@ -213,7 +318,32 @@ describe('findMcodeConnectorBrokerForPid', () => {
         // later. A host without a socket cannot sign a request.
         const root = makeBrokerRoot([{ dir: 'mcode-tools-tui-4242-abc', withBroker: false }])
 
-        expect(findMcodeConnectorBrokerForPid(4242, { tmpRoot: root })).toBeNull()
+        expect(findMcodeConnectorBrokerForPid(4242, { tmpRoot: root, dataDir: emptyDataDir() })).toBeNull()
+    })
+
+    it('finds the broker of a host of the current MiniMax Code by its pid', () => {
+        // The directory of the current MiniMax Code carries no pid, so the
+        // owner of the socket is what identifies the host.
+        const dataDir = makeDataDir([
+            { dir: 'mt-aaaaaa', withBroker: true },
+            { dir: 'mt-bbbbbb', withBroker: true }
+        ])
+        const owners = new Map([
+            [instanceSocket(dataDir, 'mt-aaaaaa'), 111],
+            [instanceSocket(dataDir, 'mt-bbbbbb'), 222]
+        ])
+
+        const broker = findMcodeConnectorBrokerForPid(222, {
+            tmpRoot: makeBrokerRoot([]),
+            dataDir,
+            owners,
+            isProcessAlive: () => true
+        })
+
+        expect(broker).toEqual({
+            endpoint: join(dataDir, 'run', 'mt-bbbbbb', 'mcode-auth-lease-v1.sock'),
+            capabilityFile: join(dataDir, 'run', 'mt-bbbbbb', 'mcode-auth-lease-v1.cap')
+        })
     })
 })
 
@@ -283,6 +413,7 @@ describe('mcodeConnectorProbes', () => {
     it('asks the host HAPI runs in first', () => {
         const probes = mcodeConnectorProbes({
             command: 'mcode-tools',
+            dataDir: emptyDataDir(),
             env: {
                 __MAVIS_MCODE_TOOLS_BROKER_ENDPOINT: '/tmp/host.sock',
                 __MAVIS_MCODE_TOOLS_BROKER_CAPABILITY_FILE: '/tmp/host.cap'
@@ -298,6 +429,7 @@ describe('mcodeConnectorProbes', () => {
     it('does not ask the same broker twice', () => {
         const probes = mcodeConnectorProbes({
             command: 'mcode-tools',
+            dataDir: emptyDataDir(),
             env: {
                 __MAVIS_MCODE_TOOLS_BROKER_ENDPOINT: '/tmp/host.sock',
                 __MAVIS_MCODE_TOOLS_BROKER_CAPABILITY_FILE: '/tmp/host.cap'
@@ -337,6 +469,7 @@ describe('mcodeConnectorProbes', () => {
         const probes = mcodeConnectorProbes({
             command: 'mcode-tools',
             env: {},
+            dataDir: emptyDataDir(),
             tmpRoot: root,
             brokers: [{
                 endpoint: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.sock'),
@@ -359,6 +492,7 @@ describe('mcodeConnectorProbes', () => {
         const probes = mcodeConnectorProbes({
             command: 'mcode-tools',
             env: {},
+            dataDir: emptyDataDir(),
             tmpRoot: root,
             brokers: [{
                 endpoint: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.sock'),
@@ -376,6 +510,7 @@ describe('mcodeConnectorProbes', () => {
         const probes = mcodeConnectorProbes({
             command: 'mcode-tools',
             env: {},
+            dataDir: emptyDataDir(),
             tmpRoot: root,
             brokers: [{
                 endpoint: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.sock'),
@@ -398,7 +533,7 @@ describe('mcodeConnectorProbes', () => {
         ])
         rememberMcodeAgentHostPid(5252)
 
-        const brokers = preferredMcodeConnectorBrokers({ tmpRoot: root })
+        const brokers = preferredMcodeConnectorBrokers({ tmpRoot: root, dataDir: emptyDataDir() })
 
         expect(brokers[0].endpoint).toBe(
             join(root, 'mcode-tools-tui-5252-def', 'run', 'mcode-auth-lease-v1.sock')
