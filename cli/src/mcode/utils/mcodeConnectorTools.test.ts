@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -793,6 +793,26 @@ describe('listMcodeConnectorApps', () => {
         expect(catalog.pending).toBe(true)
         expect(catalog.apps).toEqual([])
         expect(catalog.error).toContain('still starting')
+    })
+
+    it('does not spawn the tools while the agent is still starting', async () => {
+        // The agent publishes its broker a moment after it is spawned. Until
+        // it does, the tools cannot sign a request against it - and asking
+        // every other host of the machine would cost two subprocess spawns
+        // per host, again and again, while a client waits for the agent.
+        markMcodeAgentStarting(true)
+        const runTools = vi.fn(async () => {
+            throw new Error('MCode host authentication broker is unavailable.')
+        })
+
+        const catalog = await listMcodeConnectorApps({
+            mcodeCommand: 'mcode',
+            runTools,
+            probes: TEST_PROBE
+        })
+
+        expect(catalog.pending).toBe(true)
+        expect(runTools).not.toHaveBeenCalled()
     })
 
     it('reports the failure of the agent of the session, not of a fallback', async () => {

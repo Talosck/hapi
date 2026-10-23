@@ -498,15 +498,23 @@ export function markMcodeAgentStarting(starting: boolean): void {
  * starting, it has no broker to sign the request with, so the answer is "not
  * yet" rather than a failure the user cannot act on.
  */
-function mcodeAgentBrokerPending(): boolean {
+function mcodeAgentBrokerPending(options?: {
+    /** The socket owners of the machine. Shared, so it is walked once. */
+    owners?: Map<string, number>
+    isProcessAlive?: (pid: number) => boolean
+}): boolean {
     if (agentStarting) return true
     const pids = knownMcodeAgentHostPids()
     if (pids.length === 0) return false
     // The newest agent is the one this session is about. It is running but
     // has no broker: it is still coming up.
     const newest = pids[0]
-    if (!isProcessAlive(newest)) return false
-    return findMcodeConnectorBrokerForPid(newest) === null
+    const alive = options?.isProcessAlive ?? isProcessAlive
+    if (!alive(newest)) return false
+    return findMcodeConnectorBrokerForPid(newest, {
+        owners: options?.owners,
+        isProcessAlive: options?.isProcessAlive
+    }) === null
 }
 
 /**
@@ -520,10 +528,18 @@ function mcodeAgentBrokerPending(): boolean {
 export function knownAgentConnectorBrokers(options?: {
     tmpRoot?: string
     dataDir?: string
+    /** The socket owners of the machine. Shared, so it is walked once. */
+    owners?: Map<string, number>
+    isProcessAlive?: (pid: number) => boolean
 }): McodeConnectorBroker[] {
     const brokers: McodeConnectorBroker[] = []
     for (const pid of knownMcodeAgentHostPids()) {
-        const broker = findMcodeConnectorBrokerForPid(pid, { tmpRoot: options?.tmpRoot, dataDir: options?.dataDir })
+        const broker = findMcodeConnectorBrokerForPid(pid, {
+            tmpRoot: options?.tmpRoot,
+            dataDir: options?.dataDir,
+            owners: options?.owners,
+            isProcessAlive: options?.isProcessAlive
+        })
         if (!broker) continue
         if (brokers.some((known) => known.endpoint === broker.endpoint)) continue
         brokers.push(broker)
@@ -541,9 +557,17 @@ export function knownAgentConnectorBrokers(options?: {
 export function preferredMcodeConnectorBrokers(options?: {
     tmpRoot?: string
     dataDir?: string
+    /** The socket owners of the machine. Shared, so it is walked once. */
+    owners?: Map<string, number>
+    isProcessAlive?: (pid: number) => boolean
 }): McodeConnectorBroker[] {
-    const brokers = knownAgentConnectorBrokers(options)
-    for (const broker of discoverMcodeConnectorBrokers({ tmpRoot: options?.tmpRoot, dataDir: options?.dataDir })) {
+    // The walk over the unix sockets of the machine is synchronous and costs
+    // a readlink per open file descriptor. It is done once here and handed
+    // down, so a read of the connected apps does not walk the machine once
+    // per known agent.
+    const owners = options?.owners ?? unixSocketOwners()
+    const brokers = knownAgentConnectorBrokers({ ...options, owners })
+    for (const broker of discoverMcodeConnectorBrokers({ ...options, owners })) {
         if (brokers.some((known) => known.endpoint === broker.endpoint)) continue
         brokers.push(broker)
     }
@@ -684,6 +708,9 @@ export function mcodeConnectorProbes(options?: {
     tmpRoot?: string
     /** Where the current MiniMax Code keeps its brokers. Exposed for tests. */
     dataDir?: string
+    /** The socket owners of the machine. Shared, so it is walked once. */
+    owners?: Map<string, number>
+    isProcessAlive?: (pid: number) => boolean
 }): McodeConnectorProbe[] {
     const command = options?.command ?? resolveMcodeToolsCommand('mcode')
     const env = options?.env ?? process.env
@@ -705,7 +732,12 @@ export function mcodeConnectorProbes(options?: {
     // The agent this process launched is next. It is known by its pid, so
     // the answer is about the agent the user is actually looking at and not
     // about whichever host happens to be running on the machine.
-    for (const broker of knownAgentConnectorBrokers({ tmpRoot: options?.tmpRoot, dataDir: options?.dataDir })) {
+    for (const broker of knownAgentConnectorBrokers({
+        tmpRoot: options?.tmpRoot,
+        dataDir: options?.dataDir,
+        owners: options?.owners,
+        isProcessAlive: options?.isProcessAlive
+    })) {
         if (probes.some((probe) => probeBrokerEndpoint(probe) === broker.endpoint)) continue
         probes.push({
             command,
@@ -715,7 +747,9 @@ export function mcodeConnectorProbes(options?: {
 
     const brokers = options?.brokers ?? discoverMcodeConnectorBrokers({
         tmpRoot: options?.tmpRoot,
-        dataDir: options?.dataDir
+        dataDir: options?.dataDir,
+        owners: options?.owners,
+        isProcessAlive: options?.isProcessAlive
     })
     for (const broker of brokers) {
         const endpoint = broker.endpoint
@@ -848,6 +882,9 @@ export async function listMcodeConnectorApps(options?: {
     forceRefresh?: boolean
     /** The ways to ask. Exposed for tests. */
     probes?: McodeConnectorProbe[]
+    /** The socket owners of the machine. Shared, so it is walked once. */
+    owners?: Map<string, number>
+    isProcessAlive?: (pid: number) => boolean
 }): Promise<McodeConnectorCatalogResult> {
     const command = resolveMcodeToolsCommand(options?.mcodeCommand ?? 'mcode')
     const run = options?.runTools ?? runMcodeTools
@@ -862,11 +899,40 @@ export async function listMcodeConnectorApps(options?: {
         }
     }
 
-    const probes = options?.probes ?? mcodeConnectorProbes({ command })
+    // The walk over the unix sockets of the machine is synchronous and costs
+    // a readlink per open file descriptor, so it is done once per read and
+    // handed down to every lookup that needs it.
+    const owners = options?.owners ?? unixSocketOwners()
 
     const promise = (async (): Promise<McodeConnectorCatalogResult> => {
         let auth: McodeConnectorAuthSummary = { status: 'unknown', authMode: null, scope: null, expiresAt: null }
         let firstError: string | null = null
+
+        // An agent that is still starting has no broker to sign the request
+        // with. That is not a failure of the installation: the read is early,
+        // so the caller asks again instead of showing an error.
+        //
+        // The check comes before the probes on purpose. Every probe costs two
+        // subprocess spawns on the machine, and a client that waits for the
+        // agent asks again and again - so asking the other hosts of the
+        // machine would spawn processes for as long as the agent takes to
+        // come up, and could answer with the apps of another host.
+        if (mcodeAgentBrokerPending({ owners, isProcessAlive: options?.isProcessAlive })) {
+            const reason = 'The MiniMax Code agent is still starting.'
+            logger.debug('Could not read the MiniMax Code connected apps:', reason)
+            return {
+                auth,
+                apps: [],
+                pending: true,
+                error: reason
+            }
+        }
+
+        const probes = options?.probes ?? mcodeConnectorProbes({
+            command,
+            owners,
+            isProcessAlive: options?.isProcessAlive
+        })
 
         for (const probe of probes) {
             let authRead = true
@@ -903,10 +969,10 @@ export async function listMcodeConnectorApps(options?: {
             }
         }
 
-        // An agent that is still starting has no broker to sign the request
-        // with. That is not a failure of the installation: the read is early,
-        // so the caller asks again instead of showing an error.
-        if (mcodeAgentBrokerPending()) {
+        // The agent may have come up while the probes were running, and a
+        // probe that failed because the broker was not there yet is not a
+        // failure of the installation.
+        if (mcodeAgentBrokerPending({ owners, isProcessAlive: options?.isProcessAlive })) {
             const reason = 'The MiniMax Code agent is still starting.'
             logger.debug('Could not read the MiniMax Code connected apps:', reason)
             return {
