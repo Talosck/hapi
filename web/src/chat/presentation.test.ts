@@ -288,6 +288,35 @@ describe('getEventPresentation — thread goals', () => {
 
         expect(result.text).toBe('Goal cleared')
     })
+
+    it.each([
+        ['en', en],
+        ['zh-CN', zhCN],
+        ['ru', ru]
+    ] as const)('names the goal status the way the status panel does (%s)', (_locale, dict) => {
+        // The status panel shows the goal with
+        // t('session.status.goal.<status>'). The transcript line has to name
+        // the same status with the same word, or the two surfaces of a goal
+        // disagree about what it says.
+        const t = (key: string) => (dict as Record<string, string>)[key] ?? key
+        const panelWord = dict['session.status.goal.budgetLimited']
+
+        const result = getEventPresentation({
+            type: 'thread-goal-updated',
+            goal: {
+                threadId: 'thread-1',
+                objective: 'ship goal support',
+                status: 'budgetLimited',
+                tokenBudget: null,
+                tokensUsed: 0,
+                timeUsedSeconds: 0,
+                createdAt: 1,
+                updatedAt: 2
+            }
+        }, t)
+
+        expect(result.text.toLowerCase()).toContain(panelWord.toLowerCase())
+    })
 })
 
 describe('getEventPresentation — recap (away_summary)', () => {

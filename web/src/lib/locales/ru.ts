@@ -1260,7 +1260,7 @@ export default {
   'session.status.terminalsPossible': 'Возможные команды',
   'session.status.goal.active': 'Активна',
   'session.status.goal.paused': 'Приостановлена',
-  'session.status.goal.budgetLimited': 'Ограничена',
+  'session.status.goal.budgetLimited': 'Ограничена бюджетом',
   'session.status.goal.usageLimited': 'Ограничена по расходу',
   'session.status.goal.blocked': 'Заблокирована',
   'session.status.goal.complete': 'Завершена',

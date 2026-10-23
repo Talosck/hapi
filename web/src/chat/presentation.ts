@@ -132,7 +132,29 @@ function formatTokenCount(value: number): string {
     return String(value)
 }
 
-function formatGoalStatus(status: string): string {
+/**
+ * The first letter of a word in lower case, for a word that continues a
+ * sentence. A language without letter case is left alone.
+ */
+function lowerFirst(value: string): string {
+    if (!value) return value
+    return value.charAt(0).toLowerCase() + value.slice(1)
+}
+
+/**
+ * The status of a goal, in the words the status panel uses.
+ *
+ * The panel shows a goal with `t('session.status.goal.<status>')`, so the
+ * transcript line has to name the same status with the same word - otherwise
+ * the two surfaces of a goal disagree about what it says.
+ */
+function formatGoalStatus(status: string, t?: EventTranslator): string {
+    if (t) {
+        const key = `session.status.goal.${status}`
+        const localized = t(key)
+        // An unknown key comes back as the key itself.
+        if (localized !== key) return lowerFirst(localized)
+    }
     if (status === 'active') return 'active'
     if (status === 'paused') return 'paused'
     if (status === 'budgetLimited') return 'limited by budget'
@@ -142,13 +164,19 @@ function formatGoalStatus(status: string): string {
     return status
 }
 
-function formatThreadGoalEvent(event: AgentEvent): EventPresentation {
+function formatThreadGoalEvent(event: AgentEvent, t?: EventTranslator): EventPresentation {
     const goal = asRecord((event as Record<string, unknown>).goal)
     if (!goal) return { icon: null, text: 'Goal updated' }
     const status = typeof goal.status === 'string' ? goal.status : 'updated'
     const tokensUsed = asNumber(goal.tokensUsed ?? goal.tokens_used)
     const tokenBudget = asNumber(goal.tokenBudget ?? goal.token_budget)
-    const parts = [`Goal ${formatGoalStatus(status)}`]
+    let label = 'Goal'
+    if (t) {
+        const key = 'session.status.goal'
+        const localized = t(key)
+        if (localized !== key) label = localized
+    }
+    const parts = [`${label} ${formatGoalStatus(status, t)}`]
     if (tokensUsed !== null && tokenBudget !== null) {
         parts.push(`${formatTokenCount(tokensUsed)} / ${formatTokenCount(tokenBudget)}`)
     }
@@ -326,7 +354,7 @@ export function getEventPresentation(event: AgentEvent, t?: EventTranslator): Ev
         return { icon: '💭', text: `recap: ${text}` }
     }
     if (event.type === 'thread-goal-updated') {
-        return formatThreadGoalEvent(event)
+        return formatThreadGoalEvent(event, t)
     }
     if (event.type === 'thread-goal-cleared') {
         return { icon: null, text: 'Goal cleared' }
