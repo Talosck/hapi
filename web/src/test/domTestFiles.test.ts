@@ -51,7 +51,7 @@ describe('the list of the test files that need a browser', () => {
         // `.test.tsx` file runs in the browser project. A file that is
         // neither - a `.spec.ts`, say - would not run at all, and the suite
         // would report green without it.
-        const listed = new Set(DOM_TEST_FILES)
+        const listed = new Set<string>(DOM_TEST_FILES)
         const orphans = testFiles(SRC_ROOT).filter((file) => {
             if (file.endsWith('.test.tsx')) return false
             if (listed.has(file)) return false
