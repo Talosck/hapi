@@ -1283,7 +1283,6 @@ export default {
   'session.status.apps.auth.ok': '已登录',
   'session.status.apps.auth.expired': '登录已过期',
   'session.status.apps.auth.missing': '未登录（{status}）',
-  'session.status.apps.auth.expiresAt': '{date} 过期',
   'share.searchResults': '匹配的会话',
   'share.noSearchResults': '没有匹配的会话。',
   'share.searchForMore': '还有 {n} 个活跃会话 — 搜索以查找。',

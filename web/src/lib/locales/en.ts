@@ -1280,7 +1280,6 @@ export default {
   'session.status.apps.auth.ok': 'Signed in',
   'session.status.apps.auth.expired': 'The sign-in has expired',
   'session.status.apps.auth.missing': 'Not signed in ({status})',
-  'session.status.apps.auth.expiresAt': 'expires {date}',
   'share.searchResults': 'Matching sessions',
   'share.noSearchResults': 'No sessions match your search.',
   'share.searchForMore': '{n} more active sessions — search to find them.',

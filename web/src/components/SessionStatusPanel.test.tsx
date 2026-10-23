@@ -279,6 +279,32 @@ describe('SessionStatusPanel', () => {
     })
 
     /**
+     * The expiry moment is not part of the sign-in state.
+     *
+     * The host renews the credential on demand, so that moment moves under
+     * the user's feet and reads "expired" while every call still works.
+     */
+    it('does not show when the credential expires', () => {
+        const { container } = renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                apps={{
+                    apps: [{ provider: 'matrix', toolCount: 13, tools: [] }],
+                    auth: {
+                        status: 'authenticated',
+                        authMode: 'shared-broker',
+                        scope: null,
+                        expiresAt: Date.UTC(2031, 0, 2, 3, 4, 5)
+                    },
+                    error: null
+                }}
+            />
+        )
+        expect(screen.getByText('Signed in')).toBeInTheDocument()
+        expect(container.textContent).not.toContain('2031')
+    })
+
+    /**
      * A partial stop is not a success: the receipt says which delegated
      * sessions really stopped, and the user has to see the difference.
      */

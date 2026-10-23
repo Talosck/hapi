@@ -304,6 +304,10 @@ function ConnectedApps(props: {
                 ))
             )}
             {auth ? (
+                // The sign-in state is the whole truth here. The moment the
+                // credential expires is not shown: the host renews it on
+                // demand, so that moment moves under the user's feet and it
+                // reads "expired" while every call still works.
                 <div
                     className={`text-[11px] ${authTone === 'ok'
                         ? 'text-emerald-600'
@@ -314,9 +318,6 @@ function ConnectedApps(props: {
                         : authTone === 'error'
                             ? t('session.status.apps.auth.expired')
                             : t('session.status.apps.auth.missing', { status: auth.status })}
-                    {auth.expiresAt ? ` · ${t('session.status.apps.auth.expiresAt', {
-                        date: new Date(auth.expiresAt).toLocaleString()
-                    })}` : ''}
                 </div>
             ) : null}
         </div>

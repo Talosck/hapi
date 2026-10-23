@@ -1282,7 +1282,6 @@ export default {
   'session.status.apps.auth.ok': 'Вход выполнен',
   'session.status.apps.auth.expired': 'Срок входа истёк',
   'session.status.apps.auth.missing': 'Вход не выполнен ({status})',
-  'session.status.apps.auth.expiresAt': 'истекает {date}',
   'share.searchResults': 'Подходящие сессии',
   'share.noSearchResults': 'Нет сессий, соответствующих поиску.',
   'share.searchForMore': 'Ещё {n} активных сессий — воспользуйтесь поиском, чтобы найти их.',
