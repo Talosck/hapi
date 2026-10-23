@@ -126,6 +126,16 @@ function getMessageText(message: DecryptedMessage): string | null {
 }
 
 /**
+ * The role a stored message carries.
+ */
+function getMessageRole(message: DecryptedMessage): string | null {
+    const content = message.content as unknown
+    if (typeof content !== 'object' || content === null) return null
+    const outer = content as { role?: unknown }
+    return typeof outer.role === 'string' ? outer.role : null
+}
+
+/**
  * True when the last user message of the session carries the same text and
  * has not been answered yet.
  *
@@ -136,7 +146,9 @@ function getMessageText(message: DecryptedMessage): string | null {
  * was lost.
  *
  * A message that was answered does not count: repeating yourself after an
- * answer is a normal thing to do.
+ * answer is a normal thing to do. The busy flag is about the session - the
+ * agent holds a turn it did not start - so it may not decide for a message
+ * the agent has already answered.
  */
 function hasIdenticalPendingMessage(
     sessionId: string,
@@ -144,11 +156,25 @@ function hasIdenticalPendingMessage(
     isWaitingForAgent: boolean,
 ): boolean {
     const state = getMessageWindowState(sessionId)
-    const lastUser = [...state.messages].reverse().find((m) => getMessageText(m) !== null)
-    if (!lastUser) return false
+    const messages = state.messages
+    let lastUserIndex = -1
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        if (getMessageText(messages[index]) !== null) {
+            lastUserIndex = index
+            break
+        }
+    }
+    if (lastUserIndex === -1) return false
+    const lastUser = messages[lastUserIndex]
     const lastText = getMessageText(lastUser)
     if (lastText === null || lastText.trim() !== text.trim()) return false
     if (lastUser.status === 'failed') return false
+    // The agent answered after this message: repeating yourself after an
+    // answer is a normal thing to do.
+    for (let index = lastUserIndex + 1; index < messages.length; index += 1) {
+        const role = getMessageRole(messages[index])
+        if (role === 'agent' || role === 'assistant') return false
+    }
     // Either still waiting to be picked up, or already handed over and
     // waiting for the agent to free its turn.
     return lastUser.invokedAt === null || isWaitingForAgent

@@ -1055,4 +1055,46 @@ describe('useSendMessage duplicate guard', () => {
         expect(accepted).not.toBe(false)
         expect(onBlocked).not.toHaveBeenCalled()
     })
+
+    it('allows repeating a message the agent already answered', async () => {
+        // The busy flag is about the session, not about this message. While
+        // the agent holds a turn it did not start, a message it already
+        // answered must still be repeatable - repeating yourself after an
+        // answer is a normal thing to do.
+        const sendMock = vi.fn(async () => {})
+        const api = createMockApi(sendMock)
+        const onBlocked = vi.fn()
+        const { getMessageWindowState } = await import('@/lib/message-window-store')
+        vi.mocked(getMessageWindowState).mockReturnValueOnce({
+            messages: [
+                userMessage(),
+                {
+                    id: 'agent-1',
+                    seq: 2,
+                    localId: null,
+                    content: { role: 'agent', content: { type: 'text', text: 'done' } },
+                    createdAt: 2_000,
+                    invokedAt: 2_000,
+                    scheduledAt: null,
+                    status: 'sent',
+                },
+            ],
+        } as never)
+
+        const { result } = renderHook(
+            () => useSendMessage(api, 'session-A', { onBlocked, isWaitingForAgent: true }),
+            { wrapper: createWrapper() },
+        )
+
+        let accepted: SendMessageAcceptance | false = false
+        await act(async () => {
+            accepted = await result.current.sendMessage('run it again')
+        })
+
+        await waitFor(() => {
+            expect(sendMock).toHaveBeenCalled()
+        })
+        expect(accepted).not.toBe(false)
+        expect(onBlocked).not.toHaveBeenCalled()
+    })
 })
