@@ -1,6 +1,7 @@
 import { logger } from '@/ui/logger';
 import { convertAgentMessage } from '@/agent/messageConverter';
 import { createNativeSessionTitleMetadataSync } from '@/agent/nativeSessionTitle';
+import { randomBytes } from 'node:crypto';
 import { PiTransport } from './piTransport';
 import { convertPiEvent, convertPiTurnUsage } from './piEventConverter';
 import { PiMessageAccumulator } from './piMessageAccumulator';
@@ -12,6 +13,15 @@ import type { PiConversationHistory } from './conversationHistory';
 
 // --- Response parsers: re-exported from schemas.ts ---
 export { parsePiModels, parsePiCommands, parsePiContextUsage } from './schemas';
+
+/**
+ * Identifies one CLI wrapper process in the chat-card ids it creates.
+ *
+ * The Pi RPC counter restarts with every Pi process, while the hub keeps the
+ * messages of a resumed session — without this nonce the cards of two runs
+ * would share ids and the web would merge them.
+ */
+const PI_BASH_CARD_NONCE = randomBytes(4).toString('hex');
 
 // --- Pending RPC resolver ---
 // Instance-scoped: created once by wireTransportEvents, stored on PiSession.
@@ -112,9 +122,16 @@ export function sendPiRpcAndWaitWithId(session: PiSession, transport: PiTranspor
     return session.rpcResolver.sendAndWaitWithId(transport, command, timeoutMs);
 }
 
-/** Chat-card id for the shell command Pi runs under the given RPC id. */
+/**
+ * Chat-card id for the shell command Pi runs under the given RPC id.
+ *
+ * The RPC counter restarts with every Pi process, but the hub keeps the
+ * messages of a resumed session. Without a per-process nonce the Nth `/bash`
+ * of a resumed run would reuse the card id of the Nth `/bash` of the previous
+ * run, and the web would merge the two cards into one.
+ */
 export function piBashMessageId(rpcId: string): string {
-    return `pi-bash-${rpcId}`;
+    return `pi-bash-${PI_BASH_CARD_NONCE}-${rpcId}`;
 }
 
 function resolvePendingRpc(resolver: PiRpcResolver, response: PiResponseEvent): void {
@@ -312,6 +329,17 @@ function handleResponse(
                 if (data.provider && data.provider.length > 0) {
                     session.currentProvider = data.provider;
                 }
+                // Pi answers a model switch with the full model object, so this
+                // is the freshest report of what the new model accepts. Without
+                // it the image check would keep describing the *previous*
+                // model — no warning for a text-only model, or a false warning
+                // for a model that can read images.
+                const modelInput = Array.isArray(data.input)
+                    ? data.input.filter((entry): entry is string => typeof entry === 'string')
+                    : undefined;
+                if (modelInput && modelInput.length > 0) {
+                    session.setCurrentModelInput(modelInput);
+                }
                 persistSelectedPiModel(session);
                 logger.debug(`[pi] Model changed to: ${modelId ?? session.currentModel}`);
             }
@@ -337,6 +365,15 @@ function handleResponse(
                     ...meta,
                     piAvailableModels: models,
                 }));
+
+                // The catalog describes what each model accepts, so it can
+                // refresh the image capability of the model that is active
+                // now — a switch that Pi answered without the model object
+                // would otherwise leave the check describing the old model.
+                const active = models.find((model) => model.modelId === session.currentModel);
+                if (active?.input && active.input.length > 0) {
+                    session.setCurrentModelInput(active.input);
+                }
 
                 // Apply the requested startup model only after confirming it exists
                 // in Pi's available models and Pi accepts set_model. Commit
@@ -474,8 +511,11 @@ export type PiTransportEventController = {
      * Pi's `abort` stops the turn but keeps its steering queue, so an
      * abandoned steer would be replayed into the next turn. Clearing the
      * queue is idempotent and safe to call more than once.
+     *
+     * `timeoutMs` bounds the RPC so a caller with a shorter deadline of its
+     * own can keep the cleanup inside it.
      */
-    clearAbandonedQueue: () => Promise<void>;
+    clearAbandonedQueue: (timeoutMs?: number) => Promise<void>;
 };
 
 type PiTransportEventOptions = {
@@ -493,7 +533,8 @@ type PiTransportEventOptions = {
 const PI_LEGACY_SETTLE_GRACE_MS = 500;
 const PI_PROMPT_LIFECYCLE_GRACE_MS = 1_000;
 const PI_COMPACTION_RETRY_START_GRACE_MS = 1_000;
-const PI_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
+/** How long the queue cleanup may take before the abort gives up on it. */
+export const PI_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
 
 class PiLifecycleTimeline {
     private compacting = false;
@@ -691,21 +732,42 @@ export function wireTransportEvents(
      *
      * The shared promise makes concurrent callers (the abort path and the
      * aborted-settle event) join one cleanup instead of racing two.
+     *
+     * `timeoutMs` bounds the RPC. The abort path has a hard deadline of its
+     * own, so the cleanup may only use what is left of it.
      */
     let abandonedQueueClear: Promise<void> | null = null;
-    const clearAbandonedQueue = (): Promise<void> => {
+    let clearQueueUnsupported = false;
+    const clearAbandonedQueue = (timeoutMs: number = PI_CLEAR_QUEUE_TIMEOUT_MS): Promise<void> => {
         if (abandonedQueueClear) return abandonedQueueClear;
+        if (clearQueueUnsupported) return Promise.resolve();
         abandonedQueueClear = (async () => {
             try {
                 const data = await sendPiRpcAndWait(
                     session,
                     transport,
                     { type: 'clear_queue' },
-                    PI_CLEAR_QUEUE_TIMEOUT_MS,
+                    Math.max(1, timeoutMs),
                 );
                 const parsed = PiClearQueueResultSchema.safeParse(data);
-                if (!parsed.success) return;
-                const dropped = session.resolveDroppedSteers(parsed.data.steering);
+                if (!parsed.success) {
+                    // Pi dropped something but did not say what. Staying silent
+                    // would hide exactly the problem this cleanup exists to
+                    // prevent.
+                    logger.debug('[pi] clear_queue returned an unreadable result');
+                    session.sendSessionEvent({
+                        type: 'message',
+                        message: '⚠️ Pi cleared its queue but did not report what it dropped. A queued steer may reappear in the next turn.',
+                    });
+                    return;
+                }
+                const { entries: dropped, unattributed } = session.resolveDroppedSteers(parsed.data.steering);
+                if (unattributed > 0) {
+                    // Pi held messages HAPI never sent (a Pi extension queued
+                    // them). The positional mapping can only cover the newest
+                    // ones, so the rest cannot be attributed to a row.
+                    logger.debug(`[pi] clear_queue dropped ${unattributed} message(s) HAPI did not send`);
+                }
                 if (dropped.length === 0) return;
                 // A dropped steer never produced a native user entry, so its
                 // history registration has to be withdrawn. Otherwise the next
@@ -713,8 +775,10 @@ export function wireTransportEvents(
                 for (const entry of dropped) {
                     options.conversationHistory?.rejectPendingEntry(entry.localId);
                 }
-                // Pi reports the expanded message, which can be a whole skill
-                // block, so the preview is clipped.
+                // The reported text is the one HAPI sent — the user has to
+                // recognize their own message, not the skill block Pi
+                // expanded it into. It is still clipped, because it can be
+                // arbitrarily long.
                 const preview = dropped
                     .map((entry) => entry.text.length > 80 ? `${entry.text.slice(0, 80)}…` : entry.text)
                     .join(' / ');
@@ -728,6 +792,18 @@ export function wireTransportEvents(
                 // has to be visible — a silently failed cleanup looks exactly
                 // like the bug this cleanup exists to prevent.
                 const detail = error instanceof Error ? error.message : String(error);
+                if (/unknown command/i.test(detail)) {
+                    // Pi builds before 1.4.0 have no clear_queue command. Say
+                    // it once — the cleanup is impossible there, so repeating
+                    // the warning on every abort would only be noise.
+                    clearQueueUnsupported = true;
+                    logger.debug(`[pi] clear_queue is not supported by this Pi build: ${detail}`);
+                    session.sendSessionEvent({
+                        type: 'message',
+                        message: '⚠️ This Pi version cannot clear queued steering messages. A queued steer may reappear in the next turn.',
+                    });
+                    return;
+                }
                 logger.debug(`[pi] clear_queue after abort failed: ${detail}`);
                 session.sendSessionEvent({
                     type: 'message',
@@ -851,9 +927,10 @@ export function wireTransportEvents(
                 if (isCurrentPrompt && parsed.data.success) {
                     activePromptResponseAccepted = true;
                     // Pi reports how it took the prompt:
-                    // - 'queued': Pi parked the message in its own steering
-                    //   queue, so it has to be tracked like a steer — an
-                    //   aborted turn would otherwise replay it.
+                    // - 'queued': Pi parked the message in its steering queue.
+                    //   HAPI never asks for a streaming behavior, so this does
+                    //   not happen — and if it did, the message would not be
+                    //   tracked like a steer, so it has to be visible.
                     // - 'handled': a Pi extension consumed the message, so no
                     //   native user entry will ever appear for it and the
                     //   history registration has to be withdrawn.
@@ -861,6 +938,12 @@ export function wireTransportEvents(
                     const promptDispatch = session.consumePromptDispatch(disposition);
                     if (disposition === 'handled' && promptDispatch?.localId) {
                         options.conversationHistory?.rejectPendingEntry(promptDispatch.localId);
+                    }
+                    if (disposition === 'queued') {
+                        session.sendSessionEvent({
+                            type: 'message',
+                            message: '⚠️ Pi queued the prompt instead of running it. It may reappear in a later turn.',
+                        });
                     }
                     if (activeAgentSettledSeen) {
                         deliverSettlement();

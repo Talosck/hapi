@@ -81,9 +81,9 @@ export const BUILTIN_SLASH_COMMANDS = {
     // built-in list stays empty.
     mcode: [],
     // Pi runs `pi --mode rpc` over stdio; only commands HAPI can translate
-    // to Pi RPC calls are listed. Terminal-only Pi builtins (e.g. /tree,
-    // /export, /reload) are intercepted with an explicit "not supported"
-    // message instead of being passed to the model as plain text.
+    // to Pi RPC calls are listed. Terminal-only Pi builtins (e.g. /export,
+    // /reload) are intercepted with an explicit "not supported" message
+    // instead of being passed to the model as plain text.
     pi: [
         { name: 'help', description: 'Show supported HAPI Pi slash commands', source: 'builtin' },
         { name: 'compact', description: 'Compress conversation history to save context (optional custom instructions)', source: 'builtin' },

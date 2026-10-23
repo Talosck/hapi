@@ -24,7 +24,7 @@ describe('parsePiSpecialCommand', () => {
 
     it('parses /tree and /name', () => {
         expect(parsePiSpecialCommand('/tree')).toEqual({ type: 'tree' });
-        expect(parsePiSpecialCommand('/tree extra args')).toEqual({ type: 'tree' });
+        expect(parsePiSpecialCommand('/tree extra args')).toEqual({ type: 'tree', extraArgs: 'extra args' });
         expect(parsePiSpecialCommand('/name my-feature')).toEqual({ type: 'name', name: 'my-feature' });
         expect(parsePiSpecialCommand('/name')).toEqual({ type: 'name', name: '' });
     });

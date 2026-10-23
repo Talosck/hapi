@@ -5,7 +5,19 @@
  * forks can be navigated. HAPI renders it as plain text in the chat: the web
  * has no tree view, and the point of the command is to let the user see which
  * branch the session is on.
+ *
+ * The tree is rendered as a fenced code block. The web renders chat messages
+ * as markdown, and the tree contains the user's own earlier messages — a
+ * markdown image in one of them would otherwise make the browser fetch a
+ * remote URL on the user's behalf.
  */
+
+/** How many entries the rendered tree may contain. */
+const PI_SESSION_TREE_MAX_LINES = 200;
+/** How deep the indentation may grow before it is capped. */
+const PI_SESSION_TREE_MAX_DEPTH = 40;
+/** How much of an entry's text is shown. */
+const PI_SESSION_TREE_CLIP_CHARS = 72;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -32,6 +44,19 @@ function extractText(content: unknown): string {
     return parts.join(' ');
 }
 
+/**
+ * Clip to a number of characters without splitting a surrogate pair.
+ *
+ * A 4-byte emoji counts as two UTF-16 units, so cutting at a fixed offset
+ * can leave half of one behind and put a lone surrogate into the payload.
+ */
+function clipText(text: string, maxChars: number): string {
+    if (text.length <= maxChars) return text;
+    const points = Array.from(text);
+    if (points.length <= maxChars) return text;
+    return `${points.slice(0, maxChars).join('')}…`;
+}
+
 function summarizeEntry(entry: UnknownRecord): string {
     const type = asString(entry.type) ?? 'entry';
     const message = asRecord(entry.message);
@@ -40,24 +65,50 @@ function summarizeEntry(entry: UnknownRecord): string {
     const text = extractText(message.content).replace(/\s+/g, ' ').trim();
     const head = role ? `${role}: ` : '';
     if (!text) return `${head}(${type})`;
-    const clipped = text.length > 72 ? `${text.slice(0, 72)}…` : text;
-    return `${head}${clipped}`;
+    return `${head}${clipText(text, PI_SESSION_TREE_CLIP_CHARS)}`;
 }
 
-function collectLines(node: unknown, depth: number, leafId: string | undefined, lines: string[]): void {
-    const record = asRecord(node);
-    if (!record) return;
-    const entry = asRecord(record.entry);
-    const indent = '  '.repeat(depth);
-    const connector = depth === 0 ? '' : '└─ ';
-    const entryId = entry ? asString(entry.id) : undefined;
-    // The leaf is where the session currently is, so it is marked.
-    const marker = entryId !== undefined && entryId === leafId ? ' ← current' : '';
-    lines.push(`${indent}${connector}${entry ? summarizeEntry(entry) : 'entry'}${marker}`);
-    const children = Array.isArray(record.children) ? record.children : [];
-    for (const child of children) {
-        collectLines(child, depth + 1, leafId, lines);
+/**
+ * Walk the tree depth-first with an explicit stack.
+ *
+ * A session can hold a branch chain thousands of entries deep, and a
+ * recursive walk would blow the stack on exactly the long sessions where the
+ * tree is most useful.
+ */
+function collectLines(roots: unknown[], leafId: string | undefined, lines: string[]): boolean {
+    const stack: Array<{ node: unknown; depth: number }> = [];
+    for (let index = roots.length - 1; index >= 0; index--) {
+        stack.push({ node: roots[index], depth: 0 });
     }
+    while (stack.length > 0) {
+        const item = stack.pop()!;
+        const record = asRecord(item.node);
+        if (!record) continue;
+        const entry = asRecord(record.entry);
+        const depth = Math.min(item.depth, PI_SESSION_TREE_MAX_DEPTH);
+        const indent = '  '.repeat(depth);
+        const connector = depth === 0 ? '' : '└─ ';
+        const entryId = entry ? asString(entry.id) : undefined;
+        // The leaf is where the session currently is, so it is marked.
+        const marker = entryId !== undefined && entryId === leafId ? ' ← current' : '';
+        lines.push(`${indent}${connector}${entry ? summarizeEntry(entry) : 'entry'}${marker}`);
+        if (lines.length >= PI_SESSION_TREE_MAX_LINES) return false;
+        const children = Array.isArray(record.children) ? record.children : [];
+        for (let index = children.length - 1; index >= 0; index--) {
+            stack.push({ node: children[index], depth: item.depth + 1 });
+        }
+    }
+    return true;
+}
+
+/** Wrap text in a code fence that its own content cannot break out of. */
+function fenceBlock(text: string): string {
+    let longestRun = 0;
+    for (const run of text.match(/`+/g) ?? []) {
+        if (run.length > longestRun) longestRun = run.length;
+    }
+    const fence = '`'.repeat(Math.max(3, longestRun + 1));
+    return `${fence}\n${text}\n${fence}`;
 }
 
 /**
@@ -72,8 +123,9 @@ export function formatPiSessionTree(data: unknown): string {
     if (tree.length === 0) return '';
     const leafId = asString(record?.leafId);
     const lines: string[] = [];
-    for (const node of tree) {
-        collectLines(node, 0, leafId, lines);
+    const complete = collectLines(tree, leafId, lines);
+    if (!complete) {
+        lines.push(`… (${PI_SESSION_TREE_MAX_LINES} entries shown, more were not rendered)`);
     }
-    return lines.join('\n');
+    return fenceBlock(lines.join('\n'));
 }

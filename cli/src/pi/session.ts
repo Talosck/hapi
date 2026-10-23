@@ -3,6 +3,7 @@ import type { Metadata } from '@/api/types';
 import type { PiCommandSummary, PiInputDisposition, PiPromptDispatch, PiThinkingLevel } from './types';
 import type { PiModelSummary } from '@hapi/protocol/apiTypes';
 import type { PiRpcResolver } from './loop';
+import { logger } from '@/ui/logger';
 
     /**
      * Cap on the shell output streamed to the web while a command runs.
@@ -36,6 +37,17 @@ export type PiNativeRuntimeState = {
      * the attachment was sent.
      */
     modelInput?: string[];
+};
+
+/**
+ * The messages Pi dropped when its queue was cleared, mapped back to the HAPI
+ * rows that sent them.
+ */
+export type PiDroppedSteers = {
+    /** The dropped messages, in Pi's order. */
+    entries: Array<{ text: string; localId?: string }>;
+    /** How many of them HAPI cannot attribute to a row it sent. */
+    unattributed: number;
 };
 
 /**
@@ -103,6 +115,10 @@ export class PiSession {
      * the queued steers, so they would be replayed into the next turn. The
      * ledger lets HAPI map the texts Pi reports back to the HAPI rows that
      * produced them.
+     *
+     * Only the serialized steer dispatcher writes this ledger, so its order is
+     * the order Pi received the messages in — which is what makes the
+     * positional match in {@link resolveDroppedSteers} sound.
      */
     private readonly sentSteers: Array<{ text: string; localId?: string }> = [];
     private static readonly MAX_TRACKED_STEERS = 200;
@@ -123,18 +139,27 @@ export class PiSession {
      * back is not the text HAPI sent. Pi delivers steers in FIFO order, so
      * the ones it still holds are the most recent ones HAPI sent — Pi's
      * queue is a suffix of this ledger, and `clear_queue` drops all of it.
+     *
+     * The reported text is the one HAPI sent: the user has to recognize their
+     * own message, not the skill block Pi expanded it into.
      */
-    resolveDroppedSteers(texts: string[]): Array<{ text: string; localId?: string }> {
+    resolveDroppedSteers(texts: string[]): PiDroppedSteers {
         const count = texts.length;
         const take = Math.min(count, this.sentSteers.length);
         const entries = this.sentSteers.splice(this.sentSteers.length - take, take);
+        // Pi holds the newest messages HAPI sent, so the ledger entries line
+        // up with the *last* messages of the report. Anything before them is a
+        // message HAPI never sent — a Pi extension queued it — and cannot be
+        // attributed to a row.
+        const offset = count - take;
         const dropped: Array<{ text: string; localId?: string }> = [];
         for (let index = 0; index < count; index++) {
-            const text = texts[index]!;
-            const entry = entries[index];
-            dropped.push(entry ? { text, localId: entry.localId } : { text });
+            const entry = index < offset ? undefined : entries[index - offset];
+            dropped.push(entry
+                ? { text: entry.text, localId: entry.localId }
+                : { text: texts[index]! });
         }
-        return dropped;
+        return { entries: dropped, unattributed: offset };
     }
 
     /**
@@ -168,17 +193,27 @@ export class PiSession {
      * chunk. Sending that on every chunk would be quadratic, so a preview is
      * only produced once enough new output arrived.
      *
+     * The accumulated text is bounded: Pi streams a command's whole output
+     * without a limit, so an unbounded buffer would let one chatty command
+     * exhaust the wrapper's heap. Once the cap is crossed the rest of the
+     * output is dropped instead of being kept.
+     *
      * Returns the preview to show (null when nothing worth sending yet) and
      * whether this chunk is the first one past the preview cap.
      */
     recordBashStream(rpcId: string, delta: string): { preview: string | null; truncated: boolean } {
-        const text = (this.bashStreamText.get(rpcId) ?? '') + delta;
+        if (this.bashStreamTruncated.has(rpcId)) {
+            return { preview: null, truncated: false };
+        }
+        const previous = this.bashStreamText.get(rpcId) ?? '';
+        const room = PI_BASH_STREAM_LIMIT_CHARS - previous.length;
+        if (room <= 0) {
+            return this.markBashStreamTruncated(rpcId);
+        }
+        const text = previous + (delta.length > room ? delta.slice(0, room) : delta);
         this.bashStreamText.set(rpcId, text);
-
-        if (text.length > PI_BASH_STREAM_LIMIT_CHARS) {
-            const first = !this.bashStreamTruncated.has(rpcId);
-            this.bashStreamTruncated.add(rpcId);
-            return { preview: null, truncated: first };
+        if (previous.length + delta.length > PI_BASH_STREAM_LIMIT_CHARS) {
+            return this.markBashStreamTruncated(rpcId);
         }
 
         const sent = this.bashStreamSent.get(rpcId) ?? 0;
@@ -187,6 +222,15 @@ export class PiSession {
         }
         this.bashStreamSent.set(rpcId, text.length);
         return { preview: text, truncated: false };
+    }
+
+    /** Stop the live preview and release the buffered output of a command. */
+    private markBashStreamTruncated(rpcId: string): { preview: null; truncated: boolean } {
+        const first = !this.bashStreamTruncated.has(rpcId);
+        this.bashStreamTruncated.add(rpcId);
+        this.bashStreamText.delete(rpcId);
+        this.bashStreamSent.delete(rpcId);
+        return { preview: null, truncated: first };
     }
 
     unregisterBashCommand(rpcId: string): void {
@@ -219,19 +263,23 @@ export class PiSession {
     /**
      * Take the pending prompt dispatch and apply Pi's disposition.
      *
-     * - `queued`: Pi parked the message in its own steering queue. It has to
-     *   be tracked like a steer, because an aborted turn would otherwise
-     *   replay it into the next turn.
      * - `handled`: a Pi extension consumed the message. Pi creates no native
      *   user entry for it, so the caller has to withdraw the history
      *   registration.
+     *
+     * A `queued` prompt is deliberately **not** written to the steer ledger.
+     * Pi only parks a prompt when the caller asks for a streaming behavior,
+     * and HAPI never does — Pi rejects such a prompt instead. The ledger is
+     * written by the serialized steer dispatcher alone so that its order
+     * matches Pi's queue; a prompt queued behind a steer would break the
+     * positional mapping that {@link resolveDroppedSteers} relies on.
      */
     consumePromptDispatch(disposition: PiInputDisposition | undefined): PiPromptDispatch | null {
         const pending = this.pendingPromptDispatch;
         this.pendingPromptDispatch = null;
         if (!pending) return null;
         if (disposition === 'queued') {
-            this.recordSentSteer(pending.text, pending.localId);
+            logger.debug('[pi] Pi reported a queued prompt — unexpected, HAPI never requests a streaming behavior');
         }
         return pending;
     }

@@ -890,6 +890,25 @@ describe('wireTransportEvents', () => {
         expect(session.currentModel).toBe('new-model');
         expect(session.currentProvider).toBe('new-provider');
     });
+
+    it('adopts what the new model accepts after a model switch', () => {
+        const transport = createMockTransport();
+        wireTransportEvents(transport, session, []);
+
+        // The image check has to describe the model that is active now, not
+        // the one that was active before the switch.
+        session.setCurrentModelInput(['text', 'image']);
+        expect(session.currentModelSupportsImages).toBe(true);
+
+        emitEvent({
+            type: 'response',
+            command: 'set_model',
+            success: true,
+            data: { modelId: 'text-only', provider: 'new-provider', input: ['text'] },
+        });
+
+        expect(session.currentModelSupportsImages).toBe(false);
+    });
 });
 
 // --- sendPiRpcAndWait (contract: await <-> resolve symmetry) ---

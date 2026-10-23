@@ -1053,6 +1053,81 @@ describe('Pi abandoned steering queue', () => {
         return harness.session.onUserMessage.mock.calls.at(-1)![0] as UserMessageHandler;
     }
 
+    async function startIdleSession(): Promise<{ running: ReturnType<typeof runPi> }> {
+        const running = runPi({ workingDirectory: '/work' });
+        await vi.waitFor(() => expect(harness.onEvent).not.toBeNull());
+        harness.onEvent!({
+            type: 'response', command: 'get_state', success: true,
+            data: { sessionId: 'pi-abandoned-session', sessionFile: '/tmp/pi-abandoned.jsonl', isStreaming: false },
+        });
+        await completeHistoryInitialization();
+        return { running };
+    }
+
+    it('clears the steering queue even when there is nothing to abort', async () => {
+        const { running } = await startIdleSession();
+
+        // Pi skips the last steering drain when a turn ends normally, so a
+        // steer can outlive the turn it was meant for. An abort has to take it
+        // back even when there is no active turn to stop.
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        const abortPromise = abort({});
+
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'clear_queue' })));
+        await expect(abortPromise).resolves.toEqual({ success: true });
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('reports the discarded steer with the text HAPI sent', async () => {
+        const { running } = await startStreamingSession();
+
+        steerHandler()({
+            role: 'user',
+            content: { type: 'text', text: '/skill:deploy remember to use pnpm' },
+            meta: { deliveryMode: 'steer' },
+        }, 'abandoned-skill-id');
+
+        // A message that starts with a slash makes HAPI ask Pi for its
+        // command list first, so it can tell a skill command from a HAPI
+        // builtin.
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'get_commands')).toHaveLength(2));
+        const getCommands = harness.sent.filter((item) => (item as { type?: string }).type === 'get_commands')[1] as { id: string };
+        harness.onEvent!({ type: 'response', id: getCommands.id, command: 'get_commands', success: true, data: { commands: [] } });
+
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'steer', message: '/skill:deploy remember to use pnpm',
+        })));
+        const steer = harness.sent.find((item) => (item as { type?: string }).type === 'steer') as { id: string };
+        harness.onEvent!({
+            type: 'response', id: steer.id, command: 'steer', success: true,
+            data: { disposition: 'queued' },
+        });
+
+        // Pi expands prompt templates and skill commands before it queues a
+        // message, so the text it reports back is not the text HAPI sent. The
+        // user has to recognize their own message.
+        harness.clearQueueResult = {
+            steering: ['<expanded deploy skill> remember to use pnpm'],
+            followUp: [],
+        };
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        const abortPromise = abort({});
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'abort')).toHaveLength(1));
+        const abortCommand = harness.sent.find((item) => (item as { type?: string }).type === 'abort') as { id: string };
+        harness.onEvent!({ type: 'response', id: abortCommand.id, command: 'abort', success: true });
+
+        await expect(abortPromise).resolves.toEqual({ success: true });
+        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('/skill:deploy remember to use pnpm'),
+        });
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
     it('clears Pi\'s steering queue when the turn is aborted so an abandoned steer cannot replay', async () => {
         const { running } = await startStreamingSession();
         const recordSentSteer = vi.spyOn(PiSession.prototype, 'recordSentSteer');
@@ -1542,6 +1617,32 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
+    it('namespaces the Bash card id so a resumed session cannot merge cards', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash git status' } }, 'bash-namespace-id');
+
+        const bash = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'bash') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({
+            type: 'response', id: bash.id, command: 'bash', success: true,
+            data: { output: 'On branch main\n', exitCode: 0 },
+        });
+
+        // The RPC counter restarts with every Pi process, so the card id has
+        // to carry a per-process nonce — otherwise the Nth /bash of a resumed
+        // run would reuse the card of the Nth /bash before it.
+        await vi.waitFor(() => expect(harness.session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'tool-call',
+            callId: expect.stringMatching(/^pi-bash-[0-9a-f]{8}-\d+$/),
+        })));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
     it('streams the command output while it runs', async () => {
         const { running, onUserMessage } = await startReadySession();
         onUserMessage({ role: 'user', content: { type: 'text', text: '/bash ls -la' } }, 'bash-stream-id');
@@ -1647,6 +1748,80 @@ describe('Pi built-in slash commands', () => {
             message: expect.stringContaining('/bash <command>'),
         }));
         expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'bash' }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('ends the Bash card when the command fails', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash nope' } }, 'bash-reject-id');
+
+        const bash = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'bash') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({
+            type: 'response', id: bash.id, command: 'bash', success: false, error: 'command not found',
+        });
+
+        // The web only ends a tool card when it receives the matching result,
+        // so a failure has to send one too — otherwise the card spins forever.
+        await vi.waitFor(() => expect(harness.session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'tool-call-result',
+            is_error: true,
+        })));
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('Shell command failed'),
+        }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('cancels an over-running shell command instead of leaving it behind', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        vi.useFakeTimers();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash sleep 600' } }, 'bash-timeout-id');
+
+        await vi.advanceTimersByTimeAsync(0);
+        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'bash' }));
+        await vi.advanceTimersByTimeAsync(120_001);
+
+        // The command is still running inside Pi — the turn timeout does not
+        // stop a shell command — so it has to be cancelled explicitly.
+        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'abort_bash' }));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('exceeded the 120s limit'),
+        });
+
+        vi.useRealTimers();
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('treats an unreadable shell result as a failure', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash weird' } }, 'bash-garbage-id');
+
+        const bash = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'bash') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({
+            type: 'response', id: bash.id, command: 'bash', success: true, data: { output: 42 },
+        });
+
+        // An empty "successful" card would hide a command HAPI cannot read.
+        await vi.waitFor(() => expect(harness.session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'tool-call-result',
+            is_error: true,
+        })));
 
         harness.onError?.(new Error('finish test'));
         await running;
@@ -2307,6 +2482,20 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
+    it('rejects arguments to /tree instead of ignoring them', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/tree extra' } }, 'tree-arg-id');
+
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('/tree'),
+        }));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'get_tree' }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
     it('renames the Pi session for /name', async () => {
         const { running, onUserMessage } = await startReadySession();
         onUserMessage({ role: 'user', content: { type: 'text', text: '/name my-feature' } }, 'name-id');
@@ -2323,6 +2512,31 @@ describe('Pi built-in slash commands', () => {
             type: 'message',
             message: 'Session renamed to "my-feature".',
         }));
+
+        // Pi's native name lands in metadata.summary, but the web shows
+        // metadata.name first — an explicit rename has to write the display
+        // name as well, or it stays invisible.
+        const rename = harness.session.updateMetadata.mock.calls.at(-1)?.[0] as
+            ((metadata: Record<string, unknown>) => Record<string, unknown>) | undefined;
+        expect(rename?.({ summary: { text: 'older title' } })).toEqual(expect.objectContaining({
+            name: 'my-feature',
+        }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('refuses a /name that HAPI cannot show', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/name Untitled' } }, 'name-placeholder-id');
+
+        // A placeholder title is rejected by the title sync, so renaming to it
+        // would report success while changing nothing.
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('not a usable session name'),
+        }));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'set_session_name' }));
 
         harness.onError?.(new Error('finish test'));
         await running;

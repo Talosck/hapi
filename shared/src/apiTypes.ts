@@ -1126,6 +1126,8 @@ export type PiModelSummary = {
     reasoning?: boolean
     /** Maps Pi thinking levels to provider values; null = unsupported level */
     thinkingLevelMap?: PiThinkingLevelMap
+    /** What the model accepts, e.g. ["text","image"] */
+    input?: string[]
 }
 
 export type PiModelsResponse = {

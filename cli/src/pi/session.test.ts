@@ -320,9 +320,10 @@ describe('PiSession abandoned steering ledger', () => {
         session.recordSentSteer('first', 'local-1');
         session.recordSentSteer('second', 'local-2');
 
-        expect(session.resolveDroppedSteers(['second'])).toEqual([
-            { text: 'second', localId: 'local-2' },
-        ]);
+        expect(session.resolveDroppedSteers(['second'])).toEqual({
+            entries: [{ text: 'second', localId: 'local-2' }],
+            unattributed: 0,
+        });
     });
 
     it('resolves an undelivered steer to the newest row with that text', () => {
@@ -331,35 +332,78 @@ describe('PiSession abandoned steering ledger', () => {
         session.recordSentSteer('same', 'local-2');
 
         // Pi delivers steers FIFO, so an undelivered "same" is the newest one.
-        expect(session.resolveDroppedSteers(['same'])).toEqual([
-            { text: 'same', localId: 'local-2' },
-        ]);
+        expect(session.resolveDroppedSteers(['same'])).toEqual({
+            entries: [{ text: 'same', localId: 'local-2' }],
+            unattributed: 0,
+        });
     });
 
     it('reports an unknown dropped steer without a local id', () => {
         const session = createMockSession();
-        expect(session.resolveDroppedSteers(['unknown'])).toEqual([{ text: 'unknown' }]);
+        expect(session.resolveDroppedSteers(['unknown'])).toEqual({
+            entries: [{ text: 'unknown' }],
+            unattributed: 1,
+        });
     });
 
     it('does not resolve the same dropped steer twice', () => {
         const session = createMockSession();
         session.recordSentSteer('once', 'local-1');
 
-        expect(session.resolveDroppedSteers(['once'])).toEqual([{ text: 'once', localId: 'local-1' }]);
-        expect(session.resolveDroppedSteers(['once'])).toEqual([{ text: 'once' }]);
+        expect(session.resolveDroppedSteers(['once'])).toEqual({
+            entries: [{ text: 'once', localId: 'local-1' }],
+            unattributed: 0,
+        });
+        // The ledger entry is gone, so the message cannot be attributed any
+        // more — HAPI knows it did not send it in this state.
+        expect(session.resolveDroppedSteers(['once'])).toEqual({
+            entries: [{ text: 'once' }],
+            unattributed: 1,
+        });
+    });
+
+    it('reports the text HAPI sent, not the one Pi expanded it to', () => {
+        const session = createMockSession();
+        session.recordSentSteer('/skill:deploy raw text', 'local-1');
+
+        // Pi expands prompt templates and skill commands before it queues a
+        // message, so the text it reports back is not the text HAPI sent. The
+        // user has to recognize their own message.
+        expect(session.resolveDroppedSteers(['<expanded deploy skill> raw text'])).toEqual({
+            entries: [{ text: '/skill:deploy raw text', localId: 'local-1' }],
+            unattributed: 0,
+        });
+    });
+
+    it('attributes the newest steers when Pi holds messages HAPI never sent', () => {
+        const session = createMockSession();
+        session.recordSentSteer('sent', 'local-1');
+
+        // Pi queued a message of its own before the one HAPI sent. The
+        // positional mapping can only cover the newest message.
+        expect(session.resolveDroppedSteers(['extension message', 'sent'])).toEqual({
+            entries: [{ text: 'extension message' }, { text: 'sent', localId: 'local-1' }],
+            unattributed: 1,
+        });
     });
 });
 
 describe('PiSession prompt disposition', () => {
-    it('tracks a queued prompt as a steer so an abort can take it back', () => {
+    it('does not track a queued prompt as a steer', () => {
         const session = createMockSession();
         session.recordPromptDispatch({ text: 'queued prompt', localId: 'local-1' });
 
-        const dispatch = session.consumePromptDispatch('queued');
-        expect(dispatch).toEqual({ text: 'queued prompt', localId: 'local-1' });
-
-        session.resolveDroppedSteers(['queued prompt']);
-        expect(session.resolveDroppedSteers(['queued prompt'])).toEqual([{ text: 'queued prompt' }]);
+        // Pi only parks a prompt when the caller asks for a streaming
+        // behavior, and HAPI never does. The steer ledger is written by the
+        // serialized steer dispatcher alone, so its order stays Pi's order.
+        expect(session.consumePromptDispatch('queued')).toEqual({
+            text: 'queued prompt',
+            localId: 'local-1',
+        });
+        expect(session.resolveDroppedSteers(['queued prompt'])).toEqual({
+            entries: [{ text: 'queued prompt' }],
+            unattributed: 1,
+        });
     });
 
     it('does not track a started prompt as a steer', () => {
@@ -370,7 +414,10 @@ describe('PiSession prompt disposition', () => {
             text: 'started prompt',
             localId: 'local-1',
         });
-        expect(session.resolveDroppedSteers(['started prompt'])).toEqual([{ text: 'started prompt' }]);
+        expect(session.resolveDroppedSteers(['started prompt'])).toEqual({
+            entries: [{ text: 'started prompt' }],
+            unattributed: 1,
+        });
     });
 
     it('returns the dispatch for a prompt a Pi extension handled', () => {
@@ -418,20 +465,22 @@ describe('PiSession bash output stream cap', () => {
         session.unregisterBashCommand('b1');
         expect(session.recordBashStream('b1', 'z'.repeat(8 * 1024)).preview).not.toBeNull();
     });
+
+    it('keeps the buffered output bounded when a command floods it', () => {
+        const session = createMockSession();
+        // Pi streams a command's whole output without a limit, so the wrapper
+        // must not keep it: an unbounded buffer would exhaust its heap.
+        session.recordBashStream('b1', 'x'.repeat(1024 * 1024));
+        session.recordBashStream('b1', 'y'.repeat(1024 * 1024));
+
+        const buffered = (session as unknown as {
+            bashStreamText: Map<string, string>;
+        }).bashStreamText.get('b1');
+        expect(buffered === undefined || buffered.length <= 32 * 1024).toBe(true);
+    });
 });
 
 describe('PiSession dropped steer resolution', () => {
-    it('resolves by position even when Pi expanded the text', () => {
-        const session = createMockSession();
-        session.recordSentSteer('/skill:deploy raw text', 'local-1');
-
-        // Pi expands prompt templates and skill commands before it queues the
-        // message, so the text it reports back is not the text HAPI sent.
-        expect(session.resolveDroppedSteers(['<expanded deploy skill> raw text'])).toEqual([
-            { text: '<expanded deploy skill> raw text', localId: 'local-1' },
-        ]);
-    });
-
     it('takes the most recent steers, since Pi delivers in FIFO order', () => {
         const session = createMockSession();
         session.recordSentSteer('first', 'local-1');
@@ -439,22 +488,36 @@ describe('PiSession dropped steer resolution', () => {
         session.recordSentSteer('third', 'local-3');
 
         // "first" was already delivered, so Pi still holds the last two.
-        expect(session.resolveDroppedSteers(['second', 'third'])).toEqual([
-            { text: 'second', localId: 'local-2' },
-            { text: 'third', localId: 'local-3' },
-        ]);
+        expect(session.resolveDroppedSteers(['second', 'third'])).toEqual({
+            entries: [
+                { text: 'second', localId: 'local-2' },
+                { text: 'third', localId: 'local-3' },
+            ],
+            unattributed: 0,
+        });
     });
 
     it('reports messages it cannot attribute to a row', () => {
         const session = createMockSession();
-        expect(session.resolveDroppedSteers(['unknown'])).toEqual([{ text: 'unknown' }]);
+        expect(session.resolveDroppedSteers(['unknown'])).toEqual({
+            entries: [{ text: 'unknown' }],
+            unattributed: 1,
+        });
     });
 
     it('does not resolve the same dropped steer twice', () => {
         const session = createMockSession();
         session.recordSentSteer('once', 'local-1');
 
-        expect(session.resolveDroppedSteers(['once'])).toEqual([{ text: 'once', localId: 'local-1' }]);
-        expect(session.resolveDroppedSteers(['once'])).toEqual([{ text: 'once' }]);
+        expect(session.resolveDroppedSteers(['once'])).toEqual({
+            entries: [{ text: 'once', localId: 'local-1' }],
+            unattributed: 0,
+        });
+        // The ledger entry is gone, so the message cannot be attributed any
+        // more — HAPI knows it did not send it in this state.
+        expect(session.resolveDroppedSteers(['once'])).toEqual({
+            entries: [{ text: 'once' }],
+            unattributed: 1,
+        });
     });
 });

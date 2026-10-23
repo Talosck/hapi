@@ -289,6 +289,8 @@ const PiModelEntrySchema = z.object({
     contextWindow: asOptNum,
     reasoning: asOptBool,
     thinkingLevelMap: asOptThinkingLevelMap,
+    /** What the model accepts, e.g. ["text","image"]. */
+    input: z.array(z.string()).optional(),
 }).passthrough().transform((m): PiModelSummary | null => {
     if (!m.id) return null;
     const entry: PiModelSummary = { provider: m.provider, modelId: m.id };
@@ -296,6 +298,7 @@ const PiModelEntrySchema = z.object({
     if (m.contextWindow !== undefined) entry.contextWindow = m.contextWindow;
     if (m.reasoning !== undefined) entry.reasoning = m.reasoning;
     if (m.thinkingLevelMap !== undefined) entry.thinkingLevelMap = m.thinkingLevelMap;
+    if (m.input !== undefined) entry.input = m.input;
     return entry;
 });
 
@@ -381,6 +384,8 @@ export const PiSetModelDataSchema = z.object({
     id: z.string().optional(),
     modelId: z.string().optional(),
     provider: z.string().optional(),
+    /** What the model accepts, e.g. ["text","image"]. */
+    input: z.array(z.string()).optional(),
 }).passthrough();
 
 // ============================================================================

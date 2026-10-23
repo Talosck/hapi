@@ -33,7 +33,7 @@ export type PiSpecialCommand =
     | { type: 'session' }
     | { type: 'model'; modelId?: string }
     | { type: 'bash'; command: string }
-    | { type: 'tree' }
+    | { type: 'tree'; extraArgs?: string }
     | { type: 'name'; name: string }
     | { type: 'help' }
     | { type: 'unsupported'; name: string };
@@ -82,7 +82,9 @@ export function parsePiSpecialCommand(message: string): PiSpecialCommand | null 
             // explain the usage — it is not a terminal-only command.
             return { type: 'bash', command: args };
         case 'tree':
-            return { type: 'tree' };
+            // /tree takes no argument. A stray argument is a typo, and
+            // silently ignoring it would hide it.
+            return { type: 'tree', ...(args ? { extraArgs: args } : {}) };
         case 'name':
             // An empty name is reported by the executor, which knows how to
             // explain the usage — it is not a terminal-only command.

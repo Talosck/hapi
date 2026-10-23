@@ -8,9 +8,11 @@ import { createRunnerLifecycle, createModeChangeHandler, setControlledByUser } f
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import { PiTransport } from './piTransport';
 import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
+import { normalizeNativeSessionTitle } from '@/agent/nativeSessionTitle';
+import { applySessionDisplayRename } from '@/agent/sessionDisplayRename';
 import { PiSession } from './session';
 import { PiConversationHistory, PiHistoryRestoreError } from './conversationHistory';
-import { parsePiModels, parsePiCommands, PiRpcTimeoutError, piBashMessageId, sendPiRpcAndWait, sendPiRpcAndWaitWithId, wireTransportEvents } from './loop';
+import { parsePiModels, parsePiCommands, PiRpcTimeoutError, piBashMessageId, sendPiRpcAndWait, sendPiRpcAndWaitWithId, wireTransportEvents, PI_CLEAR_QUEUE_TIMEOUT_MS } from './loop';
 import { convertPiCompactionUsage } from './piEventConverter';
 import { PiThinkingLevelSchema, SetSessionConfigPayloadSchema, PiBashResultSchema, PiCompactResultSchema, PiFullSessionStatsSchema } from './schemas';
 import type { PiImageContent, PiThinkingLevel } from './types';
@@ -39,6 +41,8 @@ const PI_COMPACT_TIMEOUT_MS = 120_000;
 // A shell command can legitimately run for minutes (builds, test suites), so
 // the bash RPC gets the same generous window as a compaction.
 const PI_BASH_TIMEOUT_MS = 120_000;
+/** How long the cancellation of an over-running shell command may take. */
+const PI_BASH_ABORT_TIMEOUT_MS = 5_000;
 
 const PI_HELP_TEXT = [
     'Supported HAPI Pi commands:',
@@ -1037,13 +1041,18 @@ export async function runPi(opts: {
                     PI_BASH_TIMEOUT_MS,
                 );
                 piSession.registerBashCommand(bashRpcId, command.command);
+                const messageId = piBashMessageId(bashRpcId);
                 try {
                     const data = await bashResult;
                     const parsed = PiBashResultSchema.safeParse(data);
-                    const output = parsed.success ? parsed.data.output : '';
-                    const exitCode = parsed.success ? parsed.data.exitCode : undefined;
-                    const cancelled = parsed.success && parsed.data.cancelled === true;
-                    const messageId = piBashMessageId(bashRpcId);
+                    if (!parsed.success) {
+                        // An unreadable answer is not a successful command: the
+                        // web would show an empty card and claim success.
+                        throw new Error('Pi returned an unreadable result for the command');
+                    }
+                    const output = parsed.data.output;
+                    const exitCode = parsed.data.exitCode;
+                    const cancelled = parsed.data.cancelled === true;
                     const toolCall = convertAgentMessage({
                         type: 'tool_call',
                         id: messageId,
@@ -1065,7 +1074,31 @@ export async function runPi(opts: {
                         sendEvent(`⚠️ Shell command exited with code ${exitCode}.`);
                     }
                 } catch (error) {
-                    const messageId = piBashMessageId(bashRpcId);
+                    const detail = errorDetail(error);
+                    if (error instanceof PiRpcTimeoutError) {
+                        // The command is still running inside Pi — the turn
+                        // timeout does not stop a shell command. Cancel it
+                        // explicitly, otherwise it keeps running unattended and
+                        // its output is thrown away.
+                        sendEvent(`⚠️ Shell command exceeded the ${Math.round(PI_BASH_TIMEOUT_MS / 1000)}s limit — cancelling it.`);
+                        try {
+                            await sendPiRpcAndWait(
+                                piSession,
+                                transport,
+                                { type: 'abort_bash' },
+                                PI_BASH_ABORT_TIMEOUT_MS,
+                            );
+                        } catch (abortError) {
+                            const abortDetail = abortError instanceof Error ? abortError.message : String(abortError);
+                            logger.debug(`[pi] abort_bash after timeout failed: ${abortDetail}`);
+                            sendEvent(`⚠️ Could not cancel the shell command (${abortDetail}). It may still be running.`);
+                        }
+                    } else {
+                        sendEvent(`⚠️ Shell command failed: ${detail}`);
+                    }
+                    // The web only ends a tool card when it receives the
+                    // matching result, so a failure has to send one too —
+                    // otherwise the card spins forever.
                     const toolCall = convertAgentMessage({
                         type: 'tool_call',
                         id: messageId,
@@ -1074,13 +1107,23 @@ export async function runPi(opts: {
                         status: 'failed',
                     }, piSession.currentModel);
                     if (toolCall) piSession.sendAgentMessage(toolCall);
-                    sendEvent(`⚠️ Shell command failed: ${errorDetail(error)}`);
+                    const toolResult = convertAgentMessage({
+                        type: 'tool_result',
+                        id: messageId,
+                        output: detail,
+                        status: 'failed',
+                    }, piSession.currentModel);
+                    if (toolResult) piSession.sendAgentMessage(toolResult);
                 } finally {
                     piSession.unregisterBashCommand(bashRpcId);
                 }
                 return;
             }
             case 'tree': {
+                if (command.extraArgs) {
+                    sendEvent('⚠️ Usage: /tree (it takes no arguments).');
+                    return;
+                }
                 try {
                     const data = await sendPiRpcAndWait(piSession, transport, { type: 'get_tree' });
                     const tree = formatPiSessionTree(data);
@@ -1095,9 +1138,23 @@ export async function runPi(opts: {
                     sendEvent('⚠️ Usage: /name <name>');
                     return;
                 }
+                // The title has to be one HAPI can actually show. A placeholder
+                // name ("Untitled", a generated session date) is rejected by
+                // the title sync, so renaming to it would report success while
+                // changing nothing.
+                const title = normalizeNativeSessionTitle(command.name);
+                if (!title) {
+                    sendEvent(`⚠️ "${command.name}" is not a usable session name.`);
+                    return;
+                }
                 try {
                     await sendPiRpcAndWait(piSession, transport, { type: 'set_session_name', name: command.name });
-                    sendEvent(`Session renamed to "${command.name}".`);
+                    // Pi's native name lands in metadata.summary, but the web
+                    // shows metadata.name first — so an explicit rename has to
+                    // write the display name as well, or it stays invisible
+                    // under the name the title extension already set.
+                    applySessionDisplayRename(piSession.client, title);
+                    sendEvent(`Session renamed to "${title}".`);
                 } catch (error) {
                     sendEvent(`⚠️ Could not rename the Pi session: ${errorDetail(error)}`);
                 }
@@ -1373,6 +1430,14 @@ export async function runPi(opts: {
                     }
                     throw error;
                 })
+                .then(async (): Promise<{ success: true }> => {
+                    // Pi's steering queue survives the interrupted compaction
+                    // as well, so the abandoned steers have to be cleared here
+                    // too — a steer that outlives its turn would be replayed
+                    // into the next one.
+                    await transportEvents?.clearAbandonedQueue();
+                    return { success: true };
+                })
                 .finally(() => {
                     abortInFlight = false;
                     abortPromise = null;
@@ -1411,6 +1476,15 @@ export async function runPi(opts: {
             let firstAbortConfirmed = false;
             try {
                 if (!acquireRuntimeMutation) {
+                    // There is no turn to stop, but Pi may still hold steering
+                    // messages from an earlier one: Pi skips the last steering
+                    // drain when a turn ends normally, so a steer can outlive
+                    // the turn it was meant for. Clear the queue anyway — the
+                    // cleanup is idempotent, and the prompt pump stays blocked
+                    // until it finished, so no new prompt can race it.
+                    await transportEvents?.clearAbandonedQueue(
+                        Math.min(PI_CLEAR_QUEUE_TIMEOUT_MS, Math.max(1, deadlineAt - Date.now())),
+                    );
                     return { success: true };
                 }
 
@@ -1467,14 +1541,19 @@ export async function runPi(opts: {
                             logger.debug(`[pi] abort_bash failed: ${error instanceof Error ? error.message : String(error)}`);
                         }
                     }
-                    // Pi's abort stops the turn but keeps its steering queue, so
-                    // an accepted steer that was never delivered would be
-                    // replayed into the next turn as a fresh user message.
-                    // Clear the queue while the runtime mutation lease is still
-                    // held: the next prompt must not start before the abandoned
-                    // steers are gone.
-                    await transportEvents?.clearAbandonedQueue();
                 }
+                // Pi's abort stops the turn but keeps its steering queue, so an
+                // accepted steer that was never delivered would be replayed
+                // into the next turn as a fresh user message. The queue belongs
+                // to Pi, not to the turn: a steer that outlives its turn would
+                // be replayed into the next one, so every abort clears it —
+                // also when the abort RPC was skipped because the turn had
+                // already settled. The cleanup runs while the runtime mutation
+                // lease is still held: the next prompt must not start before
+                // the abandoned steers are gone.
+                await transportEvents?.clearAbandonedQueue(
+                    Math.min(PI_CLEAR_QUEUE_TIMEOUT_MS, Math.max(1, deadlineAt - Date.now())),
+                );
                 if (abortBoundary) await abortBoundary.promise;
                 // Invalidate the aborted turn while still holding the runtime
                 // mutation lease. A queued steer waiter must observe idle (and
