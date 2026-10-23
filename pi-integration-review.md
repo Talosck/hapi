@@ -637,3 +637,115 @@ reviewer 建议 `/bash` 也去拿 runtime mutation 锁。**这个没采纳**，�
 | Pi 测试套件 | 293 → 297 条全过（这轮又补了 4 条针对性单测） |
 | cli / web / hub / shared 全套 | 全过 |
 | typecheck | cli / web / hub / relay 全过 |
+
+---
+
+## 十一、第二轮独立复审：两个 reviewer 又挖出 13 个问题（2026-10-23）
+
+提交后又跑了两轮独立复审，一个专攻 P0 那组的中止/清队列机制，
+一个专攻新加的 `/bash` `/tree` `/name`。两边合起来又挖出 13 个问题，全部修掉。
+
+### 11.1 高危：账本和队列之间没有一致性守卫，而且这条路径**自己就能把顺序搞反**
+
+账本是在 **RPC 响应到达**时写的，Pi 是在 **收到 RPC** 时入队的。
+本来只有一个写者（steer dispatcher）的时候这没问题 —— 它是串行的，
+发送顺序 == 响应顺序 == Pi 入队顺序。
+
+但当时还有第二个写者：prompt 的响应。如果 Pi 报 `'queued'`，HAPI 就把它也记进账本。
+于是账本里可能出现 `[steer(后发的), prompt(先发的)]`，而 Pi 的队列是 `[prompt, steer]`
+—— **两条的 localId 互换了**，`rejectPendingEntry` 会撤错行，
+后面的 fork / rewind 历史点就挂到了错误的消息上。
+
+**这里的关键是去查 Pi 的源码，而不是猜。** Pi 1.4.0 的 `prompt()` 是这样：
+
+```js
+// Pi 1.4.0 agent-session.js prompt()
+if (this.isStreaming) {
+    const behavior = options?.streamingBehavior;
+    if (!behavior) throw new Error("Agent is already processing. Specify streamingBehavior ...");
+    ...
+}
+```
+
+也就是说：**Pi 只有在调用方明确要 streamingBehavior 时才会把 prompt 挂进队列，
+否则直接抛错。** HAPI 从来不发 `streamingBehavior`
+（`cli/src/pi/types.ts` 里那个字段至今没有第二个使用者）。
+所以 prompt 拿不到 `'queued'`，那条分支是死代码。
+
+**决策：把 prompt 从账本里彻底拿掉，让不变式按构造成立。**
+账本只由串行的 steer dispatcher 写，顺序天然等于 Pi 的入队顺序。
+与其加一个运行时守卫去检测「顺序反了」，不如让顺序反不了。
+
+顺带加了一个**降级路径**：万一 Pi 攥着的消息比 HAPI 记的多
+（比如 Pi 扩展自己塞了一条），位置映射就只能覆盖最后那几条，
+多出来的记成「无法归属」，只写 debug 日志、绝不硬套一个 localId。
+
+### 11.2 高危：三条中止路径**都不**清队列
+
+| 路径 | 原来 | 为什么坏 |
+|---|---|---|
+| `runPi.ts` 「没有 native work 就直接 return」 | 完全 no-op | Pi 跳过最后一次 steering drain（`agent-loop.js:186-189`：`if (decision?.action === "end") { emit agent_end; return; }`），所以 **steer 可以跨一个正常结束的轮次活下来**。这时用户按停止，什么都没发生，孤儿 steer 留在队列里，下一轮诈尸 |
+| 「`guard.settled` 就不发 abort」那个分支 | abort 和 clear 一起被包住 | 守卫在异步 history sync 之后才置位；租约等得比一次 history sync 久，整个块就被跳过。而 Pi 没收到 abort，`agent_settled` 的兜底也不会触发（`aborted` 是 false）—— **孤儿存活且零诊断** |
+| compaction 中断那条路径 | 只发 `{type:'abort'}` | 完全依赖 `agent_settled` 兜底 |
+
+**改法：让每一次中止都清队列。** `clear_queue` 是幂等的，多清一次没有副作用，
+而漏清的后果是实打实的用户可见 bug。现在无 native work 的早退路径、
+守卫已置位的路径、compaction 中断路径，三条都会清。
+
+### 11.3 中危：`clear_queue` 的 2 秒超时不受中止 deadline 约束
+
+中止预算是 25 秒（`PI_ABORT_OPERATION_TIMEOUT_MS`），守卫定时器正好在 deadline 触发。
+原来锁等 20 秒 + abort 4 秒 + clear 2 秒 = 26 秒 → 守卫先触发 →
+`await abortBoundary.promise` reject → `firstAbortConfirmed === true` →
+`failNativeStartup(fatal)` → **整个 session 被拆掉**：
+把一次成功的中止变成了 fail-closed 杀会话。
+
+`clearAbandonedQueue` 现在接受一个 timeout 参数，中止路径传
+`min(2s, 剩余时间)` —— 清理必须留在中止自己的预算里。
+
+### 11.4 中危 / 低危：`clear_queue` 的几个静默失败
+
+| 问题 | 原来 | 现在 |
+|---|---|---|
+| 响应格式不对 | `if (!parsed.success) return;` —— 零诊断 | 明确告诉用户「Pi 清了队列但没说清掉了什么」 |
+| 旧 Pi（0.83）没有这条命令 | 每次中止都弹一次「⚠️ Could not clear...」 | 认出来是 `Unknown command` → 只在 debug 里记一次，**并且整个 session 只警告一次** |
+| 用户看到的「丢弃的 steer」 | 是 Pi 改写后的文本（skill 会变成整个 `<skill name=…>` 块） | 报**账本里的原始文本** —— 用户得认出自己发的那条消息，而不是 Pi 展开后的产物 |
+
+### 11.5 新命令那组复审挖出来的（都在这一轮修掉）
+
+| 级别 | 问题 | 处理 |
+|---|---|---|
+| 高 | **bash 输出流式缓冲无上限** —— Pi 的 `bash_execution_update` 流没有上限，HAPI 又把每个 chunk 累积起来，一个 `yes` 就能把 wrapper 的堆吃光 | 累积缓冲加上限（32KB），越界就丢弃后续输出并停掉实时预览 |
+| 高 | **`/bash` 失败只发 `tool_call` 不发 `tool_result`** —— web 只在收到配对的 result 时才结束卡片，所以失败的卡片会**永远转圈** | 失败路径补发 `tool-call-result`（`is_error: true`） |
+| 高 | **`/bash` 超时后命令变孤儿** —— 120 秒到了 HAPI 不管了，但命令还在 Pi 里跑着、输出被丢弃、还能并发第二条 | 超时后显式发 `abort_bash` 把命令取消掉；取消失败会告诉用户「可能还在跑」 |
+| 中 | **图片能力检查在模型切换后过期** —— `set_model` 的响应里带着新模型的 `input`，但没人读 | `set_model` 响应和模型目录都会刷新 `currentModelInput` |
+| 中 | **`/name` 改名不可见** —— Pi 的原生命名落在 `metadata.summary.text`，而 web 显示的是 `metadata.name`，所以改名完看着没变 | `/name` 现在同时写 `metadata.name`（和模型改名走同一条路），并且拒绝 HAPI 显示不出来的占位名（「Untitled」这种），不再假报成功 |
+| 中 | **bash 卡片 id 跨进程冲突** —— `pi-bash-<rpcId>` 里的 rpcId 每次 Pi 进程重启都从 1 开始，恢复会话时两张卡片会被 web 合成一张 | id 里加一个每进程随机 nonce：`pi-bash-<nonce>-<rpcId>` |
+| 中 | **`/tree` 递归遍历** —— 几千层深的分支链会爆栈 | 改成显式栈的迭代遍历 |
+| 低 | **`/tree` 没有上限** —— hub 会把超长字符串截断，用户看到半棵树还不知道 | 最多渲染 200 条，并明说「还有更多没渲染」 |
+| 低 | **`/tree` 会被 markdown 渲染** —— 树里带着用户自己以前的消息，web 把聊天当 markdown 渲染，里面一张远程图片就变成一次实打实的对外请求 | 整棵树放进代码块 |
+| 低 | **代理对被截断** —— 按固定长度裁剪会把一个 4 字节 emoji 劈成半个代理对 | 按码点裁剪 |
+| 低 | **`/tree` 默默吞掉多余参数** | `/tree extra` 明确报用法 |
+| 低 | **bash 结果解析失败被当成成功** —— schema 解析不过时输出当空串、状态当成功 | 解析失败当作失败处理 |
+
+### 11.6 复审提了但**没有**动的
+
+| 建议 | 判断 |
+|---|---|
+| 清队列失败时，中止结果也应该报失败 | 中止的语义是「这一轮停了」——**这一轮确实停了**，所以中止 RPC 返回成功是对的；清理失败是另一件事，用一条独立告警告诉用户就够了。把中止改成失败反而会让 web 以为轮次没停 |
+| `agent_settled` 的兜底清队列是 fire-and-forget，不受租约保护 | 兜底只在主路径没清成时触发（Pi 已经自己 abort 了），那时候没有活跃轮次，租约保护没有意义。留着 |
+| `/bash` 是 RCE 原语，应该默认 `excludeFromContext` 或者加权限确认 | Pi 自己也没有权限模型，Pi 的 bash 工具同样是「不确认就执行」。HAPI 这边加确认会让它和 Pi 的行为不一致。**记在文档里，不改行为** |
+| `extension_error` 没有去重，一个扩展崩溃一次刷一条 | 低优先级，且 Pi 自己也没有去重。留着 |
+| fork / rewind 发生在 `/bash` 期间会静默杀掉命令 | 低优先级，而且 fork / rewind 本身就是破坏性操作。留着 |
+| `clear_queue` 结果里的 `followUp` 被解析后忽略 | HAPI 从不发 `follow_up`，无害 |
+| 账本 200 条上限挤出的是最旧的（已投递的） | 安全 |
+| native session 换身份时清账本是防御性的但非关键 | 无害，留着 |
+
+### 11.7 这轮的验证
+
+| 项 | 结果 |
+|---|---|
+| Pi 测试套件 | 297 → **312** 条全过（新增 15 条针对性回归测试） |
+| cli / web / hub / shared 全套 | 全过 |
+| typecheck | cli / web / hub / relay 全过 |
+
