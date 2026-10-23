@@ -50,7 +50,15 @@ export type McodeUsageReadResult = {
 
 type JsonRecord = Record<string, unknown>;
 
-const DEFAULT_POLL_INTERVAL_MS = 2000;
+/**
+ * How often the transcript is read for new usage records.
+ *
+ * The record for a model call is written when that call ends, so this is how
+ * long the context bar can lag behind the agent. The other agents report the
+ * context the moment the call ends; half a second keeps the two close
+ * without reading the journal on every event.
+ */
+const DEFAULT_POLL_INTERVAL_MS = 500;
 const DISCOVERY_RETRY_MS = 1000;
 const MAX_SESSION_DIR_LOOKUPS = 120;
 /**
@@ -290,17 +298,25 @@ export type McodeUsageContext = {
  *
  * The context size comes from the transcript record itself: the total is the
  * context the model call occupied (the uncached prompt plus the cached prefix
- * plus the response). MiniMax Code publishes its own context size over ACP
- * only at the end of a turn, so that value is stale while the agent is
- * working — and it can be smaller than the cached prefix, which made the
- * status bar report more cached tokens than used ones.
+ * plus the response). The transcript always reports the cached prefix inside
+ * the total, so the context the model carried is exactly this number.
+ *
+ * The ACP copy of the same quantity is deliberately not used here. MiniMax
+ * Code publishes it over ACP only at the end of a turn, so while the agent
+ * works it is a stale snapshot, and after a compaction it is higher than the
+ * real context because the compaction made the context smaller. Taking the
+ * larger of the two pinned the context bar to the pre-compaction peak: the
+ * reported context stopped moving while the agent kept working.
  */
 export function buildMcodeUsageMessage(
     record: McodeUsageRecord,
     model: string | null | undefined,
     context: McodeUsageContext | null
 ): CodexMessage | null {
-    const contextTokens = Math.max(record.totalTokens, context?.contextTokens ?? 0);
+    const contextTokens = record.inputTokens
+        + record.outputTokens
+        + record.cacheReadTokens
+        + record.cacheWriteTokens;
     return convertAgentMessage({
         type: 'usage',
         inputTokens: record.inputTokens,

@@ -718,7 +718,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         const messageBuffer = this.messageBuffer;
 
         const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
-            enableChangeTitle: false,
+            // MiniMax Code publishes its own session title over ACP only after
+            // the turn it derives it from has finished, so a new chat stayed
+            // untitled until the first answer was done. The change_title tool
+            // lets the model name the session while it is still working on it,
+            // which is how the other agents get an early title.
+            enableChangeTitle: true,
             skillLookup: { workingDirectory: session.path, flavor: 'mcode' }
         });
         this.happyServer = happyServer;

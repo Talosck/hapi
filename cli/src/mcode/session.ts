@@ -20,6 +20,13 @@ export class McodeSession extends AgentSessionBase<McodeMode> {
     localLaunchFailure: LocalLaunchFailure | null = null;
     private lastContextUsage: McodeContextUsage | null = null;
     private lastEmptyTokenCountSignature: string | null = null;
+    /**
+     * True once a token count with real tokens has been seen.
+     *
+     * That is the signal that the transcript watcher is delivering. Until then
+     * the ACP copy of the context is the only reading there is.
+     */
+    private hasSeenTokenCount = false;
 
     constructor(opts: {
         api: ApiClient;
@@ -86,11 +93,47 @@ export class McodeSession extends AgentSessionBase<McodeMode> {
 
     sendAgentMessage = (message: unknown): void => {
         this.captureContextUsage(message);
+        const counts = this.readTokenCounts(message);
+        if (counts && (counts.inputTokens !== 0 || counts.outputTokens !== 0)) {
+            this.hasSeenTokenCount = true;
+        } else if (counts && this.hasSeenTokenCount) {
+            // A count with a context but without tokens is the ACP copy of the
+            // context. The agent publishes it at the end of a turn, so it is a
+            // snapshot and not the live value. Once the transcript watcher is
+            // reporting, the live value is the newer one and the snapshot must
+            // not overwrite it: after a compaction the snapshot is even higher
+            // than the real context, so it pinned the context bar to a number
+            // that was too high and never moved again.
+            return;
+        }
         if (this.isRepeatedEmptyTokenCount(message)) {
             return;
         }
         this.client.sendAgentMessage(message);
     };
+
+    /**
+     * The token counts of a token count message, or null when the message is
+     * not one.
+     */
+    private readTokenCounts(message: unknown): {
+        inputTokens: number;
+        outputTokens: number;
+    } | null {
+        if (!message || typeof message !== 'object') return null;
+        const record = message as Record<string, unknown>;
+        if (record.type !== 'token_count') return null;
+        const info = record.info;
+        if (!info || typeof info !== 'object') return null;
+        const total = (info as Record<string, unknown>).total;
+        if (!total || typeof total !== 'object') return null;
+
+        const totalRecord = total as Record<string, unknown>;
+        return {
+            inputTokens: typeof totalRecord.inputTokens === 'number' ? totalRecord.inputTokens : 0,
+            outputTokens: typeof totalRecord.outputTokens === 'number' ? totalRecord.outputTokens : 0
+        };
+    }
 
     /**
      * True for a token count that repeats the previous one and carries no
@@ -107,22 +150,13 @@ export class McodeSession extends AgentSessionBase<McodeMode> {
      * the same numbers, and the dashboard has to see both.
      */
     private isRepeatedEmptyTokenCount(message: unknown): boolean {
-        if (!message || typeof message !== 'object') return false;
-        const record = message as Record<string, unknown>;
-        if (record.type !== 'token_count') return false;
-        const info = record.info;
-        if (!info || typeof info !== 'object') return false;
-        const total = (info as Record<string, unknown>).total;
-        if (!total || typeof total !== 'object') return false;
-
-        const totalRecord = total as Record<string, unknown>;
-        const inputTokens = typeof totalRecord.inputTokens === 'number' ? totalRecord.inputTokens : 0;
-        const outputTokens = typeof totalRecord.outputTokens === 'number' ? totalRecord.outputTokens : 0;
-        if (inputTokens !== 0 || outputTokens !== 0) return false;
+        const counts = this.readTokenCounts(message);
+        if (!counts) return false;
+        if (counts.inputTokens !== 0 || counts.outputTokens !== 0) return false;
 
         let signature: string;
         try {
-            signature = JSON.stringify(record);
+            signature = JSON.stringify(message);
         } catch {
             return false;
         }

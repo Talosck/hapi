@@ -14,7 +14,8 @@ const harness = vi.hoisted(() => ({
     restoredHandlers: {
         model: 0,
         slashCommands: 0
-    }
+    },
+    mcpBridgeOptions: null as { enableChangeTitle?: boolean } | null
 }))
 
 vi.mock('@/modules/common/handlers/mcodeModels', () => ({
@@ -38,10 +39,13 @@ vi.mock('./utils/mcodeBackend', async (importOriginal) => {
 })
 
 vi.mock('@/codex/utils/buildHapiMcpBridge', () => ({
-    buildHapiMcpBridge: async () => ({
-        server: { stop: () => {} },
-        mcpServers: {}
-    })
+    buildHapiMcpBridge: async (_client: unknown, options: { enableChangeTitle?: boolean }) => {
+        harness.mcpBridgeOptions = options;
+        return {
+            server: { stop: () => {} },
+            mcpServers: {}
+        };
+    }
 }))
 
 vi.mock('./utils/permissionHandler', () => ({
@@ -346,6 +350,21 @@ describe('mcodeRemoteLauncher config sync', () => {
         harness.backend = {}
         harness.question.cancelReasons = []
         harness.question.submitAnswer = null
+        harness.mcpBridgeOptions = null
+    })
+
+    it('gives the agent the title tool so a new chat is named while it works', async () => {
+        // MiniMax Code publishes its own title over ACP only after the turn it
+        // derives it from has finished, so a new chat stayed untitled until
+        // the first answer was done. The title tool lets the model name the
+        // session while it is still working on it.
+        const backend = createBackend()
+        const session = createSession([{ message: 'hi', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(harness.mcpBridgeOptions?.enableChangeTitle).toBe(true)
+        expect(backend.setModel).not.toHaveBeenCalled()
     })
 
     it('reports the model discovered from session/new when none was requested', async () => {

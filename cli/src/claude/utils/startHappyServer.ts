@@ -175,7 +175,19 @@ function createHapiMcpServer(
     }
     if (enableChangeTitle) {
         mcp.registerTool<any, any>('change_title', {
-            description: 'Change the title of the current HAPI chat session. Call once when the user\'s primary objective is clear; use a concise task title.',
+            // The description is the only instruction an agent that cannot take
+            // a system prompt gets - the ACP agents never see the title
+            // instruction that the native ones prepend. Without saying when to
+            // call it, an agent like MiniMax Code simply never calls it and
+            // the chat stays untitled until the agent publishes a title of its
+            // own, which it does at the end of the first turn.
+            //
+            // The wording matters: an agent that is told to call it "as soon as
+            // the request is clear" decides for itself that a long task is not
+            // clear yet and starts working instead. Asking for exactly one
+            // call at the start of every chat, and saying not to postpone it,
+            // is what makes the call happen.
+            description: 'Set the title of the current HAPI chat session. You MUST call this tool exactly once at the start of every new chat, before reading any file, before planning and before any other tool call. Do not skip it and do not postpone it until later. Pass a concise task title (under 20 characters, no quotes and no trailing punctuation). Do not call it again for routine progress, substeps, implementation details or a slightly better wording.',
             title: 'Change Chat Title',
             inputSchema: changeTitleInputSchema,
         }, async (args: { title: string }) => {

@@ -157,17 +157,56 @@ describe('buildMcodeUsageMessage', () => {
                     cachedInputTokens: 14_018,
                     cacheWriteInputTokens: 0
                 },
-                contextTokens: 28_119,
+                contextTokens: 14_646,
                 modelContextWindow: 512_000
             }
         });
     });
 
+    it('reports the live context instead of the snapshot from the end of a turn', () => {
+        // The agent publishes its context size over ACP at the end of a turn,
+        // so while it works the snapshot is stale - and after a compaction it
+        // is higher than the real context, because the compaction made the
+        // context smaller. Taking the larger of the two pinned the context bar
+        // to the snapshot: the usage indicator froze at a number that was too
+        // high and never moved again.
+        const beforeCompaction = parseMcodeUsageLine(assistantLine({
+            input: 387,
+            output: 101,
+            cacheRead: 221_000,
+            cacheWrite: 0,
+            totalTokens: 221_488
+        }));
+        const afterCompaction = parseMcodeUsageLine(assistantLine({
+            messageId: 'msg-assistant-2',
+            input: 120,
+            output: 80,
+            cacheRead: 19_000,
+            cacheWrite: 0,
+            totalTokens: 19_200
+        }));
+        expect(beforeCompaction).not.toBeNull();
+        expect(afterCompaction).not.toBeNull();
+
+        const staleSnapshot = { contextTokens: 221_488, contextWindow: 512_000 };
+        const model = 'm:minimax:MiniMax-M3:v:thinking';
+        const first = buildMcodeUsageMessage(beforeCompaction!, model, staleSnapshot) as {
+            info: { contextTokens?: number }
+        };
+        const second = buildMcodeUsageMessage(afterCompaction!, model, staleSnapshot) as {
+            info: { contextTokens?: number }
+        };
+
+        expect(first.info.contextTokens).toBe(221_488);
+        // The context has to be able to go down: a compaction made it smaller.
+        expect(second.info.contextTokens).toBe(19_200);
+    });
+
     it('never reports a context smaller than the cached prefix', () => {
-        // The agent publishes its context size at the end of a turn, so it is
-        // stale while the agent works and can be smaller than the cached
-        // prefix of the latest model call. The status bar then showed more
-        // cached tokens than used ones.
+        // The context is the whole of what the model call occupied: the
+        // uncached prompt plus the cached prefix plus the response. The cached
+        // prefix is part of it, so the status bar can never show more cached
+        // tokens than used ones.
         const record = parseMcodeUsageLine(assistantLine({
             input: 387,
             output: 101,
