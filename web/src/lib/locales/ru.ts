@@ -438,6 +438,7 @@ export default {
   'chat.settings': 'Настройки',
   'chat.terminal': 'Терминал',
   'chat.switchRemote': 'Переключиться в удалённый режим',
+  'chat.sendError.aborted': 'Отправка прервана. Сообщение сохранено — отправьте его снова, когда будете готовы.',
   'chat.sendError.fallback': 'Не удалось отправить сообщение. Отредактируйте и попробуйте ещё раз.',
   'chat.sendError.sessionInactive': 'Эта сессия заархивирована. Откройте её заново, чтобы отправить сообщение.',
   'chat.sendError.sessionInactive.action': 'Открыть заново',
