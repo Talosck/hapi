@@ -42,11 +42,23 @@ function literalKeysIn(source: string): string[] {
     return keys
 }
 
+/**
+ * The source without its comments.
+ *
+ * A comment may name a call - `t('session.status.goal.<status>')` in a
+ * docstring is a reference, not a call - and the scan is about the calls.
+ */
+function withoutComments(source: string): string {
+    return source
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '')
+}
+
 describe('i18n call sites', () => {
     it('every literal t() call names a key the english locale defines', () => {
         const missing: string[] = []
         for (const file of sourceFiles(SRC_ROOT)) {
-            const keys = literalKeysIn(readFileSync(file, 'utf8'))
+            const keys = literalKeysIn(withoutComments(readFileSync(file, 'utf8')))
             for (const key of keys) {
                 if (!(key in en)) {
                     missing.push(`${relative(SRC_ROOT, file)}: ${key}`)
