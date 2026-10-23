@@ -110,6 +110,57 @@ export function getLiveReasoningStreamId(value: unknown): string | null {
     return readReasoningStreamId(value, true)
 }
 
+/**
+ * Stable identity of the render stream a stored agent message belongs to.
+ *
+ * Streaming agents re-send the same logical message many times: a growing
+ * reasoning buffer, a text buffer, or a tool call whose status advances from
+ * `pending` through `in_progress` to its result. Every one of those carries
+ * the same stable identity — `data.id` for reasoning and text, `data.callId`
+ * for tool calls — which is exactly what the web client uses to collapse a
+ * stream into a single block (see the `streamId` maps in the web chat
+ * reducer).
+ *
+ * The hub uses this key to keep one row per stream instead of one row per
+ * snapshot. Without it a single busy tool call can write thousands of rows
+ * that only the newest of which is ever rendered.
+ *
+ * The key is namespaced by payload type so that a tool call and its result —
+ * which share a `callId` but render as two separate blocks — never collide.
+ * Anything unrecognised reads as `null`, which means "not part of a stream".
+ */
+export function getMessageStreamKey(value: unknown): string | null {
+    const record = unwrapRoleWrappedRecordEnvelope(value)
+    if (record?.role !== 'agent') return null
+
+    const content = record.content
+    if (!isObject(content) || content.type !== AGENT_MESSAGE_PAYLOAD_TYPE) return null
+
+    const data = isObject(content.data) ? content.data : null
+    if (!data) return null
+
+    const readId = (value: unknown): string | null =>
+        typeof value === 'string' && value.trim().length > 0 ? value : null
+
+    if (data.type === 'reasoning') {
+        const id = readId(data.id)
+        return id ? `reasoning:${id}` : null
+    }
+    if (data.type === 'message') {
+        const id = readId(data.id)
+        return id ? `text:${id}` : null
+    }
+    if (data.type === 'tool-call') {
+        const callId = readId(data.callId)
+        return callId ? `tool-call:${callId}` : null
+    }
+    if (data.type === 'tool-call-result') {
+        const callId = readId(data.callId)
+        return callId ? `tool-call-result:${callId}` : null
+    }
+    return null
+}
+
 export function isRedundantGoalStatusEventContent(value: unknown): boolean {
     const record = unwrapRoleWrappedRecordEnvelope(value)
     if (record?.role !== 'agent') return false

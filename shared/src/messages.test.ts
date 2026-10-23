@@ -5,6 +5,7 @@ import {
     hasConversationMessageContent,
     extractNotifySummary,
     getLiveReasoningStreamId,
+    getMessageStreamKey,
     getReasoningStreamId,
     isRedundantGoalStatusEventContent,
     splitNotifySummary,
@@ -400,6 +401,59 @@ describe('reasoning stream identity', () => {
     ])('returns null for %s', (_label, value) => {
         expect(getReasoningStreamId(value)).toBeNull()
         expect(getLiveReasoningStreamId(value)).toBeNull()
+    })
+})
+
+describe('message stream key', () => {
+    function agentContent(data: Record<string, unknown>) {
+        return {
+            role: 'agent',
+            content: {
+                type: AGENT_MESSAGE_PAYLOAD_TYPE,
+                data
+            }
+        }
+    }
+
+    test('keys a reasoning snapshot by its stream id', () => {
+        expect(getMessageStreamKey(agentContent({ type: 'reasoning', message: 'thinking', id: 'stream-1' })))
+            .toBe('reasoning:stream-1')
+    })
+
+    test('keys a text snapshot by its stream id', () => {
+        expect(getMessageStreamKey(agentContent({ type: 'message', message: 'answer', id: 'stream-1' })))
+            .toBe('text:stream-1')
+    })
+
+    test('keys a tool call by its call id', () => {
+        expect(getMessageStreamKey(agentContent({ type: 'tool-call', name: 'Bash', callId: 'call-1' })))
+            .toBe('tool-call:call-1')
+    })
+
+    test('keys a tool call result apart from the tool call it belongs to', () => {
+        // The web renders the call and its result as two separate blocks, so
+        // they must not collapse into one another.
+        expect(getMessageStreamKey(agentContent({ type: 'tool-call-result', callId: 'call-1' })))
+            .toBe('tool-call-result:call-1')
+    })
+
+    test('gives the same key to every snapshot of one stream', () => {
+        const keys = ['a', 'ab', 'abc'].map((text) =>
+            getMessageStreamKey(agentContent({ type: 'reasoning', message: text, id: 'stream-1' })))
+        expect(new Set(keys).size).toBe(1)
+    })
+
+    test.each([
+        ['a user-role envelope', { role: 'user', content: { type: AGENT_MESSAGE_PAYLOAD_TYPE, data: { type: 'reasoning', id: 'stream-1' } } }],
+        ['a different payload type', { role: 'agent', content: { type: 'event', data: { type: 'reasoning', id: 'stream-1' } } }],
+        ['a token count', { role: 'agent', content: { type: AGENT_MESSAGE_PAYLOAD_TYPE, data: { type: 'token_count' } } }],
+        ['a text message without an id', { role: 'agent', content: { type: AGENT_MESSAGE_PAYLOAD_TYPE, data: { type: 'message', message: 'answer' } } }],
+        ['a tool call without a call id', { role: 'agent', content: { type: AGENT_MESSAGE_PAYLOAD_TYPE, data: { type: 'tool-call', name: 'Bash' } } }],
+        ['a blank id', { role: 'agent', content: { type: AGENT_MESSAGE_PAYLOAD_TYPE, data: { type: 'reasoning', id: '   ' } } }],
+        ['a non-string id', { role: 'agent', content: { type: AGENT_MESSAGE_PAYLOAD_TYPE, data: { type: 'reasoning', id: 7 } } }],
+        ['a non-object value', 'reasoning']
+    ])('returns null for %s', (_label, value) => {
+        expect(getMessageStreamKey(value)).toBeNull()
     })
 })
 

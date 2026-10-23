@@ -2,7 +2,8 @@
 /**
  * Offline DB compactor: retroactively applies the message content codec
  * (truncate oversized agent tool output + zstd-compress content, see
- * hub/src/store/contentCodec.ts) to an existing hapi.db, then VACUUMs.
+ * hub/src/store/contentCodec.ts) to an existing hapi.db, collapses the
+ * snapshots of one stream into a single row, then VACUUMs.
  *
  * The source database is only ever opened read-only. All work happens on a
  * snapshot; the result is written to a NEW file which you swap in manually.
@@ -14,6 +15,7 @@
  *   --db=PATH          Source database (default: $HAPI_HOME/hapi.db or ~/.hapi/hapi.db)
  *   --out=PATH         Output path (default: <db>.compacted)
  *   --keep-oversized   Do not truncate oversized agent output, compress only
+ *   --keep-streams     Do not collapse the snapshots of one stream into one row
  *   --force            Overwrite an existing output file
  *   --help             Show this help
  *
@@ -30,6 +32,9 @@ import { chmodSync, existsSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 
+import { getMessageStreamKey } from '@hapi/protocol/messages'
+
+import { SCHEMA_VERSION } from '../src/store/index'
 import {
     COMPRESS_MIN_CHARS,
     compressContentJson,
@@ -49,10 +54,11 @@ function getDefaultDbPath(): string {
 }
 
 function parseArgs(argv: string[]) {
-    const args = { db: getDefaultDbPath(), out: '', keepOversized: false, force: false, help: false }
+    const args = { db: getDefaultDbPath(), out: '', keepOversized: false, keepStreams: false, force: false, help: false }
     for (const arg of argv) {
         if (arg === '--help' || arg === '-h') args.help = true
         else if (arg === '--keep-oversized') args.keepOversized = true
+        else if (arg === '--keep-streams') args.keepStreams = true
         else if (arg === '--force') args.force = true
         else if (arg.startsWith('--db=')) args.db = arg.slice('--db='.length).replace(/^~/, homedir())
         else if (arg.startsWith('--out=')) args.out = arg.slice('--out='.length).replace(/^~/, homedir())
@@ -96,7 +102,8 @@ function contentByteLength(value: string | Uint8Array): number {
 const args = parseArgs(process.argv.slice(2))
 if (args.help) {
     console.log(`Offline DB compactor: truncates oversized agent output, zstd-compresses
-message content and VACUUMs — writing a NEW file, never touching the source.
+message content, collapses stream snapshots and VACUUMs — writing a NEW file,
+never touching the source.
 
 Usage: bun run hub/scripts/compact-db.ts [options]
 
@@ -104,6 +111,7 @@ Options:
   --db=PATH          Source database (default: $HAPI_HOME/hapi.db or ~/.hapi/hapi.db)
   --out=PATH         Output path (default: <db>.compacted)
   --keep-oversized   Do not truncate oversized agent output, compress only
+  --keep-streams     Do not collapse the snapshots of one stream into one row
   --force            Overwrite an existing output file
 
 After it succeeds, follow the printed swap instructions.`)
@@ -161,6 +169,14 @@ const work = new Database(workPath)
 work.exec('PRAGMA journal_mode = OFF')
 work.exec('PRAGMA synchronous = OFF')
 
+// Rebuild every index from the table contents before touching anything.
+// A long-lived hub database can end up with an index that disagrees with its
+// table ("row N missing from index ..." in PRAGMA integrity_check) after
+// enough churn. The rows are all still there — only the index is stale — and
+// REINDEX rebuilds it from the table, so this costs a pass over the data and
+// repairs the copy without touching a single row.
+work.exec('REINDEX')
+
 const versionRow = work.prepare('PRAGMA user_version').get() as { user_version: number }
 if (versionRow.user_version < CODEC_SCHEMA_VERSION - 1) {
     console.error(`Schema version ${versionRow.user_version} is older than V${CODEC_SCHEMA_VERSION - 1}; start the hub once to migrate, then re-run.`)
@@ -168,8 +184,8 @@ if (versionRow.user_version < CODEC_SCHEMA_VERSION - 1) {
     rmSync(workPath)
     process.exit(1)
 }
-if (versionRow.user_version > CODEC_SCHEMA_VERSION) {
-    console.error(`Schema version ${versionRow.user_version} is newer than this script understands (V${CODEC_SCHEMA_VERSION}); update hapi and use its compact script.`)
+if (versionRow.user_version > SCHEMA_VERSION) {
+    console.error(`Schema version ${versionRow.user_version} is newer than this script understands (V${SCHEMA_VERSION}); update hapi and use its compact script.`)
     work.close()
     rmSync(workPath)
     process.exit(1)
@@ -239,11 +255,90 @@ while (true) {
     }
 }
 
-work.exec(`PRAGMA user_version = ${CODEC_SCHEMA_VERSION}`)
+work.exec(`PRAGMA user_version = ${Math.max(versionRow.user_version, CODEC_SCHEMA_VERSION)}`)
+
+// 2b. Collapse the snapshots of one stream into a single row.
+//
+// A streaming agent re-sends one logical message many times: a growing
+// reasoning buffer, a text buffer, or a tool call whose status advances
+// while it runs. The web and the native clients all collapse such a series
+// to the newest row, so the older ones are dead weight on disk. The live hub
+// retires them as they arrive; this pass does the same for history that was
+// written before that existed.
+//
+// The survivor is picked with the same rule the clients use — the greatest
+// (position, seq) — so a compacted database renders exactly like the
+// uncompacted one would have.
+if (!args.keepStreams) {
+    console.log('Collapsing stream snapshots...')
+    const messageColumns = work.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+    if (!messageColumns.some((column) => column.name === 'stream_key')) {
+        // The source predates the column; the work copy is a throwaway, so
+        // adding it here is safe and keeps the script usable on older databases.
+        work.exec('ALTER TABLE messages ADD COLUMN stream_key TEXT')
+    }
+    work.exec(`
+        CREATE INDEX IF NOT EXISTS idx_messages_stream_key
+            ON messages(session_id, stream_key)
+            WHERE stream_key IS NOT NULL;
+    `)
+
+    const selectKeyBatch = work.prepare(
+        'SELECT rowid AS rid, content FROM messages WHERE rowid > ? ORDER BY rowid LIMIT 2000'
+    )
+    const updateKey = work.prepare('UPDATE messages SET stream_key = ? WHERE rowid = ?')
+    let keyed = 0
+    let lastKeyRid = 0
+
+    while (true) {
+        const rows = selectKeyBatch.all(lastKeyRid) as Array<{ rid: number; content: string | Uint8Array }>
+        if (rows.length === 0) break
+        lastKeyRid = rows[rows.length - 1]!.rid
+
+        work.transaction(() => {
+            for (const row of rows) {
+                const parsed = decodeMessageContent(row.content)
+                if (parsed === null) continue
+                const streamKey = getMessageStreamKey(parsed)
+                if (!streamKey) continue
+                updateKey.run(streamKey, row.rid)
+                keyed++
+            }
+        })()
+
+        if (keyed % 100_000 < 2000) {
+            console.log(`  ${keyed} keyed...`)
+        }
+    }
+    console.log(`  ${keyed} rows carry a stream key`)
+
+    const beforeCollapse = (work.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n
+    work.exec(`
+        CREATE TEMP TABLE hapi_kept_stream_rows AS
+        SELECT id FROM (
+            SELECT id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY session_id, stream_key
+                       ORDER BY COALESCE(invoked_at, created_at) DESC, seq DESC, rowid DESC
+                   ) AS rn
+            FROM messages
+            WHERE stream_key IS NOT NULL
+        ) WHERE rn = 1;
+    `)
+    work.exec(`
+        DELETE FROM messages
+        WHERE stream_key IS NOT NULL
+          AND id NOT IN (SELECT id FROM hapi_kept_stream_rows);
+    `)
+    work.exec('DROP TABLE hapi_kept_stream_rows')
+    const afterCollapse = (work.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n
+    console.log(`  ${beforeCollapse} → ${afterCollapse} rows (${beforeCollapse - afterCollapse} superseded snapshots removed)`)
+}
 
 // 3. Reclaim freed pages into the final output
 console.log('Vacuuming into final output...')
 work.exec(`VACUUM INTO ${sqlPathLiteral(args.out)}`)
+const expectedRows = (work.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n
 work.close()
 rmSync(workPath)
 
@@ -252,8 +347,8 @@ const out = new Database(args.out, { readonly: true })
 const integrity = out.prepare('PRAGMA integrity_check').get() as { integrity_check: string }
 const outCount = out.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }
 out.close()
-if (integrity.integrity_check !== 'ok' || outCount.n !== totalRow.n) {
-    console.error(`Verification FAILED (integrity: ${integrity.integrity_check}, messages: ${outCount.n}/${totalRow.n}); output left at ${args.out} for inspection.`)
+if (integrity.integrity_check !== 'ok' || outCount.n !== expectedRows) {
+    console.error(`Verification FAILED (integrity: ${integrity.integrity_check}, messages: ${outCount.n}/${expectedRows}); output left at ${args.out} for inspection.`)
     process.exit(1)
 }
 chmodSync(args.out, 0o600)

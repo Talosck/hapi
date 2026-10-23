@@ -283,10 +283,20 @@ and payloads ≥256 chars are zstd-compressed (TEXT = plaintext JSON, BLOB =
 zstd). User prompts are never truncated — queued rows are delivered to the CLI
 verbatim.
 
+Streaming agents re-send one logical message many times: a growing reasoning
+buffer, a text buffer, or a tool call whose status advances while it runs.
+Every snapshot carries a stable identity (`data.id` for reasoning and text,
+`data.callId` for tool calls), which the hub stores as `messages.stream_key`.
+A new snapshot retires the one it supersedes, so a stream costs one row rather
+than one row per snapshot — the web, iOS and Android clients all collapse the
+same series to its newest row. `shared/src/messages.ts` exposes the key via
+`getMessageStreamKey`.
+
 Maintenance scripts (run with the hub stopped before swapping files):
 
-- `scripts/compact-db.ts` — retroactively truncate + compress + VACUUM an
-  existing DB into a new file (the source is only opened read-only).
+- `scripts/compact-db.ts` — retroactively truncate + compress + collapse
+  stream snapshots + VACUUM an existing DB into a new file (the source is only
+  opened read-only). Pass `--keep-streams` to leave the snapshots alone.
 - `scripts/cleanup-sessions.ts` — bulk-delete sessions by message count, path
   glob, or first-message pattern.
 

@@ -42,7 +42,12 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 26
+/** Current schema version.
+ *
+ *  Exported so the offline maintenance scripts can tell a current database
+ *  apart from one that is too old or too new for them to touch. */
+export const SCHEMA_VERSION: number = 27
+
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -378,6 +383,7 @@ export class Store {
             23: () => this.migrateFromV23ToV24(),
             24: () => this.migrateFromV24ToV25(),
             25: () => this.migrateFromV25ToV26(),
+            26: () => this.migrateFromV26ToV27(),
         })
 
         if (currentVersion === 0) {
@@ -478,10 +484,14 @@ export class Store {
                 invoked_at INTEGER,
                 scheduled_at INTEGER,
                 delivery_state TEXT NOT NULL DEFAULT 'queued',
+                stream_key TEXT,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_local_id ON messages(session_id, local_id) WHERE local_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_messages_stream_key
+                ON messages(session_id, stream_key)
+                WHERE stream_key IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_messages_session_position
                 ON messages(session_id, COALESCE(invoked_at, created_at) DESC, seq DESC);
             CREATE INDEX IF NOT EXISTS idx_messages_scheduled_pending
@@ -1024,6 +1034,43 @@ export class Store {
                   AND scheduled_at IS NULL
                   AND delivery_state = 'queued';
         `)
+    }
+
+    /**
+     * v26→v27: index the stream a message belongs to.
+     *
+     * Streaming agents re-send one logical message many times — a growing
+     * reasoning buffer, a text buffer, or a tool call whose status advances
+     * while it runs. Every snapshot shares the stable id the web client
+     * collapses on, so the hub keeps one row per stream instead of one row
+     * per snapshot.
+     *
+     * `stream_key` holds that stable identity in a plain column because the
+     * payload itself is zstd-compressed and cannot be indexed. Existing rows
+     * keep a NULL key: they are history, and backfilling them would mean
+     * decompressing the whole transcript during startup. The offline
+     * compaction script backfills and collapses them instead.
+     *
+     * Rollback: `ALTER TABLE messages DROP COLUMN stream_key; PRAGMA user_version = 26;`
+     */
+    private migrateFromV26ToV27(): void {
+        const columns = this.getMessageColumnNames()
+        if (columns.size > 0 && !columns.has('stream_key')) {
+            this.db.exec('ALTER TABLE messages ADD COLUMN stream_key TEXT')
+        }
+        this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_messages_stream_key
+                ON messages(session_id, stream_key)
+                WHERE stream_key IS NOT NULL;
+        `)
+        // Rebuild the messages indexes from the table contents. A long-lived
+        // database can end up with an index that disagrees with its table
+        // ("row N missing from index ..." in PRAGMA integrity_check) after
+        // enough churn — every row is still there, only the index is stale.
+        // The hub deletes superseded snapshots from this table, so a stale
+        // index would turn an ordinary delete into SQLITE_CORRUPT_INDEX.
+        // REINDEX is idempotent and touches no row.
+        this.db.exec('REINDEX messages')
     }
 
     /**

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
 
-import { getLiveReasoningStreamId } from '@hapi/protocol/messages'
+import { getMessageStreamKey } from '@hapi/protocol/messages'
 
 import type { StoredMessage } from './types'
 import { decodeMessageContent, encodeMessageContent, truncateOversizedMessageContent } from './contentCodec'
@@ -20,6 +20,7 @@ type DbMessageRow = {
     invoked_at: number | null
     scheduled_at: number | null
     delivery_state: string | null
+    stream_key: string | null
 }
 
 export type MessagePosition = {
@@ -143,6 +144,12 @@ export function addMessage(
 
     const id = randomUUID()
     const encoded = encodeMessageContent(truncateOversizedMessageContent(content))
+    // Streaming agents re-send one logical message many times: a growing
+    // reasoning buffer, a text buffer, or a tool call whose status advances
+    // while it runs. Every one of those snapshots carries the same stable
+    // identity, so the hub keeps a single row per stream rather than one row
+    // per snapshot. Content outside a stream has no key and is never touched.
+    const streamKey = getMessageStreamKey(content)
 
     // Messages without a localId have no ack path (markMessagesInvoked matches by localId).
     // Treat them as already-invoked at insert time so they land in the thread normally instead
@@ -152,13 +159,13 @@ export function addMessage(
     // hub arrival order.
     const invokedAt = localId ? null : stampedAt
 
-    return db.transaction(() => {
+    const message = db.transaction(() => {
         const previousHead = getNewestMessagePosition(db, sessionId)
         prepareCached(db, `
             INSERT INTO messages (
-                id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at
+                id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at, stream_key
             ) VALUES (
-                @id, @session_id, @content, @created_at, @seq, @local_id, @invoked_at, @scheduled_at
+                @id, @session_id, @content, @created_at, @seq, @local_id, @invoked_at, @scheduled_at, @stream_key
             )
         `).run({
             id,
@@ -168,7 +175,8 @@ export function addMessage(
             seq: msgSeq,
             local_id: localId ?? null,
             invoked_at: invokedAt,
-            scheduled_at: scheduledAt ?? null
+            scheduled_at: scheduledAt ?? null,
+            stream_key: streamKey ?? null
         })
 
         const positionAt = invokedAt ?? stampedAt
@@ -177,6 +185,41 @@ export function addMessage(
         if (!row) throw new Error('Failed to create message')
         return toStoredMessage(row)
     })()
+
+    // Retire the snapshots this row supersedes. This runs outside the insert
+    // transaction on purpose: a crash in between must not be able to take the
+    // whole stream with it — the newest row is already durable, and the
+    // leftovers are dead weight the next snapshot would remove anyway.
+    if (streamKey) {
+        deleteSupersededSnapshots(db, sessionId, streamKey, message.id)
+    }
+
+    return message
+}
+
+/**
+ * Drop the earlier rows of one stream.
+ *
+ * A stream is the series of rows that share a stream key: the growing
+ * buffers of a reasoning or text stream, or the status updates of one tool
+ * call. Only the newest row of a series is ever rendered — the web client
+ * collapses the series on the same key — so the earlier rows are dead
+ * weight that would otherwise accumulate without bound. `keepMessageId` is
+ * always spared: it identifies the row that was just stored.
+ */
+export function deleteSupersededSnapshots(
+    db: Database,
+    sessionId: string,
+    streamKey: string,
+    keepMessageId?: string
+): number {
+    const result = prepareCached(db, `
+        DELETE FROM messages
+        WHERE session_id = ?
+          AND stream_key = ?
+          AND id IS NOT ?
+    `).run(sessionId, streamKey, keepMessageId ?? null)
+    return result.changes
 }
 
 /** Shared engines own pending native text. Never overwrite an invoked row. */
@@ -401,49 +444,6 @@ export function getDeliverableMessagesAfter(
     `).all(sessionId, safeAfterSeq, now, safeLimit) as DbMessageRow[]
 
     return rows.map(toStoredMessage)
-}
-
-/** How far back to look for a stream's replaceable snapshots.
- *
- *  The CLI re-sends a growing reasoning buffer every few hundred milliseconds,
- *  so the previous snapshot of a stream is always among the newest rows of its
- *  session. Scanning a bounded tail keeps this off the hot path on sessions
- *  with tens of thousands of messages; anything older than the window is left
- *  alone, which errs toward keeping data. */
-const REASONING_SNAPSHOT_LOOKBACK = 50
-
-/** Drop the replaceable snapshots of one reasoning stream.
- *
- *  Only messages explicitly marked live are eligible, and `keepMessageId` is
- *  always spared. Callers run this *after* storing the message that supersedes
- *  them, so the stream never passes through a moment with no row at all — the
- *  two statements are separate transactions, and a crash between them must not
- *  be able to take the whole stream with it. Returns how many rows were
- *  removed. */
-export function deleteLiveReasoningSnapshots(
-    db: Database,
-    sessionId: string,
-    streamId: string,
-    keepMessageId?: string
-): number {
-    const rows = prepareCached(db, `
-        SELECT id, content FROM messages
-        WHERE session_id = ?
-        ORDER BY seq DESC
-        LIMIT ?
-    `).all(sessionId, REASONING_SNAPSHOT_LOOKBACK) as Array<Pick<DbMessageRow, 'id' | 'content'>>
-
-    const staleIds = rows
-        .filter((row) => row.id !== keepMessageId
-            && getLiveReasoningStreamId(decodeMessageContent(row.content)) === streamId)
-        .map((row) => row.id)
-    if (staleIds.length === 0) return 0
-
-    const placeholders = staleIds.map(() => '?').join(', ')
-    const result = prepareCached(db, 
-        `DELETE FROM messages WHERE session_id = ? AND id IN (${placeholders})`
-    ).run(sessionId, ...staleIds)
-    return Number(result.changes)
 }
 
 /** Paginate messages by COALESCE(invoked_at, created_at) DESC, seq DESC.
