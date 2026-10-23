@@ -4,6 +4,7 @@ import { AcpSessionModeUnsupportedError } from '@/agent/backends/acp'
 import { ACP_INDETERMINATE_SYMBOL } from '@/agent/backends/acp/AcpStdioTransport'
 import { MessageQueue2 } from '@/utils/MessageQueue2'
 import type { McodeMode } from './types'
+import { knownMcodeAgentHostPids } from './utils/mcodeConnectorTools'
 
 const harness = vi.hoisted(() => ({
     backend: {} as Record<string, unknown>,
@@ -87,6 +88,9 @@ function createBackend(overrides: Record<string, unknown> = {}) {
         // The launcher asks whether the agent process is still there before
         // it treats a failure as "the agent died".
         isClosed: vi.fn(() => false),
+        // The pid of the agent process. The connected-apps readout asks the
+        // broker of exactly that host.
+        getAgentPid: vi.fn(() => 4242),
         newSession: vi.fn(async () => 'mcode-session-1'),
         loadSession: vi.fn(async () => 'mcode-session-1'),
         setModel: vi.fn(async (_sessionId: string, _model: string) => {}),
@@ -400,6 +404,17 @@ describe('mcodeRemoteLauncher config sync', () => {
             .filter((message) => message.type === 'token_count')
         expect(sent.length).toBeGreaterThan(0)
         expect(sent[sent.length - 1].info?.modelContextWindow).toBe(512_000)
+    })
+
+    it('remembers the agent it launched so the apps readout can ask it', async () => {
+        // The connected apps live behind the broker of the agent that runs the
+        // session, and the agent names that broker after its own pid.
+        createBackend()
+        const session = createSession([{ message: 'hi', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(knownMcodeAgentHostPids()).toContain(4242)
     })
 
     it('reports the model discovered from session/new when none was requested', async () => {

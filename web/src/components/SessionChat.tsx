@@ -1539,6 +1539,13 @@ function SessionChatInner(props: SessionChatProps) {
     const mcodeApps = useMcodeApps({
         api: props.api,
         machineId: props.session.metadata?.machineId,
+        // The session scope is the exact one for a MiniMax Code session: the
+        // agent that runs it names its own broker, so the list is about that
+        // agent and not about whichever MiniMax Code host the machine happens
+        // to run. A session that is not a MiniMax Code one has no agent of
+        // its own, so it keeps the machine scope - that is where the account
+        // usage below comes from.
+        sessionId: agentFlavor === 'mcode' ? props.session.id : null,
         // The usage of the MiniMax account is machine level: a Pi session
         // that runs on a MiniMax model spends the same account as MiniMax
         // Code does. The apps below stay MiniMax Code's own, so a Pi session

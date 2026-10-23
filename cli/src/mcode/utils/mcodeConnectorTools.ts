@@ -101,6 +101,8 @@ export type McodeConnectorBroker = {
 
 /** The directory a MiniMax Code host keeps its broker in. */
 const BROKER_DIR_PATTERN = /^mcode-tools-tui-(\d+)-/
+/** The subdirectory the broker's socket and capability file live in. */
+const BROKER_RUN_DIR = 'run'
 const BROKER_SOCKET_FILE = 'mcode-auth-lease-v1.sock'
 const BROKER_CAPABILITY_FILE = 'mcode-auth-lease-v1.cap'
 
@@ -171,7 +173,7 @@ export function discoverMcodeConnectorBrokers(options?: {
             if (!Number.isSafeInteger(pid) || pid <= 0) continue
             if (!alive(pid)) continue
 
-            const runDir = join(tmpRoot, name, 'run')
+            const runDir = join(tmpRoot, name, BROKER_RUN_DIR)
             const endpoint = join(runDir, BROKER_SOCKET_FILE)
             const capabilityFile = join(runDir, BROKER_CAPABILITY_FILE)
             if (seen.has(endpoint)) continue
@@ -192,6 +194,111 @@ export function discoverMcodeConnectorBrokers(options?: {
     return found
         .sort((a, b) => b.startedAt - a.startedAt)
         .map((entry) => entry.broker)
+}
+
+/**
+ * The broker of one MiniMax Code host, found by its pid.
+ *
+ * The host names its broker directory after its own pid, so a host HAPI
+ * launched is found exactly - no scan of the temp directory, and no guess
+ * about which of the running hosts the user meant.
+ */
+export function findMcodeConnectorBrokerForPid(
+    pid: number,
+    options?: { tmpRoot?: string }
+): McodeConnectorBroker | null {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return null
+    const roots = options?.tmpRoot ? [options.tmpRoot] : brokerTmpRoots()
+    const prefix = `mcode-tools-tui-${pid}-`
+
+    for (const tmpRoot of roots) {
+        let entries: string[]
+        try {
+            entries = readdirSync(tmpRoot)
+        } catch {
+            continue
+        }
+
+        for (const name of entries) {
+            if (!name.startsWith(prefix)) continue
+            const runDir = join(tmpRoot, name, BROKER_RUN_DIR)
+            const endpoint = join(runDir, BROKER_SOCKET_FILE)
+            const capabilityFile = join(runDir, BROKER_CAPABILITY_FILE)
+            // The host is still starting up while the socket is missing, and
+            // a host that is gone leaves the directory behind. Neither can be
+            // asked, so neither is a broker.
+            if (!existsSync(endpoint) || !existsSync(capabilityFile)) continue
+            return { endpoint, capabilityFile }
+        }
+    }
+
+    return null
+}
+
+/**
+ * The MiniMax Code hosts this process knows by pid, newest first.
+ *
+ * A session that launched an agent knows the agent's pid, and the host names
+ * its broker after that pid.
+ */
+const knownAgentHostPids: number[] = []
+
+/** How many agent hosts a process remembers. */
+const MAX_KNOWN_AGENT_HOSTS = 4
+
+/** Remembers an agent host so the connector tools can ask exactly it. */
+export function rememberMcodeAgentHostPid(pid: number): void {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return
+    const existing = knownAgentHostPids.indexOf(pid)
+    if (existing >= 0) knownAgentHostPids.splice(existing, 1)
+    knownAgentHostPids.unshift(pid)
+    if (knownAgentHostPids.length > MAX_KNOWN_AGENT_HOSTS) {
+        knownAgentHostPids.length = MAX_KNOWN_AGENT_HOSTS
+    }
+}
+
+/** The agent hosts this process knows by pid, newest first. */
+export function knownMcodeAgentHostPids(): number[] {
+    return [...knownAgentHostPids]
+}
+
+/**
+ * The brokers of the agents this process launched, newest first.
+ *
+ * The session that launched an agent knows the agent's pid, and the host
+ * names its broker after that pid - so the session can ask its own agent
+ * instead of scanning the temp directory for whichever host happens to be
+ * running.
+ */
+export function knownAgentConnectorBrokers(options?: {
+    tmpRoot?: string
+}): McodeConnectorBroker[] {
+    const brokers: McodeConnectorBroker[] = []
+    for (const pid of knownMcodeAgentHostPids()) {
+        const broker = findMcodeConnectorBrokerForPid(pid, { tmpRoot: options?.tmpRoot })
+        if (!broker) continue
+        if (brokers.some((known) => known.endpoint === broker.endpoint)) continue
+        brokers.push(broker)
+    }
+    return brokers
+}
+
+/**
+ * The brokers to ask, the agent this process launched first.
+ *
+ * The agent a session launched is known by its pid, so it is asked before the
+ * hosts of the machine: the answer is about the agent the user is looking at,
+ * not about whichever host happens to be running.
+ */
+export function preferredMcodeConnectorBrokers(options?: {
+    tmpRoot?: string
+}): McodeConnectorBroker[] {
+    const brokers = knownAgentConnectorBrokers(options)
+    for (const broker of discoverMcodeConnectorBrokers({ tmpRoot: options?.tmpRoot })) {
+        if (brokers.some((known) => known.endpoint === broker.endpoint)) continue
+        brokers.push(broker)
+    }
+    return brokers
 }
 
 /**
@@ -316,13 +423,16 @@ const MAX_PROBES = 3
  * The ways to ask, best first.
  *
  * The environment HAPI itself was started in comes first: when HAPI runs
- * inside a MiniMax Code host, that host's broker is the right one. The hosts
+ * inside a MiniMax Code host, that host's broker is the right one. The agent
+ * this process launched is next, because its pid names its broker. The hosts
  * running on the machine follow, newest first.
  */
 export function mcodeConnectorProbes(options?: {
     command?: string
     env?: NodeJS.ProcessEnv
     brokers?: McodeConnectorBroker[]
+    /** Where the hosts keep their brokers. Exposed for tests. */
+    tmpRoot?: string
 }): McodeConnectorProbe[] {
     const command = options?.command ?? resolveMcodeToolsCommand('mcode')
     const env = options?.env ?? process.env
@@ -330,14 +440,29 @@ export function mcodeConnectorProbes(options?: {
 
     const hostEndpoint = env.__MAVIS_MCODE_TOOLS_BROKER_ENDPOINT?.trim()
     const hostCapability = env.__MAVIS_MCODE_TOOLS_BROKER_CAPABILITY_FILE?.trim()
+
+    const runtimeExecutable = findMcodeRuntimeExecutable(env)
+    const region = findMcodeRegion(env)
+    const configDir = findMcodeConfigDir(env)
+
+    // The environment HAPI itself was started in comes first: when HAPI runs
+    // inside a MiniMax Code host, that host is the one it can talk to.
     if (hostEndpoint && hostCapability) {
         probes.push({ command, env: { ...env } })
     }
 
+    // The agent this process launched is next. It is known by its pid, so
+    // the answer is about the agent the user is actually looking at and not
+    // about whichever host happens to be running on the machine.
+    for (const broker of knownAgentConnectorBrokers({ tmpRoot: options?.tmpRoot })) {
+        if (probes.some((probe) => probeBrokerEndpoint(probe) === broker.endpoint)) continue
+        probes.push({
+            command,
+            env: buildMcodeToolsEnv({ baseEnv: env, broker, runtimeExecutable, region, configDir })
+        })
+    }
+
     const brokers = options?.brokers ?? discoverMcodeConnectorBrokers()
-    const runtimeExecutable = findMcodeRuntimeExecutable(env)
-    const region = findMcodeRegion(env)
-    const configDir = findMcodeConfigDir(env)
     for (const broker of brokers) {
         const endpoint = broker.endpoint
         if (probes.some((probe) => probeBrokerEndpoint(probe) === endpoint)) continue
@@ -517,10 +642,16 @@ export async function listMcodeConnectorApps(options?: {
             }
         }
 
+        // Two failures look the same to the caller but mean different things:
+        // the host did not answer, or there was no host to ask. The second one
+        // says so instead of claiming the apps are missing.
+        const reason = lastError
+            ?? 'No MiniMax Code host is running, so the connected apps cannot be read.'
+        logger.debug('Could not read the MiniMax Code connected apps:', reason)
         return {
             auth,
             apps: [],
-            error: lastError ?? 'No MiniMax Code host is running, so the connected apps cannot be read.'
+            error: reason
         }
     })()
 
@@ -547,4 +678,5 @@ function authLeaseExpired(auth: McodeConnectorAuthSummary): boolean {
 export function _resetMcodeConnectorCacheForTests(): void {
     cachedCatalog = null
     inflightCatalog = null
+    knownAgentHostPids.length = 0
 }

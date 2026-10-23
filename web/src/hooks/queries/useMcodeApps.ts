@@ -28,10 +28,15 @@ const APPS_FORCE_REFRESH_GRACE_MS = 15_000
  * The connector tools are not part of the ACP surface: the agent reaches them
  * through the `mcode-tools` CLI. This query is the only way the web learns
  * what the agent can actually reach, which is otherwise invisible.
+ *
+ * A session is asked first when there is one: the agent that runs a session
+ * names its own broker, so the answer is about that agent. The machine scope
+ * is the fallback for the screens where no session exists yet.
  */
 export function useMcodeApps(args: {
     api: ApiClient | null
     machineId?: string | null
+    sessionId?: string | null
     enabled?: boolean
 }): {
     apps: McodeConnectorApp[]
@@ -40,23 +45,28 @@ export function useMcodeApps(args: {
     isLoading: boolean
     error: string | null
 } {
-    const { api, machineId } = args
-    const enabled = Boolean(args.enabled && api && machineId)
+    const { api, machineId, sessionId } = args
+    const targetId = sessionId ?? machineId
+    const enabled = Boolean(args.enabled && api && targetId)
     const lastReadAt = useRef(0)
 
     const query = useQuery({
-        queryKey: machineId
-            ? queryKeys.machineMcodeApps(machineId)
-            : ['machine-mcode-apps', 'unknown'] as const,
+        queryKey: sessionId
+            ? queryKeys.sessionMcodeApps(sessionId)
+            : machineId
+                ? queryKeys.machineMcodeApps(machineId)
+                : ['machine-mcode-apps', 'unknown'] as const,
         queryFn: async () => {
-            if (!api || !machineId) throw new Error('MiniMax Code apps target unavailable')
+            if (!api || !targetId) throw new Error('MiniMax Code apps target unavailable')
             const now = Date.now()
             // The first read may use the machine's cache. A later read is the
             // user coming back to the tab after connecting an app, so it asks
             // for a fresh answer.
             const forceRefresh = lastReadAt.current > 0
                 && now - lastReadAt.current > APPS_FORCE_REFRESH_GRACE_MS
-            const result = await api.getMachineMcodeApps(machineId, { forceRefresh })
+            const result = sessionId
+                ? await api.getSessionMcodeApps(sessionId, { forceRefresh })
+                : await api.getMachineMcodeApps(targetId, { forceRefresh })
             lastReadAt.current = Date.now()
             return result
         },

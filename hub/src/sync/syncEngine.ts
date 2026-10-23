@@ -4410,6 +4410,17 @@ export class SyncEngine {
         return await this.rpcGateway.listMcodeApps(machineId, options)
     }
 
+    /**
+     * Lists the apps connected to the session's MiniMax Code installation.
+     *
+     * The session scope is the exact one for a running session: the CLI that
+     * owns the session knows the agent it launched, and the agent names its
+     * broker after its own pid.
+     */
+    async listMcodeAppsForSession(sessionId: string, options?: { forceRefresh?: boolean }): Promise<McodeAppsResponse> {
+        return await this.rpcGateway.listMcodeAppsForSession(sessionId, options)
+    }
+
     async listMcodeModelsForSession(sessionId: string): Promise<RpcListMcodeModelsResponse> {
         return await this.rpcGateway.listMcodeModelsForSession(sessionId)
     }

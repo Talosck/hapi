@@ -23,6 +23,7 @@ import type { MessageBuffer } from '@/ui/ink/messageBuffer';
 import type { McodeSession } from './session';
 import type { McodeMode, PermissionMode } from './types';
 import { createMcodeBackend } from './utils/mcodeBackend';
+import { rememberMcodeAgentHostPid } from './utils/mcodeConnectorTools';
 import { classifyMcodeConnectFailure } from './utils/mcodeConnectFailure';
 import type { AcpSessionStateUpdate } from '@/agent/backends/acp';
 import { isAcpIndeterminateError } from '@/agent/backends/acp/AcpStdioTransport';
@@ -554,6 +555,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             const failure = classifyMcodeConnectFailure(error);
             logger.warn('[mcode-remote] MiniMax Code could not be started', failure.reason, failure.detail);
             throw new Error(failure.message, { cause: error });
+        }
+
+        // The connected apps of this session live behind the broker of the
+        // agent that is running it, and the agent names that broker after its
+        // own pid. Remembering the pid lets the readout ask exactly this
+        // agent, instead of scanning the machine for whichever MiniMax Code
+        // host happens to be alive.
+        const agentPid = typeof backend.getAgentPid === 'function' ? backend.getAgentPid() : null;
+        if (agentPid !== null) {
+            rememberMcodeAgentHostPid(agentPid);
         }
 
         // The agent advertises its extension surface (methods it accepts and

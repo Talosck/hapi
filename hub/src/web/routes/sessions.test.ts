@@ -77,6 +77,8 @@ function createApp(session: Session, opts?: {
     patchMcodeGoal?: SyncEngine['patchMcodeGoal']
     clearMcodeGoal?: SyncEngine['clearMcodeGoal']
     stopMcodeDelegation?: SyncEngine['stopMcodeDelegation']
+    listMcodeApps?: SyncEngine['listMcodeApps']
+    listMcodeAppsForSession?: SyncEngine['listMcodeAppsForSession']
 }) {
     const applySessionConfigCalls: Array<[string, Record<string, unknown>]> = []
     const applySessionConfig = async (sessionId: string, config: Record<string, unknown>) => {
@@ -188,9 +190,18 @@ function createApp(session: Session, opts?: {
         createMcodeGoal: opts?.createMcodeGoal ?? (async () => ({ success: true, goal: null })),
         patchMcodeGoal: opts?.patchMcodeGoal ?? (async () => ({ success: true, goal: null })),
         clearMcodeGoal: opts?.clearMcodeGoal ?? (async () => ({ success: true, cleared: true })),
-        stopMcodeDelegation: opts?.stopMcodeDelegation ?? (async () => ({ success: true }))
+        stopMcodeDelegation: opts?.stopMcodeDelegation ?? (async () => ({ success: true })),
+        listMcodeApps: opts?.listMcodeApps ?? (async () => ({
+            success: true,
+            apps: [],
+            auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+        })),
+        listMcodeAppsForSession: opts?.listMcodeAppsForSession ?? (async () => ({
+            success: true,
+            apps: [],
+            auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+        }))
     } as Partial<SyncEngine>
-
     const app = new Hono<WebAppEnv>()
     app.use('*', async (c, next) => {
         c.set('namespace', 'default')
@@ -200,6 +211,114 @@ function createApp(session: Session, opts?: {
 
     return { app, applySessionConfigCalls }
 }
+
+describe('mcode connected apps route', () => {
+    function mcodeSession(flavor = 'mcode') {
+        return createSession({ metadata: { path: '/tmp', host: 'test', flavor } })
+    }
+
+    it('lists the apps connected to the session', async () => {
+        // The session scope is the exact one: the CLI that owns the session
+        // knows the agent it launched, and the agent names its own broker.
+        const calls: Array<[string, { forceRefresh?: boolean } | undefined]> = []
+        const { app } = createApp(mcodeSession(), {
+            listMcodeAppsForSession: (async (sessionId: string, options?: { forceRefresh?: boolean }) => {
+                calls.push([sessionId, options])
+                return {
+                    success: true,
+                    apps: [{ provider: 'matrix', toolCount: 13, tools: [] }],
+                    auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+                }
+            }) as SyncEngine['listMcodeAppsForSession']
+        })
+
+        const res = await app.request('/api/sessions/session-1/mcode-apps')
+
+        expect(res.status).toBe(200)
+        const body = await res.json() as { success: boolean; apps: Array<{ provider: string }> }
+        expect(body.success).toBe(true)
+        expect(body.apps.map((app) => app.provider)).toEqual(['matrix'])
+        expect(calls).toEqual([['session-1', { forceRefresh: false }]])
+    })
+
+    it('asks the session for a fresh catalog when the client asks for one', async () => {
+        const calls: Array<[string, { forceRefresh?: boolean } | undefined]> = []
+        const { app } = createApp(mcodeSession(), {
+            listMcodeAppsForSession: (async (sessionId: string, options?: { forceRefresh?: boolean }) => {
+                calls.push([sessionId, options])
+                return {
+                    success: true,
+                    apps: [],
+                    auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+                }
+            }) as SyncEngine['listMcodeAppsForSession']
+        })
+
+        await app.request('/api/sessions/session-1/mcode-apps?forceRefresh=1')
+
+        expect(calls).toEqual([['session-1', { forceRefresh: true }]])
+    })
+
+    it('reports a failed read instead of an empty list', async () => {
+        const { app } = createApp(mcodeSession(), {
+            listMcodeAppsForSession: (async () => ({
+                success: false,
+                apps: [],
+                error: 'No MiniMax Code host is running, so the connected apps cannot be read.'
+            })) as SyncEngine['listMcodeAppsForSession']
+        })
+
+        const res = await app.request('/api/sessions/session-1/mcode-apps')
+
+        expect(res.status).toBe(200)
+        const body = await res.json() as { success: boolean; error: string }
+        expect(body.success).toBe(false)
+        expect(body.error).toContain('No MiniMax Code host is running')
+    })
+
+    it('keeps the route away from the other flavors', async () => {
+        const { app } = createApp(mcodeSession('codex'))
+
+        const res = await app.request('/api/sessions/session-1/mcode-apps')
+
+        expect(res.status).toBe(400)
+    })
+
+    it('asks the machine for a session whose agent is gone', async () => {
+        // A session that is not running has no agent of its own, so the
+        // machine answers - the apps belong to the installation.
+        const session = createSession({
+            active: false,
+            metadata: { path: '/tmp', host: 'test', flavor: 'mcode', machineId: 'machine-1' }
+        })
+        const machineCalls: unknown[][] = []
+        const sessionCalls: unknown[][] = []
+        const { app } = createApp(session, {
+            listMcodeApps: (async (machineId: string, options?: { forceRefresh?: boolean }) => {
+                machineCalls.push([machineId, options])
+                return {
+                    success: true,
+                    apps: [{ provider: 'matrix', toolCount: 13, tools: [] }],
+                    auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+                }
+            }) as SyncEngine['listMcodeApps'],
+            listMcodeAppsForSession: (async (sessionId: string, options?: { forceRefresh?: boolean }) => {
+                sessionCalls.push([sessionId, options])
+                return {
+                    success: true,
+                    apps: [],
+                    auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+                }
+            }) as SyncEngine['listMcodeAppsForSession']
+        })
+
+        const res = await app.request('/api/sessions/session-1/mcode-apps')
+
+        expect(res.status).toBe(200)
+        expect(machineCalls).toEqual([['machine-1', { forceRefresh: false }]])
+        expect(sessionCalls).toEqual([])
+    })
+})
 
 describe('mcode goal routes', () => {
     function mcodeSession(flavor = 'mcode') {

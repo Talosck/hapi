@@ -4,9 +4,9 @@ import { connect } from 'node:net'
 import { isObject } from '@hapi/protocol'
 import { logger } from '@/ui/logger'
 import {
-    discoverMcodeConnectorBrokers,
     findMcodeRegion,
-    type McodeConnectorBroker
+    type McodeConnectorBroker,
+    preferredMcodeConnectorBrokers
 } from './mcodeConnectorTools'
 
 /**
@@ -336,7 +336,7 @@ export async function listMcodeTokenPlanQuota(options?: {
         return cachedQuota.result
     }
 
-    const brokers = options?.brokers ?? discoverMcodeConnectorBrokers()
+    const brokers = options?.brokers ?? preferredMcodeConnectorBrokers()
     if (brokers.length === 0) {
         logger.debug('No MiniMax Code host is running, so there is no usage quota to read')
         return { quota: null, error: 'No MiniMax Code host is running on this machine' }

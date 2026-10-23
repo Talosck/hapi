@@ -1205,6 +1205,20 @@ export class ApiClient {
         )
     }
 
+    /**
+     * Lists the apps connected to the session's MiniMax Code installation.
+     *
+     * The session scope is the exact one for a running session: the agent
+     * that runs it names its own broker, so the answer is about the agent
+     * the user is looking at.
+     */
+    async getSessionMcodeApps(sessionId: string, options?: { forceRefresh?: boolean }): Promise<McodeAppsResponse> {
+        const query = options?.forceRefresh ? '?forceRefresh=1' : ''
+        return await this.request<McodeAppsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/mcode-apps${query}`
+        )
+    }
+
     async getSessionMcodeModels(sessionId: string): Promise<McodeModelsResponse> {
         return await this.request<McodeModelsResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/mcode-models`

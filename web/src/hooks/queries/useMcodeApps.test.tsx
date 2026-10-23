@@ -39,6 +39,34 @@ describe('useMcodeApps', () => {
         expect(getMachineMcodeApps).toHaveBeenCalledWith('machine-1', { forceRefresh: false })
     })
 
+    it('reads the connected apps of the session when there is one', async () => {
+        // The agent that runs a session names its own broker, so the session
+        // is the exact scope for the apps the user is looking at.
+        const getSessionMcodeApps = vi.fn(async () => ({
+            success: true,
+            apps: [{ provider: 'matrix', toolCount: 13, tools: [] }],
+            auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+        }))
+        const getMachineMcodeApps = vi.fn(async () => ({
+            success: true,
+            apps: [],
+            auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+        }))
+        const api = { getSessionMcodeApps, getMachineMcodeApps } as unknown as ApiClient
+        const queryClient = createQueryClient()
+
+        const { result } = renderHook(() => useMcodeApps({
+            api,
+            machineId: 'machine-1',
+            sessionId: 'session-1',
+            enabled: true
+        }), { wrapper: wrapper(queryClient) })
+
+        await waitFor(() => expect(result.current.apps).toHaveLength(1))
+        expect(getSessionMcodeApps).toHaveBeenCalledWith('session-1', { forceRefresh: false })
+        expect(getMachineMcodeApps).not.toHaveBeenCalled()
+    })
+
     it('asks the machine for a fresh catalog after the first read', async () => {
         // The connected apps change outside HAPI. The user comes back to the
         // tab right after connecting one, so a later read asks the machine for

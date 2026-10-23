@@ -568,6 +568,21 @@ export class RpcGateway {
     }
 
     /**
+     * The apps connected to the session's MiniMax Code installation.
+     *
+     * The session scope is the exact one: the CLI that owns the session
+     * launched the agent, and the agent names its broker after its own pid.
+     */
+    async listMcodeAppsForSession(sessionId: string, options?: { forceRefresh?: boolean }): Promise<McodeAppsResponse> {
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.ListMcodeApps,
+            { forceRefresh: options?.forceRefresh === true },
+            MODEL_LIST_RPC_TIMEOUT_MS
+        ) as McodeAppsResponse
+    }
+
+    /**
      * Active-session MiniMax Code discovery. The probe runs in the CLI that
      * owns the session, so it works without a background runner on the
      * machine.

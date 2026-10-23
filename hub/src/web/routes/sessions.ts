@@ -1581,6 +1581,45 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
     })
 
     /**
+     * The apps connected to this session's MiniMax Code installation.
+     *
+     * The session scope is the right one while the agent runs the session:
+     * the CLI that owns the session knows the agent it launched, and the
+     * agent names its broker after its own pid. A session whose agent is gone
+     * has no scope of its own, so the machine answers - the apps belong to
+     * the installation, not to the session.
+     */
+    app.get('/sessions/:id/mcode-apps', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) return sessionResult
+        const { sessionId, session } = sessionResult
+        if (session.metadata?.flavor !== 'mcode') {
+            return c.json({ success: false, error: 'The connected apps are only available for MiniMax Code sessions' }, 400)
+        }
+        // A client that knows the connected apps may have changed asks for a
+        // fresh answer instead of the cached one.
+        const forceRefresh = c.req.query('forceRefresh') === '1'
+            || c.req.query('forceRefresh') === 'true'
+        try {
+            if (session.active) {
+                return c.json(await engine.listMcodeAppsForSession(sessionId, { forceRefresh }))
+            }
+            const machineId = session.metadata?.machineId
+            if (!machineId) {
+                return c.json({ success: false, error: 'The machine of this session is unknown' }, 409)
+            }
+            return c.json(await engine.listMcodeApps(machineId, { forceRefresh }))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list the MiniMax Code apps'
+            }, 500)
+        }
+    })
+
+    /**
      * MiniMax Code goal control.
      *
      * The goal extension is optional in the agent, so the route answers with

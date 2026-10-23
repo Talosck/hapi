@@ -7,11 +7,15 @@ import {
     buildMcodeToolsEnv,
     connectorProviderOf,
     discoverMcodeConnectorBrokers,
+    findMcodeConnectorBrokerForPid,
     groupMcodeConnectorApps,
+    knownMcodeAgentHostPids,
     listMcodeConnectorApps,
     mcodeConnectorProbes,
     parseMcodeConnectorAuth,
     parseMcodeConnectorTools,
+    preferredMcodeConnectorBrokers,
+    rememberMcodeAgentHostPid,
     resolveMcodeToolsCommand
 } from './mcodeConnectorTools'
 
@@ -181,6 +185,38 @@ describe('discoverMcodeConnectorBrokers', () => {
     })
 })
 
+describe('findMcodeConnectorBrokerForPid', () => {
+    it('finds the broker of one host by its pid', () => {
+        // The host names its broker after its own pid, so the agent HAPI
+        // launched is found exactly - no scan of the whole temp directory.
+        const root = makeBrokerRoot([
+            { dir: 'mcode-tools-tui-4242-abc', withBroker: true },
+            { dir: 'mcode-tools-tui-5252-def', withBroker: true }
+        ])
+
+        const broker = findMcodeConnectorBrokerForPid(5252, { tmpRoot: root })
+
+        expect(broker).toEqual({
+            endpoint: join(root, 'mcode-tools-tui-5252-def', 'run', 'mcode-auth-lease-v1.sock'),
+            capabilityFile: join(root, 'mcode-tools-tui-5252-def', 'run', 'mcode-auth-lease-v1.cap')
+        })
+    })
+
+    it('has no broker for a host that is not running', () => {
+        const root = makeBrokerRoot([{ dir: 'mcode-tools-tui-4242-abc', withBroker: true }])
+
+        expect(findMcodeConnectorBrokerForPid(9999, { tmpRoot: root })).toBeNull()
+    })
+
+    it('has no broker for a host that is still starting up', () => {
+        // The host creates its broker directory first and the socket a moment
+        // later. A host without a socket cannot sign a request.
+        const root = makeBrokerRoot([{ dir: 'mcode-tools-tui-4242-abc', withBroker: false }])
+
+        expect(findMcodeConnectorBrokerForPid(4242, { tmpRoot: root })).toBeNull()
+    })
+})
+
 describe('buildMcodeToolsEnv', () => {
     it('hands the broker coordinates to the tools', () => {
         const env = buildMcodeToolsEnv({
@@ -286,6 +322,89 @@ describe('mcodeConnectorProbes', () => {
 
         expect(probes).toHaveLength(3)
         expect(probes[0].env.MCODE_AUTH_BROKER_ENDPOINT).toBe('/tmp/1.sock')
+    })
+
+    it('asks the agent this session launched first', () => {
+        // The agent names its broker after its own pid, so the session asks
+        // exactly that agent instead of whichever host is running on the
+        // machine.
+        const root = makeBrokerRoot([
+            { dir: 'mcode-tools-tui-4242-abc', withBroker: true },
+            { dir: 'mcode-tools-tui-5252-def', withBroker: true }
+        ])
+        rememberMcodeAgentHostPid(5252)
+
+        const probes = mcodeConnectorProbes({
+            command: 'mcode-tools',
+            env: {},
+            tmpRoot: root,
+            brokers: [{
+                endpoint: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.sock'),
+                capabilityFile: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.cap')
+            }]
+        })
+
+        expect(probes[0].env.MCODE_AUTH_BROKER_ENDPOINT).toBe(
+            join(root, 'mcode-tools-tui-5252-def', 'run', 'mcode-auth-lease-v1.sock')
+        )
+    })
+
+    it('asks the agent it launched only once', () => {
+        const root = makeBrokerRoot([{ dir: 'mcode-tools-tui-4242-abc', withBroker: true }])
+        rememberMcodeAgentHostPid(4242)
+        rememberMcodeAgentHostPid(4242)
+
+        expect(knownMcodeAgentHostPids()).toEqual([4242])
+
+        const probes = mcodeConnectorProbes({
+            command: 'mcode-tools',
+            env: {},
+            tmpRoot: root,
+            brokers: [{
+                endpoint: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.sock'),
+                capabilityFile: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.cap')
+            }]
+        })
+
+        expect(probes).toHaveLength(1)
+    })
+
+    it('falls back to the hosts of the machine when its own agent is gone', () => {
+        const root = makeBrokerRoot([{ dir: 'mcode-tools-tui-4242-abc', withBroker: true }])
+        rememberMcodeAgentHostPid(9999)
+
+        const probes = mcodeConnectorProbes({
+            command: 'mcode-tools',
+            env: {},
+            tmpRoot: root,
+            brokers: [{
+                endpoint: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.sock'),
+                capabilityFile: join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.cap')
+            }]
+        })
+
+        expect(probes).toHaveLength(1)
+        expect(probes[0].env.MCODE_AUTH_BROKER_ENDPOINT).toBe(
+            join(root, 'mcode-tools-tui-4242-abc', 'run', 'mcode-auth-lease-v1.sock')
+        )
+    })
+
+    it('puts the agent it launched before the hosts of the machine', () => {
+        // The usage of the account and the connected apps are read through the
+        // same host, so both have to name the agent of the session first.
+        const root = makeBrokerRoot([
+            { dir: 'mcode-tools-tui-4242-abc', withBroker: true },
+            { dir: 'mcode-tools-tui-5252-def', withBroker: true }
+        ])
+        rememberMcodeAgentHostPid(5252)
+
+        const brokers = preferredMcodeConnectorBrokers({ tmpRoot: root })
+
+        expect(brokers[0].endpoint).toBe(
+            join(root, 'mcode-tools-tui-5252-def', 'run', 'mcode-auth-lease-v1.sock')
+        )
+        // The other host of the machine is not running, so it is not asked.
+        expect(brokers).toHaveLength(1)
     })
 })
 

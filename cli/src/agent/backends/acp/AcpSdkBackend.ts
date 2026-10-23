@@ -407,6 +407,16 @@ export class AcpSdkBackend implements AgentBackend {
         return this.agentClosed;
     }
 
+    /**
+     * The pid of the agent process, when the transport knows it.
+     *
+     * MiniMax Code names its broker after this pid, so the session that owns
+     * the agent can reach exactly that broker.
+     */
+    getAgentPid(): number | null {
+        return this.transport?.getChildPid() ?? null;
+    }
+
     getSessionConfigOptions(sessionId: string): AcpConfigOptionDescriptor[] | undefined {
         return this.sessionConfigOptions.get(sessionId);
     }

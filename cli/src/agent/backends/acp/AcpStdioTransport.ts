@@ -285,6 +285,20 @@ export class AcpStdioTransport {
     }
 
     /**
+     * The pid of the agent process, when it is known.
+     *
+     * The agent names its MiniMax Code broker after this pid, so a caller
+     * that owns the agent can find exactly that broker instead of looking
+     * for whichever host happens to be running.
+     */
+    getChildPid(): number | null {
+        if (this.childPid !== null) {
+            return this.childPid;
+        }
+        return typeof this.process.pid === 'number' ? this.process.pid : null;
+    }
+
+    /**
      * Notifies the owner that the agent process is gone.
      *
      * The owner needs to know without waiting for a request to fail: a

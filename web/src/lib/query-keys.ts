@@ -36,6 +36,7 @@ export const queryKeys = {
     sessionKimiModels: (sessionId: string) => ['session-kimi-models', sessionId] as const,
     machineMcodeModels: (machineId: string) => ['machine-mcode-models', machineId] as const,
     machineMcodeApps: (machineId: string) => ['machine-mcode-apps', machineId] as const,
+    sessionMcodeApps: (sessionId: string) => ['session-mcode-apps', sessionId] as const,
     sessionMcodeModels: (sessionId: string) => ['session-mcode-models', sessionId] as const,
     sessionGrokReasoningEffortOptions: (sessionId: string) => ['session-grok-reasoning-effort-options', sessionId] as const,
     machineAgyModels: (machineId: string) => ['machine-agy-models', machineId] as const,
