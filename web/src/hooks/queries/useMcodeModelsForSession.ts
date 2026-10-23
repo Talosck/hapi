@@ -81,6 +81,15 @@ export function useMcodeModelsForSession(args: {
         refetchOnWindowFocus: true,
         refetchInterval: (query) => {
             const now = Date.now()
+            if (!enabled) {
+                // The catalog cannot be asked for yet, so the budget must not
+                // start: it measures how long the catalog is looked for, and
+                // a session that only becomes eligible minutes later has not
+                // had its look yet. The stamp is cleared so that enabling
+                // starts a fresh budget.
+                discovery.current = null
+                return false
+            }
             if (discovery.current?.key !== sessionKey) {
                 discovery.current = { key: sessionKey, startedAt: now }
             }

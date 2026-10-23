@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import type { PropsWithChildren } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
@@ -107,5 +107,51 @@ describe('useMcodeModelsForSession', () => {
 
         await waitFor(() => expect(result.current.error).toBe('MiniMax Code model discovery timed out'))
         expect(result.current.availableModels).toEqual([])
+    })
+
+    it('starts the discovery budget when the session becomes eligible', async () => {
+        // The budget measures how long the catalog is looked for. A session
+        // that was not eligible yet - the agent is still starting, the session
+        // is archived - must not spend the budget while it cannot ask.
+        vi.useFakeTimers()
+        try {
+            const getSessionMcodeModels = vi.fn(async () => ({
+                success: true,
+                availableModels: [] as Array<{ modelId: string }>,
+                currentModelId: null
+            }))
+            const api = { getSessionMcodeModels } as unknown as ApiClient
+            const queryClient = createQueryClient()
+
+            const { rerender } = renderHook(
+                ({ enabled }: { enabled: boolean }) => useMcodeModelsForSession({
+                    api,
+                    sessionId: 'session-1',
+                    enabled
+                }),
+                { wrapper: wrapper(queryClient), initialProps: { enabled: false } }
+            )
+
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(90_000)
+            })
+            expect(getSessionMcodeModels).not.toHaveBeenCalled()
+
+            // The session becomes eligible long after the budget would have
+            // been spent. The discovery has to start here, not be over.
+            rerender({ enabled: true })
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(1)
+            })
+            const afterEnable = getSessionMcodeModels.mock.calls.length
+            expect(afterEnable).toBeGreaterThan(0)
+
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(5_000)
+            })
+            expect(getSessionMcodeModels.mock.calls.length).toBeGreaterThan(afterEnable)
+        } finally {
+            vi.useRealTimers()
+        }
     })
 })
