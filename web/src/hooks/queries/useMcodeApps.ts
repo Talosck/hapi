@@ -22,6 +22,21 @@ const APPS_REFRESH_MS = 5 * 60_000
 const APPS_STARTING_REFRESH_MS = 2_000
 
 /**
+ * How long to wait before the next read, by the time the agent has already
+ * had.
+ *
+ * A read that finds no answer asks again, but not every two seconds forever:
+ * the pace grows with the wait, so an agent that comes up in a moment is
+ * noticed at once, and an agent that never comes up costs one read a minute.
+ */
+export function startingRefreshDelayMs(waitedMs: number): number {
+    if (waitedMs < 5_000) return APPS_STARTING_REFRESH_MS
+    if (waitedMs < 20_000) return 5_000
+    if (waitedMs < 60_000) return 15_000
+    return 60_000
+}
+
+/**
  * How long a read counts as "just now" for the forced refresh.
  *
  * The machine caches the catalog for minutes, because reading it costs two
@@ -60,6 +75,8 @@ export function useMcodeApps(args: {
     const targetId = sessionId ?? machineId
     const enabled = Boolean(args.enabled && api && targetId)
     const lastReadAt = useRef(0)
+    /** When the agent of the session started coming up, if it has not yet. */
+    const startingSince = useRef<number | null>(null)
 
     const query = useQuery({
         queryKey: sessionId
@@ -93,9 +110,15 @@ export function useMcodeApps(args: {
         // than that would only ask the machine for the answer it already has.
         // An agent that is still starting is the exception: its answer is
         // not cached, and it appears within seconds.
-        refetchInterval: (query) => query.state.data?.pending === true
-            ? APPS_STARTING_REFRESH_MS
-            : APPS_REFRESH_MS,
+        refetchInterval: (query) => {
+            if (query.state.data?.pending !== true) {
+                startingSince.current = null
+                return APPS_REFRESH_MS
+            }
+            const now = Date.now()
+            if (startingSince.current === null) startingSince.current = now
+            return startingRefreshDelayMs(now - startingSince.current)
+        },
         retry: false,
     })
 

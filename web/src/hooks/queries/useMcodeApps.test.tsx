@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import type { PropsWithChildren } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
-import { useMcodeApps } from './useMcodeApps'
+import { startingRefreshDelayMs, useMcodeApps } from './useMcodeApps'
 
 function wrapper(queryClient: QueryClient) {
     return ({ children }: PropsWithChildren) => (
@@ -172,5 +172,86 @@ describe('useMcodeApps', () => {
         await queryClient.refetchQueries()
         await waitFor(() => expect(result.current.pending).toBe(false))
         expect(result.current.apps).toHaveLength(1)
+    })
+
+    it('slows the reads down instead of asking every two seconds forever', async () => {
+        // The agent publishes its broker a moment after it is spawned. A
+        // client that waits for it must not ask every two seconds for as long
+        // as the tab is open: every read reaches the machine, and the machine
+        // has to look for the agent's broker.
+        vi.useFakeTimers()
+        try {
+            const getSessionMcodeApps = vi.fn(async () => ({
+                success: false,
+                pending: true,
+                error: 'The MiniMax Code agent is still starting.'
+            }))
+            const api = { getSessionMcodeApps } as unknown as ApiClient
+            const queryClient = createQueryClient()
+
+            renderHook(() => useMcodeApps({
+                api,
+                machineId: 'machine-1',
+                sessionId: 'session-1',
+                enabled: true
+            }), { wrapper: wrapper(queryClient) })
+
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(600_000)
+            })
+
+            // Ten minutes of waiting must not be ten minutes of reads.
+            expect(getSessionMcodeApps.mock.calls.length).toBeLessThanOrEqual(40)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('notices an agent that comes up late', async () => {
+        // The pace grows with the wait, but the reads keep coming: an agent
+        // that takes a minute to come up still fills the panel in.
+        vi.useFakeTimers()
+        try {
+            let answer: { success: boolean; pending?: boolean; apps?: unknown[] } = {
+                success: false,
+                pending: true
+            }
+            const getSessionMcodeApps = vi.fn(async () => answer)
+            const api = { getSessionMcodeApps } as unknown as ApiClient
+            const queryClient = createQueryClient()
+
+            const { result } = renderHook(() => useMcodeApps({
+                api,
+                machineId: 'machine-1',
+                sessionId: 'session-1',
+                enabled: true
+            }), { wrapper: wrapper(queryClient) })
+
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(90_000)
+            })
+            expect(result.current.pending).toBe(true)
+
+            answer = { success: true, apps: [{ provider: 'matrix', toolCount: 13, tools: [] }] }
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(120_000)
+            })
+
+            expect(result.current.pending).toBe(false)
+            expect(result.current.apps).toHaveLength(1)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+})
+
+describe('startingRefreshDelayMs', () => {
+    it('grows with the time the agent has had', () => {
+        expect(startingRefreshDelayMs(0)).toBe(2_000)
+        expect(startingRefreshDelayMs(4_999)).toBe(2_000)
+        expect(startingRefreshDelayMs(5_000)).toBe(5_000)
+        expect(startingRefreshDelayMs(20_000)).toBe(15_000)
+        expect(startingRefreshDelayMs(60_000)).toBe(60_000)
+        expect(startingRefreshDelayMs(600_000)).toBe(60_000)
     })
 })
