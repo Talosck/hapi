@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { useNavigate } from '@tanstack/react-router'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
 import { AssistantRuntimeProvider, useAui, useAuiState } from '@assistant-ui/react'
 import { DragDropZone } from '@/components/AssistantChat/DragDropZone'
@@ -166,6 +166,24 @@ export function modelOptionsInvalidationKey(
 
 export function isRewindForkFallbackError(error: unknown): boolean {
     return error instanceof ApiError && error.code === 'ambiguous_native_boundary_fork_safe'
+}
+
+/**
+ * Marks the model catalog of a session stale when its model changed.
+ *
+ * The catalog is keyed by session only, so the option list of the previous
+ * model would survive a switch. The list is marked stale, not emptied: the
+ * picker keeps showing the models it has until the new answer lands, so a
+ * switch does not blank the list the user is looking at.
+ */
+export async function invalidateModelOptions(
+    queryClient: QueryClient,
+    agentFlavor: string | null | undefined,
+    sessionId: string
+): Promise<void> {
+    const key = modelOptionsInvalidationKey(agentFlavor, sessionId)
+    if (!key) return
+    await queryClient.invalidateQueries({ queryKey: key, exact: true })
 }
 
 /**
@@ -1036,9 +1054,8 @@ function SessionChatInner(props: SessionChatProps) {
     const sessionModel = props.session.model
     const sessionId = props.session.id
     useEffect(() => {
-        const effortInvalidationKey = modelOptionsInvalidationKey(agentFlavor, sessionId)
-        if (!effortInvalidationKey || sessionModel === undefined) return
-        void queryClient.resetQueries({ queryKey: effortInvalidationKey, exact: true })
+        if (sessionModel === undefined) return
+        void invalidateModelOptions(queryClient, agentFlavor, sessionId)
     }, [agentFlavor, sessionId, sessionModel, queryClient])
     const controlledByUser = props.session.agentState?.controlledByUser === true && !props.session.metadata?.capabilities?.concurrentClients
     const mcodeSteerSupported = isSteerExtensionSupported(props.session.metadata)
