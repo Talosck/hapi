@@ -802,9 +802,14 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // MiniMax Code publishes its own session title over ACP only after
             // the turn it derives it from has finished, so a new chat stayed
             // untitled until the first answer was done. The change_title tool
-            // lets the model name the session while it is still working on it,
-            // which is how the other agents get an early title.
+            // lets the model name the session while it is still working on it.
+            //
+            // It is a placeholder, not a rename: the title the agent publishes
+            // replaces it, and a session that already has a title keeps it.
+            // The model renaming the chat mid-session would otherwise take the
+            // title away from the agent that owns it.
             enableChangeTitle: true,
+            titleMode: 'placeholder',
             skillLookup: { workingDirectory: session.path, flavor: 'mcode' }
         });
         this.happyServer = happyServer;

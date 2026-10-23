@@ -28,7 +28,7 @@ import {
     SESSION_ID_PREFIX_PARAM_DESCRIPTION,
 } from '@hapi/protocol/sessionCitation'
 import { PingPeerError, formatInspectPeerReport, formatPeerSessionsList, inspectPeer, listPeerSessions, peerListFetchLimit, pingPeer } from "@/modules/pingPeer/pingPeer";
-import { applySessionDisplayRename, normalizeSessionDisplayTitle } from "@/agent/sessionDisplayRename";
+import { applySessionDisplayRename, applySessionPlaceholderTitle, normalizeSessionDisplayTitle } from "@/agent/sessionDisplayRename";
 
 type StartHappyServerOptions = {
     /**
@@ -38,6 +38,15 @@ type StartHappyServerOptions = {
      */
     emitTitleSummary?: boolean;
     enableChangeTitle?: boolean;
+    /**
+     * How change_title writes the title.
+     *
+     * 'rename' (default) sets the explicit name - the field the web rename
+     * uses, and the one a later rename changes. 'placeholder' fills the
+     * summary of a session that has no title yet, so the title the agent
+     * publishes itself replaces it instead of losing to it.
+     */
+    titleMode?: 'rename' | 'placeholder';
     skillLookup?: {
         workingDirectory: string;
         flavor: string;
@@ -68,6 +77,7 @@ function createHapiMcpServer(
     client: ApiSessionClient,
     emitTitleSummary: boolean,
     enableChangeTitle: boolean,
+    titleMode: 'rename' | 'placeholder',
     skillLookup: StartHappyServerOptions['skillLookup']
 ): McpServer {
     const handler = async (title: string) => {
@@ -77,6 +87,20 @@ function createHapiMcpServer(
                 // Codex collab: acknowledge the tool call without writing.
                 // Parent-thread mcp_tool_call_end applies the rename later.
                 return { success: true };
+            }
+            if (titleMode === 'placeholder') {
+                // An agent that publishes a title of its own gets a
+                // placeholder, not a rename: its title replaces the
+                // placeholder, and a session that already has a title keeps
+                // it. The model is told so it does not call the tool again.
+                const placeholder = applySessionPlaceholderTitle(client, title);
+                if (placeholder.reason === 'empty') {
+                    return { success: false, error: 'Title must not be empty' };
+                }
+                if (!placeholder.applied) {
+                    return { success: true, unchanged: true };
+                }
+                return { success: true, placeholder: true };
             }
             if (!applySessionDisplayRename(client, title)) {
                 return { success: false, error: 'Title must not be empty' };
@@ -200,6 +224,31 @@ function createHapiMcpServer(
             const displayTitle = normalizeSessionDisplayTitle(args.title) ?? args.title;
 
             if (response.success) {
+                if (response.unchanged) {
+                    // The session already carries a title. Saying so keeps the
+                    // model from calling the tool again for a title it cannot
+                    // set.
+                    return {
+                        content: [
+                            {
+                                type: 'text' as const,
+                                text: 'The chat already has a title; it was left unchanged.',
+                            },
+                        ],
+                        isError: false,
+                    };
+                }
+                if (response.placeholder) {
+                    return {
+                        content: [
+                            {
+                                type: 'text' as const,
+                                text: `The chat is now titled "${displayTitle}" until the agent publishes the title of its own, which replaces it. Do not call this tool again.`,
+                            },
+                        ],
+                        isError: false,
+                    };
+                }
                 return {
                     content: [
                         {
@@ -498,11 +547,12 @@ function readMcpSessionId(req: IncomingMessage): string | undefined {
 export async function startHappyServer(client: ApiSessionClient, options: StartHappyServerOptions = {}) {
     const emitTitleSummary = options.emitTitleSummary ?? true;
     const enableChangeTitle = options.enableChangeTitle ?? true;
+    const titleMode = options.titleMode ?? 'rename';
     const transports = new Map<string, StreamableHTTPServerTransport>();
     const mcps = new Map<string, McpServer>();
 
     const createMcpTransport = () => {
-        const mcp = createHapiMcpServer(client, emitTitleSummary, enableChangeTitle, options.skillLookup);
+        const mcp = createHapiMcpServer(client, emitTitleSummary, enableChangeTitle, titleMode, options.skillLookup);
         const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sessionId) => {

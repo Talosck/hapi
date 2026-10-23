@@ -48,6 +48,14 @@ export interface HapiMcpBridgeOptions {
     exportSessionEnv?: boolean;
     emitTitleSummary?: boolean;
     enableChangeTitle?: boolean;
+    /**
+     * How the title tool writes the title.
+     *
+     * 'rename' (default) sets the explicit name. 'placeholder' fills the
+     * summary of a session that has no title yet, so the title the agent
+     * publishes itself replaces it.
+     */
+    titleMode?: 'rename' | 'placeholder';
     skillLookup?: {
         workingDirectory: string;
         flavor: string;
@@ -82,6 +90,7 @@ export async function buildHapiMcpBridge(
     const happyServer = await startHappyServer(client, {
         emitTitleSummary: options.emitTitleSummary,
         enableChangeTitle: options.enableChangeTitle,
+        titleMode: options.titleMode,
         skillLookup: options.skillLookup
     });
     // Stamp the hub row id so orphanReap can find MCP helpers after the agent

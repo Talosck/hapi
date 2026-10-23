@@ -16,7 +16,7 @@ const harness = vi.hoisted(() => ({
         model: 0,
         slashCommands: 0
     },
-    mcpBridgeOptions: null as { enableChangeTitle?: boolean } | null
+    mcpBridgeOptions: null as { enableChangeTitle?: boolean; titleMode?: string } | null
 }))
 
 vi.mock('@/modules/common/handlers/mcodeModels', () => ({
@@ -40,7 +40,7 @@ vi.mock('./utils/mcodeBackend', async (importOriginal) => {
 })
 
 vi.mock('@/codex/utils/buildHapiMcpBridge', () => ({
-    buildHapiMcpBridge: async (_client: unknown, options: { enableChangeTitle?: boolean }) => {
+    buildHapiMcpBridge: async (_client: unknown, options: { enableChangeTitle?: boolean; titleMode?: string }) => {
         harness.mcpBridgeOptions = options;
         return {
             server: { stop: () => {} },
@@ -390,6 +390,19 @@ describe('mcodeRemoteLauncher config sync', () => {
         await mcodeRemoteLauncher(session as never, {})
 
         expect(harness.mcpBridgeOptions?.enableChangeTitle).toBe(true)
+        expect(backend.setModel).not.toHaveBeenCalled()
+    })
+
+    it('lets the title of the agent replace the one the model offers', async () => {
+        // The title the model sets is a placeholder: the agent publishes the
+        // real one at the end of the first turn, and that one has to win. A
+        // rename would take the title away from the agent that owns it.
+        const backend = createBackend()
+        const session = createSession([{ message: 'hi', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(harness.mcpBridgeOptions?.titleMode).toBe('placeholder')
         expect(backend.setModel).not.toHaveBeenCalled()
     })
 

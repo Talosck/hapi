@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ApiSessionClient } from '@/api/apiSession'
+import type { Metadata } from '@/api/types'
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from './startHappyServer'
 
 type ToolResult = {
@@ -263,8 +264,65 @@ describe('startHappyServer change_title', () => {
         expect(sendClaudeSessionMessage).not.toHaveBeenCalled()
     })
 
-    it('returns an error for blank titles instead of claiming success', async () => {
+    it('fills the summary of an untitled session in placeholder mode', async () => {
+        // An agent that publishes a title of its own gets a placeholder: the
+        // title it publishes replaces the placeholder instead of losing to it.
         const updateMetadata = vi.fn()
+        const sessionClient = {
+            updateMetadata,
+            getMetadata: vi.fn(() => ({ path: '/tmp', host: 'localhost' })),
+            sendAgentMessage: vi.fn(),
+            sendClaudeSessionMessage: vi.fn()
+        } as unknown as ApiSessionClient
+
+        const mcp = await connectChangeTitleServer(sessionClient, { titleMode: 'placeholder' })
+        // The server writes its own url into the metadata when it starts.
+        updateMetadata.mockClear()
+
+        const result = await mcp.callTool({
+            name: 'change_title',
+            arguments: { title: 'Debug the broker' }
+        }) as ToolResult
+
+        expect(result.isError).toBe(false)
+        expect(result.content?.[0]?.text).toContain('until the agent publishes the title of its own')
+        expect(updateMetadata).toHaveBeenCalledTimes(1)
+        const handler = updateMetadata.mock.calls[0]?.[0] as (metadata: Metadata) => Metadata
+        const metadata = handler({ path: '/tmp', host: 'localhost' })
+        expect(metadata.name).toBeUndefined()
+        expect(metadata.summary?.text).toBe('Debug the broker')
+    })
+
+    it('keeps the title of a session that already has one in placeholder mode', async () => {
+        // The tool fills a gap, it does not rename: the model is told so it
+        // does not call the tool again.
+        const updateMetadata = vi.fn()
+        const sessionClient = {
+            updateMetadata,
+            getMetadata: vi.fn(() => ({
+                path: '/tmp',
+                host: 'localhost',
+                summary: { text: 'The agent title', updatedAt: 1 }
+            })),
+            sendAgentMessage: vi.fn(),
+            sendClaudeSessionMessage: vi.fn()
+        } as unknown as ApiSessionClient
+
+        const mcp = await connectChangeTitleServer(sessionClient, { titleMode: 'placeholder' })
+        // The server writes its own url into the metadata when it starts.
+        updateMetadata.mockClear()
+
+        const result = await mcp.callTool({
+            name: 'change_title',
+            arguments: { title: 'Another title' }
+        }) as ToolResult
+
+        expect(result.isError).toBe(false)
+        expect(result.content?.[0]?.text).toContain('already has a title')
+        expect(updateMetadata).not.toHaveBeenCalled()
+    })
+
+    it('returns an error for blank titles instead of claiming success', async () => {        const updateMetadata = vi.fn()
         const sessionClient = {
             updateMetadata,
             sendAgentMessage: vi.fn(),
