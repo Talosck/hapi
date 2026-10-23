@@ -684,7 +684,7 @@ if (this.isStreaming) {
 
 | 路径 | 原来 | 为什么坏 |
 |---|---|---|
-| `runPi.ts` 「没有 native work 就直接 return」 | 完全 no-op | Pi 跳过最后一次 steering drain（`agent-loop.js:186-189`：`if (decision?.action === "end") { emit agent_end; return; }`），所以 **steer 可以跨一个正常结束的轮次活下来**。这时用户按停止，什么都没发生，孤儿 steer 留在队列里，下一轮诈尸 |
+| `runPi.ts` 「没有 native work 就直接 return」 | 完全 no-op | **被中止的轮次不会 drain steering 队列**（`agent-loop.js:148-158`），所以一条被 Pi 收下但没送到的 steer 会留在队列里。用户按停止时如果根本没有活跃轮次，这条 steer 就诈尸了 |
 | 「`guard.settled` 就不发 abort」那个分支 | abort 和 clear 一起被包住 | 守卫在异步 history sync 之后才置位；租约等得比一次 history sync 久，整个块就被跳过。而 Pi 没收到 abort，`agent_settled` 的兜底也不会触发（`aborted` 是 false）—— **孤儿存活且零诊断** |
 | compaction 中断那条路径 | 只发 `{type:'abort'}` | 完全依赖 `agent_settled` 兜底 |
 
@@ -748,4 +748,117 @@ if (this.isStreaming) {
 | Pi 测试套件 | 297 → **312** 条全过（新增 15 条针对性回归测试） |
 | cli / web / hub / shared 全套 | 全过 |
 | typecheck | cli / web / hub / relay 全过 |
+
+---
+
+## 十二、第三轮复审：三个 reviewer，从三个不同的角度（2026-10-23）
+
+这轮换了三个 reviewer，每个打前两轮**看不到**的角度：
+一个专攻「修复本身有没有引入新 bug」，一个专攻**跨组件**（shared 协议、web 渲染、
+session importer、hub 长度上限），一个**拿真机 `pi --mode rpc` 把 HAPI 依赖的每一条
+Pi 运行时假设都跑一遍**。第三个 reviewer 推翻了我的一条核心论据。
+
+### 12.1 真机验证推翻了一条论据（这条最值钱）
+
+我在前两轮反复用的一条理由是：
+
+> Pi 跳过最后一次 steering drain（`agent-loop.js:186-189`：
+> `if (decision?.action === "end") { emit agent_end; return; }`），
+> 所以 **steer 可以跨一个正常结束的轮次活下来**。
+
+真机跑下来：**这条是错的。**
+
+`agent-loop.js:186-191` 确实只在 `decision?.action === "end"` 时跳过 drain，
+但 **Pi 1.4.0 里没有任何地方会返回这个 action** ——
+`core/sdk.js:252` 构造 `Agent` 时没有传 `finishTurn` 运行时选项，
+`core/agent-session.js:521-533` 只会返回 `undefined` / `{action:"continue"}`。
+所以正常轮次结束时的 drain **一定会跑**，steer 会在**同一个 run 内**作为一条 user
+消息被投递，根本不会活到下一个 prompt。
+
+**真正成立的是另一条**（也是真机验证的）：
+
+- **被中止的轮次不会 drain steering 队列**（`agent-loop.js:148-158`）——
+  steer 会留在队列里，下一轮诈尸。**这才是 P0 修复的依据。**
+- 空闲时发给 Pi 的 steer 也会留在队列里，直到下一个 prompt 才被投递。
+
+实测对照（同一个探针，只差一个 `clear_queue`）：
+
+```
+有 clear_queue：clear_queue → {"steering":["IMPORTANT_ABC123 remember to use pnpm"],"followUp":[]}
+                下一轮唯一的 user 消息 = "Reply with exactly: SECOND_TURN_OK"   ← steer 没了
+只有 abort：     abort 之后队列里还攥着那条 steer
+                下一轮把它当成 user 消息又投了一次（t=7217 message_start USER: IMPORTANT_ABC123 …）
+```
+
+所以 **功能上的修复是对的**（清队列确实救回了那条 steer），
+但**代码注释和文档里的理由是错的**，全部改成了「被中止的轮次不 drain 队列」。
+这条要是没让 reviewer 上真机跑一遍，就会带着一个错误的因果解释留在代码里。
+
+真机还验证了另外 9 条，全部成立：`clear_queue` 同时清 session 的 `_steeringMessages`
+和 agent 的 `steeringQueue`；streaming 时再发 prompt 会被**拒绝**而不是入队
+（`Agent is already processing. Specify streamingBehavior …`）；`set_model` 的响应里
+真的有 `input`；`get_tree` 的响应形状真的是 `{tree:[{entry,children}], leafId}`；
+`bash` 的响应字段是 `output/exitCode/cancelled/truncated/fullOutputPath`；
+`bash_execution_update` 确实带 id；`session_info_changed` 确实在
+`set_session_name` 的响应之前发出；`agent_settled{aborted:true}` 确实早于 abort 的
+RPC 响应；空队列的 `clear_queue` 返回 `{steering:[],followUp:[]}`；
+未知命令立刻回 `Unknown command: xxx`（约 5ms，不挂住）。
+
+> 附带一个值得知道的细节：这台机器上 Pi 的 `steeringMode` 是 `one-at-a-time`，
+> 所以两条 steer 会在同一个 run 的**两个连续轮次**里分别投递，不是一条。
+
+### 12.2 修复本身的问题（第一个 reviewer）
+
+| 级别 | 问题 | 处理 |
+|---|---|---|
+| 中 | **`clear_queue` 的超时参数会被丢弃** —— 清理在跑的时候，后来的调用方 join 进去，它自己的预算就不生效了 | 清理改成**按预算共享**：后来的调用方如果等得起就 join，等不起就自己再清一次（Pi 的清队列是幂等的，第二次的响应就是一道「队列已空」的栅栏） |
+| 中 | **「没有 native work」的早退路径不拿 runtime mutation 锁** —— Pi 不串行处理 RPC，Pi 还在处理的一条 steer 可能排在清队列**之后**才入队，于是它活过清理 | steer 在途时也要拿锁。steer 的派发本来就需要这把锁，所以拿锁要么让 steer 先落地（然后被清掉），要么让 steer 留在本地、退化成普通 prompt —— 两种顺序都是对的 |
+| 低 | **`clear_queue` 响应解析失败时的提示说反了** —— Pi 是**先清空再返回**的，所以解析失败意味着消息**已经没了**，真正坏掉的是那些历史登记没被撤掉 | 提示改成实话（「Pi 清了队列但没说清掉了什么」），并且在解析失败时把账本里的登记**全部撤掉**（已投递的 steer 撤了也是空操作） |
+| 低 | **`/tree` 正好 200 条时会多一句「还有更多没渲染」** | 上限判断挪到孩子入栈之后 —— 正好到上限不算截断 |
+| 低 | **账本把 Pi 自己塞的消息硬套给了 HAPI 的某一行** | 撤掉的动作集合本身是对的（错配的总是**已投递**的那些，撤了是空操作），只是用户看到的文本可能报错对象。罕见（要 Pi 扩展自己插一条 steer），记档不修 |
+| 低 | **`/name` 和自动标题扩展写同一个字段，没有优先级** | 见 12.3 的 M2 |
+| 提示 | **一条超大的 bash chunk 会导致整个命令期间没有任何预览** | 截断时把已经攒下的那 32KB 作为最后一次预览发出去 |
+
+> reviewer 提的「清队列超时会让中止变成 fail-closed 拆会话」，我核过之后**不成立**：
+> 兜底清队列只在 `agent_settled{aborted:true}` 之后才启动，而那正是让 abort guard
+> 结算的事件，所以 guard 早就 resolve 了，不会 reject。hub 给 CLI 的 RPC 超时是 30 秒，
+> 中止预算是 25 秒 + 最多 2 秒清理，也在范围内。
+
+### 12.3 跨组件的问题（第二个 reviewer）
+
+这轮挖出来的都在**CLI 内部看不到的展示层契约**上：
+
+| 级别 | 问题 | 处理 |
+|---|---|---|
+| 中 | **`/bash` 悄悄丢掉了 Pi 的输出截断** —— Pi 自己把输出截到 50KiB / 2000 行（**保留尾部**），完整内容写在临时文件里。HAPI 只转发尾部，用户读到的是**半截日志却以为完整**，而 build 报错通常在**头部** | 读 `truncated` 和 `fullOutputPath`，明确告诉用户「只显示了尾部，完整输出在哪个文件」 |
+| 中 | **用户 `/name` 起的名字会被自动标题扩展在下一条消息里覆盖** —— Pi 启动时挂了扩展，系统提示里写着「把你的第一个动作用来起标题」，那个标题落在**同一个字段** | 见下面 |
+| 中 | **Pi 自己的 shell 工具叫 `bash`（小写），web 只认 `Bash`** —— 结果模型跑的 `ls` 在 web 上是一坨 JSON，而用户自己 `/bash ls` 是漂亮的命令卡片 | CLI 侧把 Pi 的 `bash` 映射成 `Bash` |
+| 中 | **`/bash` 全程没有「在跑」的信号** —— Pi 没有 start 事件，卡片要等攒够 4KB 才出现；一个静默命令会让 web **两分钟什么都不显示**，会话状态还是「空闲」 | 命令一开始就把卡片发出来（`in_progress`），并把会话标成忙（`keepAlive` 的 thinking 位，但**不**动 `piIsStreaming` —— 那是 steer / 中止逻辑用的） |
+
+**关于 `/name` 被覆盖那条**，改法不是「有名字就不许模型起标题」——
+那会连**起始名**一起挡住，而自动标题的特性就是要替换起始名（测试里明确写着
+"overrides spawn name"）。所以加了一个**持久的标记**：
+`metadata.piUserNamedSession`，只有 `/name` 会写它，
+自动标题看到它就不动 `metadata.name`。
+这个字段是可选的，hub 的 metadata 是 passthrough 的，不会影响别的 flavor。
+
+第二个 reviewer 还把几个「以为有问题、其实没问题」的地方查干净了：
+
+- `shared/src/apiTypes.ts` 加的 `PiModelSummary.input` 是纯增量，hub 那边是
+  `.passthrough()`，**重新生成 fixtures 零漂移**
+- Pi session importer 的 `pi-bash-<entryId>` 和实时的 `pi-bash-<nonce>-<rpcId>`
+  **不可能撞**：entry id 是 8 位 hex，实时那边多一段 rpc id
+- `/tree` 最坏情况 50410 字符，在 hub 的 65536 上限之内，**hub 不会偷偷截断它**
+- 通用 bash RPC（`handlers/bash.ts`）根本不产生聊天卡片，本仓库里也没有人调它
+- 斜杠菜单里 Pi 的 `/bash` `/tree` `/name` 和别的 flavor **不重名**
+
+### 12.4 这轮的验证
+
+| 项 | 结果 |
+|---|---|
+| Pi 测试套件 | 312 → **318** 条全过（新增 6 条针对性回归测试） |
+| cli / web / hub / shared 全套 | 全过 |
+| typecheck | cli / web / hub / relay 全过 |
+| fixtures | `bun run gen:fixtures` 重新生成，**零漂移** |
+
 
