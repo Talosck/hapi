@@ -41,6 +41,16 @@ export function convertPiCompactionUsage(estimatedTokensAfter: number | undefine
     };
 }
 
+/**
+ * Pi names its own shell tool `bash`, while the web renders the canonical
+ * `Bash` card — anything else falls through to a raw JSON dump of the tool
+ * input. Without the mapping the agent's shell commands sit next to the
+ * user's `/bash` card and look like two different things.
+ */
+function mapPiToolName(name: string): string {
+    return name === 'bash' ? 'Bash' : name;
+}
+
 /** Converts validated Pi lifecycle events to HAPI chat messages. */
 export function convertPiEvent(event: PiAgentEvent): AgentMessage[] {
     switch (event.type) {
@@ -50,7 +60,7 @@ export function convertPiEvent(event: PiAgentEvent): AgentMessage[] {
             return [{
                 type: 'tool_call',
                 id: parsed.data.toolCallId,
-                name: parsed.data.toolName,
+                name: mapPiToolName(parsed.data.toolName),
                 input: parsed.data.args,
                 status: 'in_progress',
             }];
@@ -61,7 +71,7 @@ export function convertPiEvent(event: PiAgentEvent): AgentMessage[] {
             return [{
                 type: 'tool_call',
                 id: parsed.data.toolCallId,
-                name: parsed.data.toolName,
+                name: mapPiToolName(parsed.data.toolName),
                 input: parsed.data.args,
                 status: 'in_progress',
                 progress: parsed.data.partialResult,

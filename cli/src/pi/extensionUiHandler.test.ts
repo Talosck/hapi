@@ -54,6 +54,32 @@ describe('PiExtensionUiHandler', () => {
         expect(harness.session.updateMetadata).toHaveBeenCalledTimes(1);
     });
 
+    it('does not overwrite a name the user picked', () => {
+        let metadata = {
+            path: '/tmp',
+            host: 'localhost',
+            name: 'fix-the-parser',
+            piUserNamedSession: true,
+            summary: { text: 'native summary', updatedAt: 1 }
+        };
+        const harness = createHarness();
+        harness.session.updateMetadata.mockImplementation((handler: (current: typeof metadata) => typeof metadata) => {
+            metadata = handler(metadata);
+        });
+
+        // Pi is launched with an extension that tells the model to title the
+        // chat as its very first action, so a name set with /name would be
+        // replaced on the next message.
+        harness.handler.handle({
+            type: 'extension_ui_request',
+            id: 'title-1',
+            method: 'setTitle',
+            title: 'Renamed via hapi_change_title'
+        });
+
+        expect(metadata.name).toBe('fix-the-parser');
+    });
+
     it('maps select into request_user_input and returns its selected option', async () => {
         const harness = createHarness();
         harness.handler.handle({ type: 'extension_ui_request', id: 'select-1', method: 'select', title: 'Pick', options: ['one', 'two'] });

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { AgentState } from '@/api/types';
-import { applySessionDisplayRename } from '@/agent/sessionDisplayRename';
+import { normalizeSessionDisplayTitle } from '@/agent/sessionDisplayRename';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { logger } from '@/ui/logger';
 import type { PiExtensionUiRequest, PiExtensionUiResponse } from './types';
@@ -161,7 +161,17 @@ export class PiExtensionUiHandler {
                 // same as MCP change_title / web renameSession (metadata.name).
                 // Native Pi titles still sync via createNativeSessionTitleMetadataSync
                 // in loop.ts (summary only; name continues to win).
-                applySessionDisplayRename(this.options.session, request.title);
+                //
+                // A name the user picked is not overwritten: Pi is launched
+                // with an extension that tells the model to title the chat as
+                // its very first action, so a name set with /name would be
+                // replaced on the next message.
+                this.options.session.updateMetadata((metadata) => {
+                    if (metadata.piUserNamedSession) return metadata;
+                    const normalized = normalizeSessionDisplayTitle(request.title);
+                    if (!normalized) return metadata;
+                    return { ...metadata, name: normalized };
+                });
                 return;
             case 'setStatus':
             case 'setWidget':

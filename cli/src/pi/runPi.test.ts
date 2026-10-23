@@ -1128,6 +1128,78 @@ describe('Pi abandoned steering queue', () => {
         await running;
     });
 
+    it('joins the queue cleanup that is already running', async () => {
+        const { running } = await startStreamingSession();
+        harness.autoRespondClearQueue = false;
+
+        // The aborted-settle fallback starts the cleanup as soon as Pi reports
+        // the aborted turn — before the abort RPC even answers. The abort
+        // joins it instead of starting a second one.
+        harness.onEvent!({ type: 'agent_settled', aborted: true });
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'clear_queue')).toHaveLength(1));
+
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        const abortPromise = abort({});
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'abort')).toHaveLength(1));
+        const abortCommand = harness.sent.find((item) => (item as { type?: string }).type === 'abort') as { id: string };
+        harness.onEvent!({ type: 'response', id: abortCommand.id, command: 'abort', success: true });
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'clear_queue')).toHaveLength(1));
+
+        const clearQueue = harness.sent.find((item) => (item as { type?: string }).type === 'clear_queue') as { id: string };
+        harness.onEvent!({
+            type: 'response', id: clearQueue.id, command: 'clear_queue', success: true,
+            data: harness.clearQueueResult,
+        });
+        await expect(abortPromise).resolves.toEqual({ success: true });
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('withdraws the dropped rows when Pi does not report what it cleared', async () => {
+        const { running } = await startStreamingSession();
+        const recordSentSteer = vi.spyOn(PiSession.prototype, 'recordSentSteer');
+
+        steerHandler()({
+            role: 'user',
+            content: { type: 'text', text: 'remember to use pnpm' },
+            meta: { deliveryMode: 'steer' },
+        }, 'abandoned-steer-id');
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'steer', message: 'remember to use pnpm',
+        })));
+        const steer = harness.sent.find((item) => (item as { type?: string }).type === 'steer') as { id: string };
+        harness.onEvent!({
+            type: 'response', id: steer.id, command: 'steer', success: true,
+            data: { disposition: 'queued' },
+        });
+        await vi.waitFor(() => expect(recordSentSteer).toHaveBeenCalled());
+
+        // Pi empties its queues before it answers, so the messages are gone
+        // even when Pi does not say which. Their history registrations still
+        // have to be withdrawn.
+        harness.autoRespondClearQueue = false;
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        void abort({});
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'abort')).toHaveLength(1));
+        const abortCommand = harness.sent.find((item) => (item as { type?: string }).type === 'abort') as { id: string };
+        harness.onEvent!({ type: 'response', id: abortCommand.id, command: 'abort', success: true });
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'clear_queue' })));
+        const clearQueue = harness.sent.find((item) => (item as { type?: string }).type === 'clear_queue') as { id: string };
+        harness.onEvent!({
+            type: 'response', id: clearQueue.id, command: 'clear_queue', success: true,
+            data: { steering: 'not-a-list' },
+        });
+
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('did not report what it dropped'),
+        }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
     it('clears Pi\'s steering queue when the turn is aborted so an abandoned steer cannot replay', async () => {
         const { running } = await startStreamingSession();
         const recordSentSteer = vi.spyOn(PiSession.prototype, 'recordSentSteer');
@@ -1748,6 +1820,57 @@ describe('Pi built-in slash commands', () => {
             message: expect.stringContaining('/bash <command>'),
         }));
         expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'bash' }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('reports that Pi truncated the command output', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash cat build.log' } }, 'bash-truncated-id');
+
+        const bash = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'bash') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({
+            type: 'response', id: bash.id, command: 'bash', success: true,
+            data: {
+                output: 'the tail of the log\n',
+                exitCode: 0,
+                truncated: true,
+                fullOutputPath: '/tmp/pi-bash-123.log',
+            },
+        });
+
+        // Pi keeps the tail of a long output and writes the whole text to a
+        // file. Without this the user reads a partial log that looks complete.
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('truncated the command output'),
+        }));
+        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'message',
+            message: expect.stringContaining('/tmp/pi-bash-123.log'),
+        });
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('shows the command card while the command runs', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/bash sleep 60' } }, 'bash-running-id');
+
+        // Pi reports no start event for a command, so the card would only
+        // appear with the first output chunk — a silent command would show
+        // nothing at all for two minutes.
+        await vi.waitFor(() => expect(harness.session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'tool-call',
+            name: 'Bash',
+            status: 'in_progress',
+        })));
 
         harness.onError?.(new Error('finish test'));
         await running;
@@ -2526,17 +2649,23 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
-    it('refuses a /name that HAPI cannot show', async () => {
+    it('renames a session to a name the web would show', async () => {
         const { running, onUserMessage } = await startReadySession();
         onUserMessage({ role: 'user', content: { type: 'text', text: '/name Untitled' } }, 'name-placeholder-id');
 
-        // A placeholder title is rejected by the title sync, so renaming to it
-        // would report success while changing nothing.
+        // The display name is normalized the way the web's own rename
+        // normalizes it, so a name the web would accept is accepted here too.
+        const setName = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_session_name') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({ type: 'response', id: setName.id, command: 'set_session_name', success: true });
+
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
             type: 'message',
-            message: expect.stringContaining('not a usable session name'),
+            message: 'Session renamed to "Untitled".',
         }));
-        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'set_session_name' }));
 
         harness.onError?.(new Error('finish test'));
         await running;

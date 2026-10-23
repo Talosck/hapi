@@ -451,8 +451,10 @@ describe('PiSession bash output stream cap', () => {
     it('reports the cut-off once when the preview cap is crossed', () => {
         const session = createMockSession();
         const first = session.recordBashStream('b1', 'x'.repeat(40 * 1024));
-        expect(first.preview).toBeNull();
         expect(first.truncated).toBe(true);
+        // The capped text is the last preview the user gets — a single huge
+        // chunk must not leave the card empty for the whole command.
+        expect(first.preview).toHaveLength(32 * 1024);
 
         const second = session.recordBashStream('b1', 'y'.repeat(10));
         expect(second.preview).toBeNull();

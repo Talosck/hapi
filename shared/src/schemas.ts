@@ -122,6 +122,11 @@ export const MetadataSchema = z.object({
     mcodeSessionId: z.string().optional(),
     copilotSessionId: z.string().optional(),
     piSessionId: z.string().optional(),
+    // The user named this session explicitly (Pi's `/name`). Pi launches with
+    // an extension that lets the model title the chat, and that title lands in
+    // the same field — this keeps a name the user picked from being replaced
+    // on the next message.
+    piUserNamedSession: z.boolean().optional(),
     piResumeAttempt: z.object({
         state: z.enum(['resuming', 'terminating', 'quarantined']),
         machineId: z.string(),

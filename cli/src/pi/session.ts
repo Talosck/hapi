@@ -99,6 +99,8 @@ export class PiSession {
     private _piIsStreaming = false;
     private streamingGeneration = 0;
     private promptInFlight = false;
+    /** HAPI is working on something Pi is not streaming for (a shell command). */
+    private busy = false;
     currentSteeringMode: 'all' | 'one-at-a-time' = 'all';
     /** What the active model accepts, as reported by Pi's get_state. */
     private currentModelInput: string[] | undefined;
@@ -129,6 +131,17 @@ export class PiSession {
         while (this.sentSteers.length > PiSession.MAX_TRACKED_STEERS) {
             this.sentSteers.shift();
         }
+    }
+
+    /**
+     * Hand out the tracked steers and forget them.
+     *
+     * Used when Pi cleared its queue but did not report what it dropped: the
+     * messages are gone either way, so their history registrations have to be
+     * withdrawn — the caller cannot tell which ones they were.
+     */
+    takeSentSteers(): Array<{ text: string; localId?: string }> {
+        return this.sentSteers.splice(0, this.sentSteers.length);
     }
 
     /**
@@ -208,12 +221,15 @@ export class PiSession {
         const previous = this.bashStreamText.get(rpcId) ?? '';
         const room = PI_BASH_STREAM_LIMIT_CHARS - previous.length;
         if (room <= 0) {
-            return this.markBashStreamTruncated(rpcId);
+            return this.markBashStreamTruncated(rpcId, null);
         }
         const text = previous + (delta.length > room ? delta.slice(0, room) : delta);
         this.bashStreamText.set(rpcId, text);
         if (previous.length + delta.length > PI_BASH_STREAM_LIMIT_CHARS) {
-            return this.markBashStreamTruncated(rpcId);
+            // The capped text is the last preview the user gets, so it goes
+            // out before the buffer is released — otherwise a single huge
+            // chunk would leave the card empty for the whole command.
+            return this.markBashStreamTruncated(rpcId, text);
         }
 
         const sent = this.bashStreamSent.get(rpcId) ?? 0;
@@ -225,12 +241,12 @@ export class PiSession {
     }
 
     /** Stop the live preview and release the buffered output of a command. */
-    private markBashStreamTruncated(rpcId: string): { preview: null; truncated: boolean } {
+    private markBashStreamTruncated(rpcId: string, finalPreview: string | null): { preview: string | null; truncated: boolean } {
         const first = !this.bashStreamTruncated.has(rpcId);
         this.bashStreamTruncated.add(rpcId);
         this.bashStreamText.delete(rpcId);
         this.bashStreamSent.delete(rpcId);
-        return { preview: null, truncated: first };
+        return { preview: first ? finalPreview : null, truncated: first };
     }
 
     unregisterBashCommand(rpcId: string): void {
@@ -689,12 +705,26 @@ export class PiSession {
     }
 
     pushKeepAlive(): void {
-        this.client.keepAlive(this.piIsStreaming, this.mode, this.getKeepAliveRuntime());
+        this.client.keepAlive(this.piIsStreaming || this.busy, this.mode, this.getKeepAliveRuntime());
     }
 
     updateThinkingState(thinking: boolean): void {
         this.piIsStreaming = thinking;
         this.client.keepAlive(thinking, this.mode, this.getKeepAliveRuntime());
+    }
+
+    /**
+     * Report the session as busy without claiming Pi is streaming.
+     *
+     * A shell command HAPI runs through Pi's `bash` RPC is work in progress,
+     * but Pi is not in an agent turn. The streaming flag drives the steer and
+     * abort logic, so it must not be raised for a command — the web gets its
+     * "still working" signal from the keepAlive instead.
+     */
+    setBusy(busy: boolean): void {
+        if (this.busy === busy) return;
+        this.busy = busy;
+        this.pushKeepAlive();
     }
 
     setMode(mode: 'local' | 'remote'): void {

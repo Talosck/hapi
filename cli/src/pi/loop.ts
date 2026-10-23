@@ -370,7 +370,11 @@ function handleResponse(
                 // refresh the image capability of the model that is active
                 // now — a switch that Pi answered without the model object
                 // would otherwise leave the check describing the old model.
-                const active = models.find((model) => model.modelId === session.currentModel);
+                // The catalog holds one entry per provider and model, so the
+                // provider has to be part of the match.
+                const active = models.find((model) => model.modelId === session.currentModel
+                    && (session.currentProvider === undefined
+                        || model.provider === session.currentProvider));
                 if (active?.input && active.input.length > 0) {
                     session.setCurrentModelInput(active.input);
                 }
@@ -734,83 +738,107 @@ export function wireTransportEvents(
      * aborted-settle event) join one cleanup instead of racing two.
      *
      * `timeoutMs` bounds the RPC. The abort path has a hard deadline of its
-     * own, so the cleanup may only use what is left of it.
+     * own, so the cleanup may only use what is left of it. A cleanup that is
+     * already running keeps its own budget — joining it must not extend the
+     * caller's deadline, and a caller that cannot afford to wait runs its own
+     * cleanup instead.
      */
     let abandonedQueueClear: Promise<void> | null = null;
+    let clearQueueStartedAt = 0;
+    let clearQueueBudgetMs = 0;
     let clearQueueUnsupported = false;
-    const clearAbandonedQueue = (timeoutMs: number = PI_CLEAR_QUEUE_TIMEOUT_MS): Promise<void> => {
-        if (abandonedQueueClear) return abandonedQueueClear;
-        if (clearQueueUnsupported) return Promise.resolve();
-        abandonedQueueClear = (async () => {
-            try {
-                const data = await sendPiRpcAndWait(
-                    session,
-                    transport,
-                    { type: 'clear_queue' },
-                    Math.max(1, timeoutMs),
-                );
-                const parsed = PiClearQueueResultSchema.safeParse(data);
-                if (!parsed.success) {
-                    // Pi dropped something but did not say what. Staying silent
-                    // would hide exactly the problem this cleanup exists to
-                    // prevent.
-                    logger.debug('[pi] clear_queue returned an unreadable result');
-                    session.sendSessionEvent({
-                        type: 'message',
-                        message: '⚠️ Pi cleared its queue but did not report what it dropped. A queued steer may reappear in the next turn.',
-                    });
-                    return;
-                }
-                const { entries: dropped, unattributed } = session.resolveDroppedSteers(parsed.data.steering);
-                if (unattributed > 0) {
-                    // Pi held messages HAPI never sent (a Pi extension queued
-                    // them). The positional mapping can only cover the newest
-                    // ones, so the rest cannot be attributed to a row.
-                    logger.debug(`[pi] clear_queue dropped ${unattributed} message(s) HAPI did not send`);
-                }
-                if (dropped.length === 0) return;
-                // A dropped steer never produced a native user entry, so its
-                // history registration has to be withdrawn. Otherwise the next
-                // turn's user entry would inherit this message's association.
-                for (const entry of dropped) {
+    const runClearQueue = async (budgetMs: number): Promise<void> => {
+        try {
+            const data = await sendPiRpcAndWait(
+                session,
+                transport,
+                { type: 'clear_queue' },
+                Math.max(1, budgetMs),
+            );
+            const parsed = PiClearQueueResultSchema.safeParse(data);
+            if (!parsed.success) {
+                // Pi empties its queues before it answers, so the messages are
+                // gone even though Pi did not say which. Their history
+                // registrations have to be withdrawn anyway — otherwise the
+                // next native user entry inherits the wrong row.
+                logger.debug('[pi] clear_queue returned an unreadable result');
+                for (const entry of session.takeSentSteers()) {
                     options.conversationHistory?.rejectPendingEntry(entry.localId);
                 }
-                // The reported text is the one HAPI sent — the user has to
-                // recognize their own message, not the skill block Pi
-                // expanded it into. It is still clipped, because it can be
-                // arbitrarily long.
-                const preview = dropped
-                    .map((entry) => entry.text.length > 80 ? `${entry.text.slice(0, 80)}…` : entry.text)
-                    .join(' / ');
                 session.sendSessionEvent({
                     type: 'message',
-                    message: `Pi discarded ${dropped.length} queued steer${dropped.length === 1 ? '' : 's'} when the turn was aborted: ${preview}`,
+                    message: '⚠️ Pi cleared its queue but did not report what it dropped.',
                 });
-            } catch (error) {
-                // The turn is already gone, but a failed cleanup means Pi may
-                // still hold the steer and replay it into the next turn. That
-                // has to be visible — a silently failed cleanup looks exactly
-                // like the bug this cleanup exists to prevent.
-                const detail = error instanceof Error ? error.message : String(error);
-                if (/unknown command/i.test(detail)) {
-                    // Pi builds before 1.4.0 have no clear_queue command. Say
-                    // it once — the cleanup is impossible there, so repeating
-                    // the warning on every abort would only be noise.
-                    clearQueueUnsupported = true;
-                    logger.debug(`[pi] clear_queue is not supported by this Pi build: ${detail}`);
-                    session.sendSessionEvent({
-                        type: 'message',
-                        message: '⚠️ This Pi version cannot clear queued steering messages. A queued steer may reappear in the next turn.',
-                    });
-                    return;
-                }
-                logger.debug(`[pi] clear_queue after abort failed: ${detail}`);
-                session.sendSessionEvent({
-                    type: 'message',
-                    message: `⚠️ Could not clear Pi's queued steering messages (${detail}). A queued steer may reappear in the next turn.`,
-                });
+                return;
             }
-        })().finally(() => {
+            const { entries: dropped, unattributed } = session.resolveDroppedSteers(parsed.data.steering);
+            if (unattributed > 0) {
+                // Pi held messages HAPI never sent (a Pi extension queued
+                // them). The positional mapping can only cover the newest
+                // ones, so the rest cannot be attributed to a row.
+                logger.debug(`[pi] clear_queue dropped ${unattributed} message(s) HAPI did not send`);
+            }
+            if (dropped.length === 0) return;
+            // A dropped steer never produced a native user entry, so its
+            // history registration has to be withdrawn. Otherwise the next
+            // turn's user entry would inherit this message's association.
+            for (const entry of dropped) {
+                options.conversationHistory?.rejectPendingEntry(entry.localId);
+            }
+            // The reported text is the one HAPI sent — the user has to
+            // recognize their own message, not the skill block Pi
+            // expanded it into. It is still clipped, because it can be
+            // arbitrarily long.
+            const preview = dropped
+                .map((entry) => entry.text.length > 80 ? `${entry.text.slice(0, 80)}…` : entry.text)
+                .join(' / ');
+            session.sendSessionEvent({
+                type: 'message',
+                message: `Pi discarded ${dropped.length} queued steer${dropped.length === 1 ? '' : 's'} when the turn was aborted: ${preview}`,
+            });
+        } catch (error) {
+            // The turn is already gone, but a failed cleanup means Pi may
+            // still hold the steer and replay it into the next turn. That
+            // has to be visible — a silently failed cleanup looks exactly
+            // like the bug this cleanup exists to prevent.
+            const detail = error instanceof Error ? error.message : String(error);
+            if (/unknown command/i.test(detail)) {
+                // Pi builds before 1.4.0 have no clear_queue command. Say
+                // it once — the cleanup is impossible there, so repeating
+                // the warning on every abort would only be noise.
+                clearQueueUnsupported = true;
+                logger.debug(`[pi] clear_queue is not supported by this Pi build: ${detail}`);
+                session.sendSessionEvent({
+                    type: 'message',
+                    message: '⚠️ This Pi version cannot clear queued steering messages. A queued steer may reappear in the next turn.',
+                });
+                return;
+            }
+            logger.debug(`[pi] clear_queue after abort failed: ${detail}`);
+            session.sendSessionEvent({
+                type: 'message',
+                message: `⚠️ Could not clear Pi's queued steering messages (${detail}). A queued steer may reappear in the next turn.`,
+            });
+        }
+    };
+    const clearAbandonedQueue = (timeoutMs: number = PI_CLEAR_QUEUE_TIMEOUT_MS): Promise<void> => {
+        if (clearQueueUnsupported) return Promise.resolve();
+        const budget = Math.max(1, timeoutMs);
+        const running = abandonedQueueClear;
+        if (running) {
+            const runningRemaining = clearQueueBudgetMs - (Date.now() - clearQueueStartedAt);
+            if (runningRemaining <= budget) {
+                // The running cleanup finishes inside this caller's deadline.
+                return running;
+            }
+            // It would not. Pi's clear is idempotent, so this caller runs its
+            // own cleanup with its own budget: the answer is a barrier — when
+            // it comes back, Pi's queue is empty.
+            return runClearQueue(budget);
+        }
+        clearQueueStartedAt = Date.now();
+        clearQueueBudgetMs = budget;
+        abandonedQueueClear = runClearQueue(budget).finally(() => {
             abandonedQueueClear = null;
         });
         return abandonedQueueClear;
@@ -1070,7 +1098,8 @@ export function wireTransportEvents(
                             progress: stream.preview,
                         }, session.currentModel);
                         if (converted) session.sendAgentMessage(converted);
-                    } else if (stream.truncated) {
+                    }
+                    if (stream.truncated) {
                         // Pi's stream has no cap of its own, so the live
                         // preview is stopped here instead of flooding the hub.
                         session.sendSessionEvent({

@@ -73,6 +73,25 @@ describe('convertPiEvent', () => {
         }]);
     });
 
+    it('maps Pi\'s own shell tool onto the canonical Bash card', () => {
+        // Pi names its shell tool `bash`, but the web only renders the
+        // canonical `Bash` card — anything else falls through to a raw JSON
+        // dump of the tool input.
+        const result = convertPiEvent({
+            type: 'tool_execution_start',
+            toolCallId: 'tc-1',
+            toolName: 'bash',
+            args: { command: 'ls' }
+        });
+        expect(result).toEqual([{
+            type: 'tool_call',
+            id: 'tc-1',
+            name: 'Bash',
+            input: { command: 'ls' },
+            status: 'in_progress'
+        }]);
+    });
+
     it('maps tool execution progress onto the running tool call id', () => {
         expect(convertPiEvent({
             type: 'tool_execution_update',

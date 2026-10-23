@@ -8,8 +8,7 @@ import { createRunnerLifecycle, createModeChangeHandler, setControlledByUser } f
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import { PiTransport } from './piTransport';
 import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
-import { normalizeNativeSessionTitle } from '@/agent/nativeSessionTitle';
-import { applySessionDisplayRename } from '@/agent/sessionDisplayRename';
+import { normalizeSessionDisplayTitle } from '@/agent/sessionDisplayRename';
 import { PiSession } from './session';
 import { PiConversationHistory, PiHistoryRestoreError } from './conversationHistory';
 import { parsePiModels, parsePiCommands, PiRpcTimeoutError, piBashMessageId, sendPiRpcAndWait, sendPiRpcAndWaitWithId, wireTransportEvents, PI_CLEAR_QUEUE_TIMEOUT_MS } from './loop';
@@ -195,6 +194,21 @@ export async function preparePiUserMessage(
 /** A failed source restore leaves the live wrapper on an unknown native branch. */
 export function failPiHistoryOnRestoreError(error: unknown, failNativeStartup: (error: Error) => void): void {
     if (error instanceof PiHistoryRestoreError) failNativeStartup(error);
+}
+
+/**
+ * Apply an explicit user rename to a Pi session.
+ *
+ * Pi is launched with an extension that lets the model title the chat as its
+ * very first action, and that title lands in the same field as a rename. The
+ * marker records that this name was the user's, so the model's title does not
+ * replace it on the next message.
+ */
+export function applyPiUserRename(client: PiSession['client'], title: string): void {
+    client.updateMetadata((metadata) => {
+        if (metadata.name?.trim() === title && metadata.piUserNamedSession) return metadata;
+        return { ...metadata, name: title, piUserNamedSession: true };
+    });
 }
 
 export async function runPi(opts: {
@@ -1042,6 +1056,19 @@ export async function runPi(opts: {
                 );
                 piSession.registerBashCommand(bashRpcId, command.command);
                 const messageId = piBashMessageId(bashRpcId);
+                // Pi reports no start event for a command, so the card would
+                // only appear with the first output chunk — a silent command
+                // would show nothing at all for two minutes. The card is
+                // created right away, and the session reports itself busy.
+                const startedCall = convertAgentMessage({
+                    type: 'tool_call',
+                    id: messageId,
+                    name: 'Bash',
+                    input: { command: command.command },
+                    status: 'in_progress',
+                }, piSession.currentModel);
+                if (startedCall) piSession.sendAgentMessage(startedCall);
+                piSession.setBusy(true);
                 try {
                     const data = await bashResult;
                     const parsed = PiBashResultSchema.safeParse(data);
@@ -1072,6 +1099,17 @@ export async function runPi(opts: {
                         sendEvent('⚠️ Shell command cancelled.');
                     } else if (exitCode !== undefined && exitCode !== 0) {
                         sendEvent(`⚠️ Shell command exited with code ${exitCode}.`);
+                    }
+                    if (parsed.data.truncated) {
+                        // Pi caps the output it hands back (50 KiB / 2000 lines,
+                        // keeping the tail) and writes the whole text to a file.
+                        // Without this the user reads a partial log that looks
+                        // complete — and the head, where errors usually are, is
+                        // exactly what is missing.
+                        const where = parsed.data.fullOutputPath
+                            ? ` The full output is in ${parsed.data.fullOutputPath}.`
+                            : '';
+                        sendEvent(`⚠️ Pi truncated the command output — only the end of it is shown.${where}`);
                     }
                 } catch (error) {
                     const detail = errorDetail(error);
@@ -1115,6 +1153,7 @@ export async function runPi(opts: {
                     }, piSession.currentModel);
                     if (toolResult) piSession.sendAgentMessage(toolResult);
                 } finally {
+                    piSession.setBusy(false);
                     piSession.unregisterBashCommand(bashRpcId);
                 }
                 return;
@@ -1138,22 +1177,20 @@ export async function runPi(opts: {
                     sendEvent('⚠️ Usage: /name <name>');
                     return;
                 }
-                // The title has to be one HAPI can actually show. A placeholder
-                // name ("Untitled", a generated session date) is rejected by
-                // the title sync, so renaming to it would report success while
-                // changing nothing.
-                const title = normalizeNativeSessionTitle(command.name);
+                // The name is stored in the field the web shows, so it is
+                // normalized the same way the web's own rename normalizes it.
+                const title = normalizeSessionDisplayTitle(command.name);
                 if (!title) {
-                    sendEvent(`⚠️ "${command.name}" is not a usable session name.`);
+                    sendEvent('⚠️ Usage: /name <name>');
                     return;
                 }
                 try {
-                    await sendPiRpcAndWait(piSession, transport, { type: 'set_session_name', name: command.name });
+                    await sendPiRpcAndWait(piSession, transport, { type: 'set_session_name', name: title });
                     // Pi's native name lands in metadata.summary, but the web
                     // shows metadata.name first — so an explicit rename has to
                     // write the display name as well, or it stays invisible
                     // under the name the title extension already set.
-                    applySessionDisplayRename(piSession.client, title);
+                    applyPiUserRename(piSession.client, title);
                     sendEvent(`Session renamed to "${title}".`);
                 } catch (error) {
                     sendEvent(`⚠️ Could not rename the Pi session: ${errorDetail(error)}`);
@@ -1431,10 +1468,9 @@ export async function runPi(opts: {
                     throw error;
                 })
                 .then(async (): Promise<{ success: true }> => {
-                    // Pi's steering queue survives the interrupted compaction
-                    // as well, so the abandoned steers have to be cleared here
-                    // too — a steer that outlives its turn would be replayed
-                    // into the next one.
+                    // An aborted turn does not drain Pi's steering queue, so
+                    // the interrupted compaction can leave a steer behind that
+                    // the next run would replay — clear it here as well.
                     await transportEvents?.clearAbandonedQueue();
                     return { success: true };
                 })
@@ -1455,6 +1491,14 @@ export async function runPi(opts: {
         const hadNativeWork = hadActivePrompt
             || piSession.piIsStreaming
             || piSession.activeBashRpcId !== undefined;
+        // A steer that Pi is still processing has not been queued yet, and Pi
+        // does not serialize its RPC commands — a queue cleanup handled in the
+        // meantime lands before the steer reaches the queue, and the steer
+        // then survives the cleanup. So the abort waits for the steer to
+        // reach Pi: the lease is what the steer dispatch needs as well, so
+        // holding it either lets the steer finish first or keeps the steer
+        // local, where it falls back to the prompt queue instead.
+        const steerInFlight = steerDispatcher?.hasPending === true;
         const abortBoundary = hadActivePrompt ? createAbortGuard(deadlineAt) : null;
         if (abortBoundary) {
             activeAbortGuard = abortBoundary.guard;
@@ -1465,7 +1509,7 @@ export async function runPi(opts: {
         // Reserve our mutation slot synchronously, after installing the pump
         // barrier. A prompt that settles while an older config mutation owns the
         // lock therefore cannot start the next FIFO item or change our target.
-        const acquireRuntimeMutation = hadNativeWork
+        const acquireRuntimeMutation = (hadNativeWork || steerInFlight)
             ? piSession.acquireRuntimeMutation()
             : null;
 
@@ -1476,10 +1520,11 @@ export async function runPi(opts: {
             let firstAbortConfirmed = false;
             try {
                 if (!acquireRuntimeMutation) {
-                    // There is no turn to stop, but Pi may still hold steering
-                    // messages from an earlier one: Pi skips the last steering
-                    // drain when a turn ends normally, so a steer can outlive
-                    // the turn it was meant for. Clear the queue anyway — the
+                    // There is no turn to stop and no steer on its way to Pi,
+                    // but Pi may still hold a steering message: an aborted
+                    // turn does not drain the steering queue, so a steer that
+                    // was accepted but never delivered stays there and is
+                    // replayed into the next run. Clear the queue anyway — the
                     // cleanup is idempotent, and the prompt pump stays blocked
                     // until it finished, so no new prompt can race it.
                     await transportEvents?.clearAbandonedQueue(
@@ -1542,15 +1587,15 @@ export async function runPi(opts: {
                         }
                     }
                 }
-                // Pi's abort stops the turn but keeps its steering queue, so an
-                // accepted steer that was never delivered would be replayed
-                // into the next turn as a fresh user message. The queue belongs
-                // to Pi, not to the turn: a steer that outlives its turn would
-                // be replayed into the next one, so every abort clears it —
-                // also when the abort RPC was skipped because the turn had
-                // already settled. The cleanup runs while the runtime mutation
-                // lease is still held: the next prompt must not start before
-                // the abandoned steers are gone.
+                // Pi's abort stops the turn but keeps its steering queue: an
+                // aborted turn does not drain it, so an accepted steer that
+                // was never delivered would be replayed into the next run as
+                // a fresh user message. The queue belongs to Pi, not to the
+                // turn, so every abort clears it — also when the abort RPC was
+                // skipped because the turn had already settled. The cleanup
+                // runs while the runtime mutation lease is still held: the
+                // next prompt must not start before the abandoned steers are
+                // gone.
                 await transportEvents?.clearAbandonedQueue(
                     Math.min(PI_CLEAR_QUEUE_TIMEOUT_MS, Math.max(1, deadlineAt - Date.now())),
                 );

@@ -92,11 +92,13 @@ function collectLines(roots: unknown[], leafId: string | undefined, lines: strin
         // The leaf is where the session currently is, so it is marked.
         const marker = entryId !== undefined && entryId === leafId ? ' ← current' : '';
         lines.push(`${indent}${connector}${entry ? summarizeEntry(entry) : 'entry'}${marker}`);
-        if (lines.length >= PI_SESSION_TREE_MAX_LINES) return false;
         const children = Array.isArray(record.children) ? record.children : [];
         for (let index = children.length - 1; index >= 0; index--) {
             stack.push({ node: children[index], depth: item.depth + 1 });
         }
+        // The cap is checked after the children are queued, so a tree that
+        // ends exactly at the cap is not reported as cut short.
+        if (lines.length >= PI_SESSION_TREE_MAX_LINES) return stack.length === 0;
     }
     return true;
 }
