@@ -78,6 +78,23 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn() }
 }))
 
+// The transcript of the agent, which the launcher reads when it reattaches to
+// a session the agent can resume.
+const transcriptState = vi.hoisted(() => ({
+    messagesPath: null as string | null,
+    messages: [] as unknown[]
+}))
+
+vi.mock('./utils/mcodeUsage', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('./utils/mcodeUsage')>()),
+    findMcodeMessagesPath: vi.fn(async () => transcriptState.messagesPath)
+}))
+
+vi.mock('./utils/mcodeSessionTranscript', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('./utils/mcodeSessionTranscript')>()),
+    readMcodeTranscriptToolMessages: vi.fn(async () => transcriptState.messages)
+}))
+
 import { mcodeRemoteLauncher } from './mcodeRemoteLauncher'
 
 type QueuedMessage = { message: string; mode: McodeMode }
@@ -93,6 +110,10 @@ function createBackend(overrides: Record<string, unknown> = {}) {
         getAgentPid: vi.fn(() => 4242),
         newSession: vi.fn(async () => 'mcode-session-1'),
         loadSession: vi.fn(async () => 'mcode-session-1'),
+        // An agent that cannot resume is reattached with `session/load`, which
+        // replays the conversation into HAPI.
+        supportsSessionResume: vi.fn(() => false),
+        resumeSession: vi.fn(async () => 'mcode-session-1'),
         setModel: vi.fn(async (_sessionId: string, _model: string) => {}),
         setSessionMode: vi.fn(async (_sessionId: string, _mode: string) => {}),
         setConfigOption: vi.fn(async (_sessionId: string, _id: string, _value: string) => {}),
@@ -2595,3 +2616,100 @@ describe('mcodeRemoteLauncher agent restart', () => {
         queue.close()
     }, 45_000)
 })
+
+describe('mcodeRemoteLauncher session resume', () => {
+    afterEach(() => {
+        transcriptState.messagesPath = null
+        transcriptState.messages = []
+    })
+
+    it('reattaches without replaying the conversation when the agent can resume', async () => {
+        // `session/load` makes the agent stream the whole conversation back
+        // into HAPI - every message, every thought - only for HAPI to drop it
+        // again. `session/resume` reattaches to the same conversation without
+        // the replay.
+        const backend = createBackend({
+            supportsSessionResume: vi.fn(() => true)
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+        session.sessionId = 'mcode-existing'
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(backend.resumeSession).toHaveBeenCalledWith(expect.objectContaining({
+            sessionId: 'mcode-existing'
+        }))
+        expect(backend.loadSession).not.toHaveBeenCalled()
+    })
+
+    it('falls back to the replay when the agent cannot resume', async () => {
+        const backend = createBackend()
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+        session.sessionId = 'mcode-existing'
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(backend.loadSession).toHaveBeenCalled()
+        expect(backend.resumeSession).not.toHaveBeenCalled()
+    })
+
+    it('reconciles the background work with the transcript of the agent', async () => {
+        // The turns the agent ran on its own are not in HAPI's transcript, so a
+        // runner that attaches to an existing session has to learn about them
+        // from the agent's own file.
+        const backend = createBackend({
+            supportsSessionResume: vi.fn(() => true)
+        })
+        transcriptState.messagesPath = '/tmp/mcode-session/messages.jsonl'
+        transcriptState.messages = [
+            {
+                type: 'tool_call',
+                id: 'call-1',
+                name: 'bash',
+                input: { command: 'npm run dev', run_in_background: true },
+                status: 'completed'
+            },
+            {
+                type: 'tool_result',
+                id: 'call-1',
+                output: {
+                    content: [{ type: 'text', text: '<bash_background task_id="bg_1">Started.</bash_background>' }],
+                    details: { task_id: 'bg_1', status: 'started' }
+                },
+                status: 'completed'
+            }
+        ]
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+        session.sessionId = 'mcode-existing'
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const snapshots = session.sendSessionEvent.mock.calls
+            .map((call) => call[0] as { type?: string; tasks?: unknown })
+            .filter((event) => event.type === 'background-task-snapshot')
+        expect(snapshots).toEqual([
+            {
+                type: 'background-task-snapshot',
+                tasks: [expect.objectContaining({ id: 'bg_1', command: 'npm run dev' })]
+            }
+        ])
+    })
+
+    it('keeps the ledger empty when the transcript cannot be read', async () => {
+        const backend = createBackend({
+            supportsSessionResume: vi.fn(() => true)
+        })
+        transcriptState.messagesPath = null
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+        session.sessionId = 'mcode-existing'
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        expect(backend.resumeSession).toHaveBeenCalled()
+        const snapshots = session.sendSessionEvent.mock.calls
+            .map((call) => call[0] as { type?: string })
+            .filter((event) => event.type === 'background-task-snapshot')
+        expect(snapshots).toEqual([])
+    })
+})
+

@@ -1438,6 +1438,84 @@ describe('AcpSdkBackend', () => {
         expect(backend.supportsLoadSession()).toBe(false);
     });
 
+    it('supportsSessionResume reflects the session capabilities of the agent', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            initializeResult: { protocolVersion: number; agentCapabilities?: { sessionCapabilities?: { resume?: unknown } } } | null;
+        };
+
+        backendInternal.initializeResult = {
+            protocolVersion: 1,
+            agentCapabilities: { sessionCapabilities: { resume: true } }
+        };
+        expect(backend.supportsSessionResume()).toBe(true);
+
+        // An agent may also advertise the capability as an options object.
+        backendInternal.initializeResult = {
+            protocolVersion: 1,
+            agentCapabilities: { sessionCapabilities: { resume: {} } }
+        };
+        expect(backend.supportsSessionResume()).toBe(true);
+
+        backendInternal.initializeResult = {
+            protocolVersion: 1,
+            agentCapabilities: { sessionCapabilities: { resume: false } }
+        };
+        expect(backend.supportsSessionResume()).toBe(false);
+
+        backendInternal.initializeResult = { protocolVersion: 1 };
+        expect(backend.supportsSessionResume()).toBe(false);
+    });
+
+    it('reattaches to a session with session/resume, without a replay', async () => {
+        const backend = new AcpSdkBackend({ command: 'mcode' });
+        const calls: Array<{ method: string; params: unknown }> = [];
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: (method: string, params: unknown) => Promise<unknown>; close: () => Promise<void> } | null;
+        };
+        backendInternal.transport = {
+            sendRequest: async (method, params) => {
+                calls.push({ method, params });
+                if (method === 'session/resume') {
+                    return { sessionId: 'session-1' };
+                }
+                return null;
+            },
+            close: async () => {}
+        };
+
+        const sessionId = await backend.resumeSession({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            mcpServers: []
+        });
+
+        expect(sessionId).toBe('session-1');
+        expect(calls).toEqual([{
+            method: 'session/resume',
+            params: { sessionId: 'session-1', cwd: '/repo', mcpServers: [] }
+        }]);
+    });
+
+    it('keeps the session of the caller when the agent resumes without naming one', async () => {
+        const backend = new AcpSdkBackend({ command: 'mcode' });
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: (method: string, params: unknown) => Promise<unknown>; close: () => Promise<void> } | null;
+        };
+        backendInternal.transport = {
+            sendRequest: async () => null,
+            close: async () => {}
+        };
+
+        const sessionId = await backend.resumeSession({
+            sessionId: 'session-1',
+            cwd: '/repo',
+            mcpServers: []
+        });
+
+        expect(sessionId).toBe('session-1');
+    });
+
     it('setMode falls back to session/set_config_option when session/set_mode is missing', async () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         const calls: Array<{ method: string; params: unknown }> = [];

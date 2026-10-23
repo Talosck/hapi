@@ -7,6 +7,7 @@ import {
     findMcodeSessionDir,
     getMcodeDataDir
 } from './mcodeSessionDirs';
+import { MCODE_TRANSCRIPT_FILE } from './mcodeSessionTranscript';
 
 /**
  * Usage for one model call, as persisted by MiniMax Code in
@@ -124,7 +125,7 @@ export async function findMcodeMessagesPath(
     dataDir: string = getMcodeDataDir()
 ): Promise<string | null> {
     const sessionDir = await findMcodeSessionDir(sessionId, dataDir);
-    return sessionDir ? join(sessionDir, 'messages.jsonl') : null;
+    return sessionDir ? join(sessionDir, MCODE_TRANSCRIPT_FILE) : null;
 }
 
 /** Parses one messages.jsonl line; non-assistant or usage-less lines yield null. */

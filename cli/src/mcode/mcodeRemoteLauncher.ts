@@ -59,6 +59,8 @@ import {
 } from './utils/mcodeExtensions';
 import { McodeExtensionControl } from './utils/mcodeExtensionControl';
 import { readMcodeTurnLease, type McodeTurnLeaseState } from './utils/mcodeTurnLease';
+import { findMcodeMessagesPath } from './utils/mcodeUsage';
+import { readMcodeTranscriptToolMessages } from './utils/mcodeSessionTranscript';
 import { McodeConversationHistory } from './conversationHistory';
 
 /** First wait before retrying a turn the agent refused because it was busy. */
@@ -617,22 +619,40 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         let acpSessionId: string;
         if (session.sessionId) {
             try {
-                acpSessionId = await backend.loadSession({
-                    sessionId: session.sessionId,
-                    cwd: session.path,
-                    mcpServers: acpMcpServers
-                }, {
-                    // The agent replays the conversation it remembers. The
-                    // replay holds the turns it ran on its own - the turn in
-                    // which it read a background task that finished while HAPI
-                    // was not watching - so the ledger is reconciled with it.
-                    onHistory: (messages) => this.backgroundTasks.reconcile(
-                        // The replay carries the raw tool names of the agent
-                        // ("bash", "task_output"); the ledger knows them by
-                        // their canonical name.
-                        messages.map((message) => normalizeMcodeToolCall(message))
-                    )
-                });
+                if (backend.supportsSessionResume()) {
+                    // The agent can reattach to the session it remembers
+                    // without replaying the conversation into HAPI. The replay
+                    // is what `session/load` does, and on a long session it is
+                    // hundreds of kilobytes of JSON that are parsed and dropped
+                    // - the transcript already holds those messages.
+                    acpSessionId = await backend.resumeSession({
+                        sessionId: session.sessionId,
+                        cwd: session.path,
+                        mcpServers: acpMcpServers
+                    });
+                    // The replay also carried the turns the agent ran on its
+                    // own - the turn in which it read a background task that
+                    // finished while HAPI was not watching - so the ledger is
+                    // reconciled with the agent's own transcript instead.
+                    await this.reconcileBackgroundTasksFromTranscript(acpSessionId);
+                } else {
+                    acpSessionId = await backend.loadSession({
+                        sessionId: session.sessionId,
+                        cwd: session.path,
+                        mcpServers: acpMcpServers
+                    }, {
+                        // The agent replays the conversation it remembers. The
+                        // replay holds the turns it ran on its own - the turn in
+                        // which it read a background task that finished while HAPI
+                        // was not watching - so the ledger is reconciled with it.
+                        onHistory: (messages) => this.backgroundTasks.reconcile(
+                            // The replay carries the raw tool names of the agent
+                            // ("bash", "task_output"); the ledger knows them by
+                            // their canonical name.
+                            messages.map((message) => normalizeMcodeToolCall(message))
+                        )
+                    });
+                }
             } catch (error) {
                 logger.warn('[mcode-remote] resume failed, starting new session', error);
                 session.sendSessionEvent({
@@ -731,6 +751,39 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         ]);
 
         return acpSessionId;
+    }
+
+    /**
+     * Rebuilds the background-task ledger from the agent's own transcript.
+     *
+     * The ledger is what the user is shown: the background work the session
+     * still has going. It is built from the tool calls the agent made, and a
+     * runner that attaches to an existing session has not seen any of them -
+     * the agent may have launched a task, or read one that finished, while
+     * HAPI was not watching.
+     *
+     * `session/load` used to hand those calls back as a replay of the whole
+     * conversation. The transcript on disk holds the same tool calls in the
+     * same order, so it is read from there instead: the reattach does not
+     * carry the conversation across the wire just to keep the ledger right.
+     *
+     * A transcript that cannot be read leaves the ledger empty. That is the
+     * safe direction: the ledger undercounts the work in flight instead of
+     * counting a task that is already gone.
+     */
+    private async reconcileBackgroundTasksFromTranscript(sessionId: string): Promise<void> {
+        try {
+            const transcriptPath = await findMcodeMessagesPath(sessionId);
+            if (!transcriptPath) return;
+            const messages = await readMcodeTranscriptToolMessages(transcriptPath);
+            if (messages.length === 0) return;
+            // The transcript carries the raw tool names of the agent
+            // ("bash", "task_output"); the ledger knows them by their
+            // canonical name.
+            this.backgroundTasks.reconcile(messages.map((message) => normalizeMcodeToolCall(message)));
+        } catch (error) {
+            logger.debug('[mcode-remote] transcript reconcile failed', error);
+        }
     }
 
     protected async runMainLoop(): Promise<void> {
@@ -2223,6 +2276,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     }
 
     private emitAgentMessage(message: AgentMessage): void {
+        // MiniMax Code declares the files it hands over in a `<deliver-assets>`
+        // block, because the MiniMax Code apps render that block as a file
+        // card. HAPI's clients do not know the markup, so it would reach the
+        // chat - and the transcript - as raw XML. The block is taken out of
+        // the answer and the files it names are reported on their own.
         const converted = convertAgentMessage(message, this.currentBackendModel);
         if (converted) {
             this.session.sendAgentMessage(converted);

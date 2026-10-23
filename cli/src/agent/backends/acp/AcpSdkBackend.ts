@@ -386,6 +386,22 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     /**
+     * Whether the agent advertises `session/resume` support.
+     *
+     * `session/resume` reattaches to a session the agent already remembers
+     * without replaying the conversation into the client, while `session/load`
+     * replays it. The agent lists the capability in
+     * `agentCapabilities.sessionCapabilities` during initialize, so the answer
+     * comes from the handshake.
+     */
+    supportsSessionResume(): boolean {
+        const capabilities = this.initializeResult?.agentCapabilities?.sessionCapabilities;
+        if (!isObject(capabilities)) return false;
+        const resume = capabilities.resume;
+        return resume === true || isObject(resume);
+    }
+
+    /**
      * The agent's `_meta` block from the initialize response.
      *
      * Agents describe their extension surface here (e.g. MiniMax Code's
@@ -615,6 +631,46 @@ export class AcpSdkBackend implements AgentBackend {
 
         const loadedSessionId = isObject(response) ? asString(response.sessionId) : null;
         const sessionId = loadedSessionId ?? config.sessionId;
+        this.activeSessionId = sessionId;
+        this.captureSessionMetadata(sessionId, response);
+        return sessionId;
+    }
+
+    /**
+     * Reattaches to a session the agent already remembers, without replaying it.
+     *
+     * `session/load` makes the agent stream the whole conversation back into
+     * the client - every user message, every thought, every answer - and the
+     * caller has to throw it away, because the transcript already holds those
+     * messages. On a long session that is hundreds of kilobytes of JSON that
+     * are parsed and dropped on every reconnect.
+     *
+     * `session/resume` takes the same parameters and reattaches to the same
+     * conversation - the agent still answers from the earlier turns - but it
+     * does not replay the history. A caller that needs the conversation back
+     * has to read it from wherever it keeps it.
+     */
+    async resumeSession(config: AgentSessionConfig & { sessionId: string }): Promise<string> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+
+        const response = await withRetry(
+            () => this.transport!.sendRequest('session/resume', {
+                sessionId: config.sessionId,
+                cwd: config.cwd,
+                mcpServers: config.mcpServers
+            }),
+            {
+                ...AcpSdkBackend.INIT_RETRY_OPTIONS,
+                onRetry: (error, attempt, nextDelayMs) => {
+                    logger.debug(`[ACP] session/resume attempt ${attempt} failed, retrying in ${nextDelayMs}ms`, error);
+                }
+            }
+        );
+
+        const resumedSessionId = isObject(response) ? asString(response.sessionId) : null;
+        const sessionId = resumedSessionId ?? config.sessionId;
         this.activeSessionId = sessionId;
         this.captureSessionMetadata(sessionId, response);
         return sessionId;
