@@ -44,6 +44,18 @@ class CatalogTest {
     }
 
     @Test
+    fun `mcode modes use the agent's own wording`() {
+        // MiniMax Code names its modes Ask, Auto and Full access. "Yolo" is
+        // the wording of another agent.
+        assertEquals(
+            listOf("Ask", "Auto", "Full access", "Plan"),
+            PermissionModes.MCODE.map { it.labelForFlavor("mcode") }
+        )
+        // The other agents keep the shared wording.
+        assertEquals("Yolo", PermissionMode.BypassPermissions.labelForFlavor("claude"))
+    }
+
+    @Test
     fun `per-flavor mode lists match getPermissionModesForFlavor`() {
         assertEquals(
             listOf("default", "acceptEdits", "auto", "bypassPermissions", "plan"),

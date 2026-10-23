@@ -194,7 +194,7 @@
         ],
         "mcode": [
             {
-                "label": "Default",
+                "label": "Ask",
                 "mode": "default",
                 "tone": "neutral"
             },
@@ -204,12 +204,12 @@
                 "tone": "warning"
             },
             {
-                "label": "Yolo",
+                "label": "Full access",
                 "mode": "bypassPermissions",
                 "tone": "danger"
             },
             {
-                "label": "Plan Mode",
+                "label": "Plan",
                 "mode": "plan",
                 "tone": "info"
             }

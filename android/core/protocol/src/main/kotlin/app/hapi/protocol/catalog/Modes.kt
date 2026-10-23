@@ -42,6 +42,25 @@ enum class PermissionMode(
         /** Resolve a wire string; unknown → null (render raw, offer no switch). */
         fun fromWireId(raw: String?): PermissionMode? = raw?.let(BY_WIRE_ID::get)
     }
+
+    /**
+     * The wording of the agent that runs the mode.
+     *
+     * Ports `getPermissionModeLabel(mode, flavor)` (`shared/src/modes.ts`).
+     * MiniMax Code names its modes Ask, Auto and Full access; "Yolo" is the
+     * wording of another agent, and a user who reads "Yolo" in HAPI and "Ask"
+     * in the agent's own window has to work out that both mean the same thing.
+     */
+    fun labelForFlavor(flavor: String?): String = when (flavor) {
+        "mcode" -> when (this) {
+            Default -> "Ask"
+            Auto -> "Auto"
+            BypassPermissions -> "Full access"
+            Plan -> "Plan"
+            else -> label
+        }
+        else -> label
+    }
 }
 
 object PermissionModes {

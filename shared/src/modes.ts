@@ -95,6 +95,25 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
 
 export type PermissionModeTone = 'neutral' | 'info' | 'warning' | 'danger'
 
+/**
+ * The wording an agent uses for a permission mode.
+ *
+ * Most agents share the catalog's wording. MiniMax Code names its own modes
+ * Ask, Auto and Full access, and a user who reads "Yolo" in HAPI and "Ask"
+ * in the agent's own window has to work out that both mean the same thing.
+ *
+ * The web localizes these names; the native clients render the english text
+ * (localization is layered above the catalog, see the iOS port).
+ */
+export const PERMISSION_MODE_FLAVOR_LABELS: Record<string, Partial<Record<PermissionMode, string>>> = {
+    mcode: {
+        default: 'Ask',
+        auto: 'Auto',
+        bypassPermissions: 'Full access',
+        plan: 'Plan'
+    }
+}
+
 export const PERMISSION_MODE_TONES: Record<PermissionMode, PermissionModeTone> = {
     default: 'neutral',
     acceptEdits: 'warning',
@@ -127,8 +146,8 @@ export const CODEX_COLLABORATION_MODE_LABELS: Record<CodexCollaborationMode, str
     plan: 'Plan'
 }
 
-export function getPermissionModeLabel(mode: PermissionMode): string {
-    return PERMISSION_MODE_LABELS[mode]
+export function getPermissionModeLabel(mode: PermissionMode, flavor?: string | null): string {
+    return PERMISSION_MODE_FLAVOR_LABELS[flavor ?? '']?.[mode] ?? PERMISSION_MODE_LABELS[mode]
 }
 
 export function getPermissionModeTone(mode: PermissionMode): PermissionModeTone {
@@ -181,7 +200,7 @@ export function getPermissionModesForFlavor(flavor?: string | null): readonly Pe
 export function getPermissionModeOptionsForFlavor(flavor?: string | null): PermissionModeOption[] {
     return getPermissionModesForFlavor(flavor).map((mode) => ({
         mode,
-        label: getPermissionModeLabel(mode),
+        label: getPermissionModeLabel(mode, flavor),
         tone: getPermissionModeTone(mode)
     }))
 }

@@ -79,12 +79,6 @@ describe('getPermissionModesForFlavor', () => {
     })
 })
 
-describe('getPermissionModeOptionsForFlavor', () => {
-    test("returns [] for pi (no permission options offered)", () => {
-        expect(getPermissionModeOptionsForFlavor('pi')).toEqual([])
-    })
-})
-
 describe('isPermissionModeAllowedForFlavor', () => {
     test("allows only the supported Grok modes", () => {
         expect(isPermissionModeAllowedForFlavor('default', 'grok')).toBe(true)
@@ -125,6 +119,43 @@ describe('getPermissionModeLabel', () => {
 
     test("default label is 'Default'", () => {
         expect(getPermissionModeLabel('default')).toBe('Default')
+    })
+
+    test('uses the wording of the agent that runs the mode', () => {
+        // MiniMax Code calls its modes Ask, Auto and Full access. "Yolo" is
+        // the wording of another agent, and a user who reads "Yolo" in HAPI
+        // and "Ask" in the agent's own window has to work out that both mean
+        // the same thing.
+        expect(getPermissionModeLabel('default', 'mcode')).toBe('Ask')
+        expect(getPermissionModeLabel('auto', 'mcode')).toBe('Auto')
+        expect(getPermissionModeLabel('bypassPermissions', 'mcode')).toBe('Full access')
+        expect(getPermissionModeLabel('plan', 'mcode')).toBe('Plan')
+    })
+
+    test('leaves the other agents with the shared wording', () => {
+        expect(getPermissionModeLabel('bypassPermissions', 'codex')).toBe('Yolo')
+        expect(getPermissionModeLabel('bypassPermissions', 'claude')).toBe('Yolo')
+        expect(getPermissionModeLabel('default', undefined)).toBe('Default')
+    })
+})
+
+describe('getPermissionModeOptionsForFlavor', () => {
+    test("returns [] for pi (no permission options offered)", () => {
+        expect(getPermissionModeOptionsForFlavor('pi')).toEqual([])
+    })
+
+    test('labels the MiniMax Code options the way the agent names them', () => {        const options = getPermissionModeOptionsForFlavor('mcode')
+        expect(options.map((option) => option.label)).toEqual([
+            'Ask',
+            'Auto',
+            'Full access',
+            'Plan'
+        ])
+    })
+
+    test('keeps the shared labels for the other agents', () => {
+        const options = getPermissionModeOptionsForFlavor('claude')
+        expect(options.find((option) => option.mode === 'bypassPermissions')?.label).toBe('Yolo')
     })
 })
 

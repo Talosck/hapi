@@ -111,13 +111,13 @@ struct SessionConfigView: View {
 
     private var permissionMenu: some View {
         SessionConfigMenu(
-            title: "Permission mode", value: Text(verbatim: model.permission.label), tone: model.permission.tone
+            title: "Permission mode", value: Text(verbatim: model.permission.label(forFlavor: model.config.flavor)), tone: model.permission.tone
         ) {
             Picker("Permission mode", selection: Binding(
                 get: { model.permission }, set: { model.selectPermission($0) }
             )) {
                 if !model.config.permissionModes.contains(where: { $0.mode == model.permission }) {
-                    permissionOption(PermissionModeOption(mode: model.permission)).disabled(true)
+                    permissionOption(PermissionModeOption(mode: model.permission, flavor: model.config.flavor)).disabled(true)
                 }
                 ForEach(model.config.permissionModes, id: \.mode) { option in
                     permissionOption(option)

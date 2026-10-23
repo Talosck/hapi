@@ -66,6 +66,23 @@ public enum PermissionMode: String, Codable, CaseIterable, Sendable {
         case .alwaysProceed: return .danger
         }
     }
+
+    /// The label this mode carries for a flavor.
+    ///
+    /// Ports `getPermissionModeLabel(mode, flavor)` (`shared/src/modes.ts`).
+    /// MiniMax Code names its modes Ask, Auto and Full access; "Yolo" is the
+    /// wording of another agent, and a user who reads "Yolo" in HAPI and "Ask"
+    /// in the agent's own window has to work out that both mean the same thing.
+    public func label(forFlavor flavor: String?) -> String {
+        guard AgentFlavor(rawValue: flavor ?? "claude") == .mcode else { return label }
+        switch self {
+        case .default: return "Ask"
+        case .auto: return "Auto"
+        case .bypassPermissions: return "Full access"
+        case .plan: return "Plan"
+        default: return label
+        }
+    }
 }
 
 /// A picker-ready permission mode entry (`PermissionModeOption`).
@@ -77,6 +94,13 @@ public struct PermissionModeOption: Equatable, Sendable {
     public init(mode: PermissionMode) {
         self.mode = mode
         self.label = mode.label
+        self.tone = mode.tone
+    }
+
+    /// The entry as the flavor that runs the mode names it.
+    public init(mode: PermissionMode, flavor: String?) {
+        self.mode = mode
+        self.label = mode.label(forFlavor: flavor)
         self.tone = mode.tone
     }
 }
@@ -124,7 +148,7 @@ public func permissionModes(forFlavor flavor: String?) -> [PermissionMode] {
 
 /// Ports `getPermissionModeOptionsForFlavor(flavor)`.
 public func permissionModeOptions(forFlavor flavor: String?) -> [PermissionModeOption] {
-    permissionModes(forFlavor: flavor).map(PermissionModeOption.init(mode:))
+    permissionModes(forFlavor: flavor).map { PermissionModeOption(mode: $0, flavor: flavor) }
 }
 
 /// Ports `isPermissionModeAllowedForFlavor(mode, flavor)`.

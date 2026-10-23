@@ -86,7 +86,7 @@ internal fun SessionConfigSheetContent(
             SectionTitle(stringResource(R.string.chat_config_permission_mode))
             config.permissionModes.forEach { mode ->
                 OptionRow(
-                    label = mode.label,
+                    label = mode.labelForFlavor(config.flavor),
                     selected = mode.wireId == (config.permissionMode ?: "default"),
                     tone = mode.tone,
                     onClick = { onSetPermissionMode(mode) },

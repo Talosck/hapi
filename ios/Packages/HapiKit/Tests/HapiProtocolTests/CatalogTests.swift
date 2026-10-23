@@ -150,6 +150,15 @@ struct CatalogTests {
         #expect(options.first?.tone == .neutral)
     }
 
+    @Test func mcodeModesUseTheAgentsOwnWording() {
+        // MiniMax Code names its modes Ask, Auto and Full access. "Yolo" is
+        // the wording of another agent.
+        let options = permissionModeOptions(forFlavor: "mcode")
+        #expect(options.map(\.label) == ["Ask", "Auto", "Full access", "Plan"])
+        // The other agents keep the shared wording.
+        #expect(permissionModeOptions(forFlavor: "claude").map(\.label).contains("Yolo"))
+    }
+
     // MARK: - Agent flavors (modes.ts + flavors.ts)
 
     @Test func knownFlavorsMatchAgentFlavorsOrder() {

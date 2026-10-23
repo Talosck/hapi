@@ -1,7 +1,8 @@
 import {
     getCodexCollaborationModeOptions,
     getCopilotAgentModeOptions,
-    getPermissionModeOptionsForFlavor,
+    getPermissionModesForFlavor,
+    getPermissionModeTone,
     type CopilotAgentMode
 } from '@hapi/protocol'
 import { ComposerPrimitive, useAui, useAuiState } from '@assistant-ui/react'
@@ -57,6 +58,7 @@ import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePic
 import { SortableComposerAttachments } from '@/components/AssistantChat/SortableComposerAttachments'
 import { ComposerParkingContext } from '@/components/AssistantChat/composerParkingContext'
 import type { ScratchlistParkResult } from '@/lib/scratchlistAttachmentFlow'
+import { permissionModeLabelForAgent } from '@/lib/permissionModeLabels'
 import { useTranslation } from '@/lib/use-translation'
 import { getModelOptionsForFlavor, getNextModelForFlavor } from './modelOptions'
 import { getClaudeComposerEffortOptions } from './claudeEffortOptions'
@@ -1021,9 +1023,18 @@ export function HappyComposer(props: {
         }
     }, [switchDisabled, onSwitchToRemote, haptic])
 
+    // The label is the agent's own wording: MiniMax Code calls its modes
+    // Ask, Auto and Full access, not the shared catalog's "Yolo". The status
+    // bar next to the composer names them the same way.
     const permissionModeOptions = useMemo(
-        () => getPermissionModeOptionsForFlavor(agentFlavor).filter(option => !concurrentClients || option.mode !== 'safe-yolo'),
-        [agentFlavor, concurrentClients]
+        () => getPermissionModesForFlavor(agentFlavor)
+            .filter(mode => !concurrentClients || mode !== 'safe-yolo')
+            .map((mode) => ({
+                mode,
+                label: permissionModeLabelForAgent({ mode, agent: agentFlavor, t }),
+                tone: getPermissionModeTone(mode)
+            })),
+        [agentFlavor, concurrentClients, t]
     )
     const collaborationModeOptions = useMemo(
         () => agentFlavor === 'codex' ? getCodexCollaborationModeOptions() : [],
