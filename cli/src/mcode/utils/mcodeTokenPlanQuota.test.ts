@@ -133,4 +133,30 @@ describe('listMcodeTokenPlanQuota', () => {
 
         expect(leases).toBe(1)
     })
+
+    it('caches a failure too, so a polling client does not ask again', async () => {
+        // A client that watches the usage polls the quota. When the read
+        // fails - the host is gone, the lease is refused - every poll would
+        // look for the host of the machine again, and the machine is the
+        // expensive part of the read.
+        let leases = 0
+        const requestLease = async () => {
+            leases++
+            throw new Error('The broker refused to hand out a lease')
+        }
+        const options = {
+            brokers: [BROKER],
+            region: 'cn',
+            requestLease,
+            fetchQuota: async () => PAYLOAD
+        }
+
+        const first = await listMcodeTokenPlanQuota(options)
+        const second = await listMcodeTokenPlanQuota(options)
+
+        expect(first.quota).toBeNull()
+        expect(first.error).toContain('refused')
+        expect(second.error).toBe(first.error)
+        expect(leases).toBe(1)
+    })
 })

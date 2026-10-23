@@ -62,6 +62,16 @@ const QUOTA_TIMEOUT_MS = 10_000
  */
 const QUOTA_TTL_MS = 60_000
 
+/**
+ * How long a failed read is remembered.
+ *
+ * A client that watches the usage polls the quota, and a poll that fails
+ * would look for the host of the machine again - the machine is the
+ * expensive part of the read. The failure is remembered for a shorter time
+ * than a success, so a host that comes back is noticed soon.
+ */
+const QUOTA_FAILURE_TTL_MS = 15_000
+
 /** Where the account's quota lives. One backend per region. */
 const QUOTA_PATH = '/v1/api/openplatform/coding_plan/remains'
 const QUOTA_BASES: Record<string, string> = {
@@ -336,10 +346,16 @@ export async function listMcodeTokenPlanQuota(options?: {
         return cachedQuota.result
     }
 
+    const remember = (result: McodeTokenPlanQuotaResult): McodeTokenPlanQuotaResult => {
+        const ttl = result.quota ? QUOTA_TTL_MS : QUOTA_FAILURE_TTL_MS
+        cachedQuota = { expiresAtMs: now() + ttl, result }
+        return result
+    }
+
     const brokers = options?.brokers ?? preferredMcodeConnectorBrokers()
     if (brokers.length === 0) {
         logger.debug('No MiniMax Code host is running, so there is no usage quota to read')
-        return { quota: null, error: 'No MiniMax Code host is running on this machine' }
+        return remember({ quota: null, error: 'No MiniMax Code host is running on this machine' })
     }
 
     const requestLease = options?.requestLease ?? ((broker: McodeConnectorBroker) => requestMcodeAuthLease(broker))
@@ -368,8 +384,7 @@ export async function listMcodeTokenPlanQuota(options?: {
                     continue
                 }
                 const result: McodeTokenPlanQuotaResult = { quota }
-                cachedQuota = { expiresAtMs: now() + QUOTA_TTL_MS, result }
-                return result
+                return remember(result)
             } catch (error) {
                 lastError = messageOf(error)
                 logger.debug('Failed to read the MiniMax Code usage quota:', error)
@@ -380,7 +395,7 @@ export async function listMcodeTokenPlanQuota(options?: {
     // The reason is not part of the answer the clients get - a missing quota
     // is enough for them - so it goes to the log.
     logger.debug('Could not read the MiniMax Code usage quota:', lastError)
-    return { quota: null, error: lastError }
+    return remember({ quota: null, error: lastError })
 }
 
 /** Drops the cached answer. Exposed for tests. */
