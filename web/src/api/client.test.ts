@@ -360,6 +360,147 @@ describe('ApiClient Kimi session model discovery', () => {
     })
 })
 
+describe('ApiClient retry policy', () => {
+    let originalFetch: typeof globalThis.fetch
+    let fetchMock: ReturnType<typeof vi.fn>
+
+    beforeEach(() => {
+        originalFetch = globalThis.fetch
+        fetchMock = vi.fn()
+        globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+        vi.useFakeTimers()
+    })
+
+    afterEach(() => {
+        vi.useRealTimers()
+        globalThis.fetch = originalFetch
+    })
+
+    it('replays a GET after a transient 503 and returns the eventual success', async () => {
+        fetchMock
+            .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'restarting' }), { status: 503 }))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ sessions: [] }), { status: 200 }))
+
+        const api = new ApiClient('test-token')
+        const promise = api.getSessions()
+        await vi.advanceTimersByTimeAsync(1_000)
+
+        await expect(promise).resolves.toEqual({ sessions: [] })
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('replays a GET after the transport itself fails', async () => {
+        fetchMock
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ sessions: [] }), { status: 200 }))
+
+        const api = new ApiClient('test-token')
+        const promise = api.getSessions()
+        await vi.advanceTimersByTimeAsync(1_000)
+
+        await expect(promise).resolves.toEqual({ sessions: [] })
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('never replays a mutation, so a POST effect cannot be duplicated', async () => {
+        fetchMock.mockImplementation(() => new Response(JSON.stringify({ error: 'no machine online' }), { status: 503 }))
+
+        const api = new ApiClient('test-token')
+        const promise = api.setVisibility({ subscriptionId: 'sub-1', visibility: 'hidden' })
+        const expectation = expect(promise).rejects.toBeInstanceOf(ApiError)
+        await vi.advanceTimersByTimeAsync(1_000)
+
+        await expectation
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('replays an authentication that only mints a token', async () => {
+        fetchMock
+            .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'restarting' }), { status: 503 }))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'jwt' }), { status: 200 }))
+
+        const api = new ApiClient('test-token')
+        const promise = api.authenticate({ accessToken: 'cli-token' })
+        await vi.advanceTimersByTimeAsync(1_000)
+
+        await expect(promise).resolves.toMatchObject({ token: 'jwt' })
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('replays a binding, which is idempotent for the same user and namespace', async () => {
+        fetchMock
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'jwt' }), { status: 200 }))
+
+        const api = new ApiClient('test-token')
+        const promise = api.bind({ initData: 'init', accessToken: 'cli-token' })
+        await vi.advanceTimersByTimeAsync(1_000)
+
+        await expect(promise).resolves.toMatchObject({ token: 'jwt' })
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not replay a GET that failed with a status that is not transient', async () => {
+        fetchMock.mockImplementation(() => new Response(JSON.stringify({ error: 'nope' }), { status: 400 }))
+
+        const api = new ApiClient('test-token')
+        const promise = api.getSessions()
+        const expectation = expect(promise).rejects.toBeInstanceOf(ApiError)
+        await vi.advanceTimersByTimeAsync(1_000)
+
+        await expectation
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('gives up after the attempt budget and reports the last response', async () => {
+        const bodies = ['first', 'second', 'third']
+        let call = 0
+        fetchMock.mockImplementation(() => new Response(bodies[call++], { status: 503 }))
+
+        const api = new ApiClient('test-token')
+        const promise = api.getSessions()
+        // The body of the *final* response is what the caller gets: draining
+        // intermediate bodies must not cost the last one its content.
+        const expectation = expect(promise).rejects.toMatchObject({ status: 503, body: 'third' })
+        await vi.advanceTimersByTimeAsync(10_000)
+
+        await expectation
+        expect(fetchMock).toHaveBeenCalledTimes(3)
+    })
+
+    it('never replays an aborted request', async () => {
+        const abortError = new Error('The operation was aborted')
+        abortError.name = 'AbortError'
+        fetchMock.mockRejectedValue(abortError)
+
+        const api = new ApiClient('test-token')
+        const promise = api.getSessionExport('session-1')
+        const expectation = expect(promise).rejects.toBe(abortError)
+        await vi.advanceTimersByTimeAsync(1_000)
+
+        await expectation
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('waits out Retry-After before replaying a throttled GET', async () => {
+        fetchMock
+            .mockResolvedValueOnce(new Response('{}', { status: 429, headers: { 'retry-after': '1' } }))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ sessions: [] }), { status: 200 }))
+
+        const api = new ApiClient('test-token')
+        const promise = api.getSessions()
+
+        // Past the longest computed backoff but short of the Retry-After the
+        // hub asked for: the retry must not have happened yet.
+        await vi.advanceTimersByTimeAsync(500)
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+
+        await vi.advanceTimersByTimeAsync(600)
+        await expect(promise).resolves.toEqual({ sessions: [] })
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+})
+
 describe('apiErrorMessage', () => {
     it('reads the reason the hub gave instead of the raw response body', () => {
         // The transport puts the whole body into the message: showing that

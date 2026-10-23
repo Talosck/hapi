@@ -193,6 +193,178 @@ export class ApiError extends Error {
     }
 }
 
+/**
+ * Retry policy for hub requests.
+ *
+ * The hub is local, but the browser talking to it often is not: a phone on
+ * flaky WiFi, a laptop waking from sleep, or the hub restarting under a dev
+ * reload all surface as a failed fetch. Those failures are transient, so a
+ * bounded retry turns a blip into a successful response instead of an error
+ * the user has to act on.
+ */
+
+/** Total attempts, including the first one. */
+const RETRY_MAX_ATTEMPTS = 3
+const RETRY_BASE_DELAY_MS = 300
+const RETRY_MAX_DELAY_MS = 5_000
+
+/**
+ * Statuses worth another attempt: the request never reached a handler that
+ * could have applied it, or the handler itself failed transiently.
+ *
+ * 401 is deliberately absent - it is handled by the token refresh path, which
+ * knows how to fix it.
+ */
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504])
+
+/**
+ * Only safe methods are replayed.
+ *
+ * A POST may already have been applied by the hub before the connection broke
+ * - sending a message, archiving a session - and replaying it would duplicate
+ * the effect. Mutations therefore fail fast and leave recovery to the caller.
+ *
+ * An endpoint may opt back in when its effect is idempotent; see
+ * `FetchRetryOptions.replayable`.
+ */
+const REPLAYABLE_METHODS = new Set(['GET', 'HEAD'])
+
+/**
+ * Per-request overrides for the retry policy.
+ */
+type FetchRetryOptions = {
+    /**
+     * Replay this request even though its method is not inherently safe.
+     *
+     * Only for endpoints whose effect is idempotent. Authenticating and
+     * binding qualify: both merely mint a token, so running them twice
+     * changes nothing the second call would not have changed anyway. A phone
+     * on flaky WiFi failing to log in deserves the same retry a read gets.
+     */
+    replayable?: boolean
+}
+
+/**
+ * Sleep for the given delay, but wake up early if the caller aborts.
+ *
+ * A backoff that outlives the request it belongs to leaves the UI waiting on
+ * a call the caller has already given up on.
+ */
+function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+    return new Promise(resolve => {
+        if (signal?.aborted) {
+            resolve()
+            return
+        }
+        const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort)
+            resolve()
+        }, ms)
+        const onAbort = () => {
+            clearTimeout(timer)
+            resolve()
+        }
+        signal?.addEventListener('abort', onAbort, { once: true })
+    })
+}
+
+/**
+ * Exponential backoff with jitter. The jitter keeps a fleet of clients from
+ * retrying a restarting hub in lockstep.
+ */
+function backoffDelayMs(attempt: number): number {
+    const capped = Math.min(RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1), RETRY_MAX_DELAY_MS)
+    return Math.round(capped * (0.5 + Math.random() * 0.5))
+}
+
+/**
+ * `Retry-After` is either a delay in seconds or an HTTP date. Clamped to the
+ * same ceiling as the computed backoff so a misbehaving hub cannot pin the UI.
+ */
+function parseRetryAfterMs(header: string | null): number | undefined {
+    if (!header) return undefined
+    const trimmed = header.trim()
+    const seconds = Number(trimmed)
+    if (Number.isFinite(seconds)) {
+        return Math.min(Math.max(0, Math.round(seconds * 1000)), RETRY_MAX_DELAY_MS)
+    }
+    const target = Date.parse(trimmed)
+    if (Number.isNaN(target)) return undefined
+    return Math.min(Math.max(0, target - Date.now()), RETRY_MAX_DELAY_MS)
+}
+
+/**
+ * Browsers reject an aborted fetch with a DOMException, which is not an
+ * `instanceof Error`, so the name is checked on both shapes.
+ */
+function isAbortError(error: unknown): boolean {
+    if (error instanceof Error && error.name === 'AbortError') return true
+    return typeof DOMException === 'function'
+        && error instanceof DOMException
+        && error.name === 'AbortError'
+}
+
+/**
+ * The error a cancelled request settles with. A DOMException named
+ * `AbortError` is what the platform itself produces, so callers that treat
+ * cancellation as "not a failure" keep treating it that way.
+ */
+function abortError(): DOMException | Error {
+    if (typeof DOMException === 'function') {
+        return new DOMException('The operation was aborted.', 'AbortError')
+    }
+    const error = new Error('The operation was aborted.')
+    error.name = 'AbortError'
+    return error
+}
+
+/**
+ * Fetch with a bounded retry for transient failures.
+ *
+ * Retries both transport failures (the fetch itself threw) and transient
+ * statuses, so a 503 from a restarting hub is replayed instead of surfacing
+ * as an error. The last response is returned as-is, leaving the status to
+ * error mapping to the caller.
+ */
+async function fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    options: FetchRetryOptions = {}
+): Promise<Response> {
+    const method = (init.method ?? 'GET').toUpperCase()
+    const replayable = options.replayable ?? REPLAYABLE_METHODS.has(method)
+    const maxAttempts = replayable ? RETRY_MAX_ATTEMPTS : 1
+    const signal = init.signal ?? null
+
+    for (let attempt = 1; ; attempt++) {
+        let response: Response
+        try {
+            response = await fetch(url, init)
+        } catch (error) {
+            // A transport failure: the request may never have reached the hub.
+            // An aborted request is the caller's own doing and is never retried.
+            if (attempt >= maxAttempts || isAbortError(error) || signal?.aborted) {
+                throw error
+            }
+            await sleep(backoffDelayMs(attempt), signal)
+            // The caller may have given up while we were waiting: do not spend
+            // another request on a call nobody is waiting for.
+            if (signal?.aborted) throw abortError()
+            continue
+        }
+
+        if (attempt >= maxAttempts || !RETRYABLE_STATUSES.has(response.status)) {
+            return response
+        }
+
+        // Release the connection before waiting, then sleep out the backoff.
+        await response.text().catch(() => '')
+        const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'))
+        await sleep(retryAfterMs ?? backoffDelayMs(attempt), signal)
+        if (signal?.aborted) throw abortError()
+    }
+}
+
 export class ApiClient {
     private token: string
     private readonly baseUrl: string | null
@@ -235,7 +407,7 @@ export class ApiClient {
             headers.set('content-type', 'application/json')
         }
 
-        const res = await fetch(this.buildUrl(path), {
+        const res = await fetchWithRetry(this.buildUrl(path), {
             ...init,
             headers
         })
@@ -266,11 +438,13 @@ export class ApiClient {
     }
 
     async authenticate(auth: { initData: string } | { accessToken: string }): Promise<AuthResponse> {
-        const res = await fetch(this.buildUrl('/api/auth'), {
+        // Authenticating only mints a token, so replaying it is safe: a
+        // dropped connection on a phone should not read as a failed login.
+        const res = await fetchWithRetry(this.buildUrl('/api/auth'), {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(auth)
-        })
+        }, { replayable: true })
 
         if (!res.ok) {
             const body = await res.text().catch(() => '')
@@ -283,11 +457,13 @@ export class ApiClient {
     }
 
     async bind(auth: { initData: string; accessToken: string }): Promise<AuthResponse> {
-        const res = await fetch(this.buildUrl('/api/bind'), {
+        // Binding is idempotent too: the same Telegram user bound to the same
+        // namespace is a no-op, so a dropped connection is safe to replay.
+        const res = await fetchWithRetry(this.buildUrl('/api/bind'), {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(auth)
-        })
+        }, { replayable: true })
 
         if (!res.ok) {
             const body = await res.text().catch(() => '')
@@ -496,11 +672,11 @@ export class ApiClient {
             headers.set('authorization', `Bearer ${authToken}`)
         }
         const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-images/${encodeURIComponent(imageId)}`)
-        let res = await fetch(url, { headers })
+        let res = await fetchWithRetry(url, { headers })
         // Hub returns ETag + immutable Cache-Control (#927). Default fetch cache stores 200
         // responses so remounts avoid RPC; on 304 the body is empty — read from cache.
         if (res.status === 304) {
-            res = await fetch(url, { headers, cache: 'force-cache' })
+            res = await fetchWithRetry(url, { headers, cache: 'force-cache' })
         }
         if (res.status === 401 && attempt === 0 && this.onUnauthorized) {
             const refreshed = await this.onUnauthorized()
@@ -691,7 +867,7 @@ export class ApiClient {
             if (authToken) {
                 headers.set('authorization', `Bearer ${authToken}`)
             }
-            return fetch(this.buildUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
+            return fetchWithRetry(this.buildUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
         }
 
         let res = await tryOnce(null)
@@ -1205,7 +1381,7 @@ export class ApiClient {
         if (authToken) {
             headers.set('authorization', `Bearer ${authToken}`)
         }
-        const response = await fetch(
+        const response = await fetchWithRetry(
             this.buildUrl(
                 `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`
             ),
