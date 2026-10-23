@@ -10,7 +10,7 @@ vi.mock('cross-spawn', () => ({
     }
 }))
 
-import { getHapiRunnerProcessIdentity, killProcess } from './process'
+import { getHapiRunnerProcessIdentity, isProcessAlive, isProcessRunning, killProcess } from './process'
 
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
 
@@ -706,5 +706,48 @@ describe('getHapiRunnerProcessIdentity on POSIX', () => {
         spawnSyncMock.mockReturnValueOnce(completed(''))
 
         expect(getHapiRunnerProcessIdentity(8328)).toBe('unknown')
+    })
+})
+
+describe('the liveness probes', () => {
+    function failKillWith(code: string): void {
+        vi.spyOn(process, 'kill').mockImplementation(() => {
+            const error = new Error(`kill ${code}`) as NodeJS.ErrnoException
+            error.code = code
+            throw error
+        })
+    }
+
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
+    it('reads a process it may not signal as running', () => {
+        // POSIX: a signal-0 probe throws ESRCH when the process is gone and
+        // EPERM when it is there but belongs to someone else. Only ESRCH
+        // proves the end, so EPERM counts as running.
+        failKillWith('EPERM')
+
+        expect(isProcessAlive(4242)).toBe(true)
+        expect(isProcessRunning(4242)).toBe(true)
+    })
+
+    it('reads a process that is gone as gone', () => {
+        failKillWith('ESRCH')
+
+        expect(isProcessRunning(4242)).toBe(false)
+        expect(isProcessAlive(4242)).toBe(false)
+    })
+
+    it('answers the same for a process that is running', () => {
+        expect(isProcessRunning(process.pid)).toBe(true)
+        expect(isProcessAlive(process.pid)).toBe(true)
+    })
+
+    it('rejects a pid that cannot be a process', () => {
+        expect(isProcessRunning(0)).toBe(false)
+        expect(isProcessRunning(-1)).toBe(false)
+        expect(isProcessAlive(0)).toBe(false)
+        expect(isProcessAlive(-1)).toBe(false)
     })
 })

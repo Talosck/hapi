@@ -13,6 +13,7 @@ import {
     _resetAgentCliSpawnLeaseForTests
 } from '@hapi/protocol/agentCliSpawnLease';
 import { resolveHapiHomeDir } from '@/configuration';
+import { isProcessRunning as isProcessAlive } from '@/utils/process';
 
 /**
  * Cursor's `agent` CLI appears to allow only one active process at a time.
@@ -217,17 +218,6 @@ function removeLockPid(lockDir: string, pid: number): void {
 
 function isLegacyLock(lockDir: string): boolean {
     return existsSync(join(lockDir, 'pid')) && !existsSync(join(lockDir, 'count'));
-}
-
-function isProcessAlive(pid: number): boolean {
-    try {
-        process.kill(pid, 0);
-        return true;
-    } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        // Process exists but we lack permission to signal it.
-        return code === 'EPERM';
-    }
 }
 
 function removeAcpLockDir(): void {

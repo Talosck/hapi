@@ -6,6 +6,31 @@ export const isWindows = (): boolean => process.platform === 'win32';
 /** Bound hung WMI/tasklist/ps so a wedged spawn cannot darken the runner (#1911 Overseer B3). */
 const SPAWN_SYNC_TIMEOUT_MS = 10_000;
 
+/**
+ * Whether a process is running, whoever owns it.
+ *
+ * POSIX: a signal-0 probe throws ESRCH when the process is gone and EPERM
+ * when it is there but belongs to someone else. Only ESRCH proves the end,
+ * so EPERM counts as running - a process we may not signal is still a
+ * process that holds its lock or its broker.
+ *
+ * The probe is signal-0 only. It is cheap enough for a poll, and it does
+ * not ask the console tree, which on win32 sees a different set of
+ * processes than the pid space does.
+ */
+export function isProcessRunning(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process is there but we may not signal it.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 export function isProcessAlive(pid: number): boolean {
   if (!Number.isFinite(pid) || pid <= 0) {
     return false;
@@ -30,12 +55,7 @@ export function isProcessAlive(pid: number): boolean {
     }
   }
 
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return isProcessRunning(pid);
 }
 
 /**

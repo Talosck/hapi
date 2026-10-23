@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { logger } from '@/ui/logger';
+import { isProcessRunning as isProcessAlive } from '@/utils/process';
 
 /** Historical fixed id — prefer {@link cursorHapiMcpServerId} so concurrent sessions do not share one key. */
 export const CURSOR_HAPI_MCP_SERVER_ID = 'hapi';
@@ -146,21 +147,12 @@ export function readLockOwner(lockPath: string): LockOwner | null {
     return null;
 }
 
-/** Fail closed: only ESRCH means the PID is confirmed gone. EPERM ⇒ alive. */
-export function isProcessAlive(pid: number): boolean {
-    if (pid <= 0) {
-        return false;
-    }
-    try {
-        process.kill(pid, 0);
-        return true;
-    } catch (error) {
-        const code = error && typeof error === 'object' && 'code' in error
-            ? (error as { code?: string }).code
-            : undefined;
-        return code !== 'ESRCH';
-    }
-}
+/**
+ * Fail closed: only ESRCH means the PID is confirmed gone. EPERM ⇒ alive.
+ *
+ * Ports `isProcessRunning` (`cli/src/utils/process.ts`).
+ */
+export { isProcessAlive };
 
 /**
  * Exclusive cross-process lock for mcp.json read-modify-write.

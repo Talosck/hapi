@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { logger } from '@/ui/logger';
+import { isProcessRunning } from '@/utils/process';
 import { getMcodeDataDir } from './mcodeSessionDirs';
 import { MCODE_RUNTIME_INDEX_RELATIVE_PATH, openMcodeRuntimeIndex } from './mcodeRuntimeIndex';
 
@@ -79,14 +80,7 @@ export function parseMcodeLeaseOwnerPid(ownerId: string): number | null {
 export function isMcodeLeaseOwnerAlive(ownerId: string): boolean {
     const pid = parseMcodeLeaseOwnerPid(ownerId);
     if (pid === null) return true;
-    try {
-        // Signal 0 tests for the process without touching it.
-        process.kill(pid, 0);
-        return true;
-    } catch (error) {
-        // EPERM means the process is there but belongs to someone else.
-        return (error as NodeJS.ErrnoException).code === 'EPERM';
-    }
+    return isProcessRunning(pid);
 }
 
 /**

@@ -5,6 +5,7 @@ import { join, posix, win32 } from 'node:path'
 import { promisify } from 'node:util'
 import { asString, isObject } from '@hapi/protocol'
 import { logger } from '@/ui/logger'
+import { isProcessRunning as isProcessAlive } from '@/utils/process'
 import { getMcodeDataDir } from './mcodeSessionDirs'
 
 const execFileAsync = promisify(execFile)
@@ -137,20 +138,6 @@ const AUTH_ENV_KEYS = [
     'MCODE_AUTH_BROKER_ENDPOINT',
     'MCODE_AUTH_BROKER_CAPABILITY_FILE'
 ] as const
-
-/**
- * Whether a process is still running.
- *
- * `EPERM` means the process is there - it just belongs to another user.
- */
-function isProcessAlive(pid: number): boolean {
-    try {
-        process.kill(pid, 0)
-        return true
-    } catch (error) {
-        return (error as NodeJS.ErrnoException).code === 'EPERM'
-    }
-}
 
 /**
  * The directories a MiniMax Code host may keep its broker in.
