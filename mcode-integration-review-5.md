@@ -305,6 +305,9 @@ web 侧只在**第二次及以后**的读取才 force（第一次可能吃机器
   连接期等 agent 重广播档位、goal+delegation 并行恢复、
   滑动窗口的重启计数、"agent 跑不了这个模式"的告知
 - `cli/src/mcode/mcodeRemoteLauncher.test.ts` —— 新增 3 个回归用例（见 3.2）
+- `cli/src/mcode/utils/backgroundTaskAggregator.ts` —— 认得出 `details.execution.status`
+  （后台任务结束时的真正位置）
+- `cli/src/mcode/utils/backgroundTaskAggregator.test.ts` —— 新增 1 个回归用例
 - `cli/src/agent/permissionAdapter.ts` —— `cancelAll()` 对死掉的后端兜底，保证状态一定被清
 - `cli/src/modules/common/handlers/mcodeApps.ts` —— 接受 `forceRefresh`
 
@@ -315,6 +318,13 @@ web 侧只在**第二次及以后**的读取才 force（第一次可能吃机器
 - `hub/src/sync/rpcGateway.ts`、`hub/src/sync/syncEngine.ts` —— 透传 `forceRefresh`
 - `hub/src/web/routes/machines.ts` —— 读 `?forceRefresh=1`
 - `hub/src/web/routes/machines.test.ts` —— 新增 1 个用例
+- `hub/src/sync/backgroundTasks.ts` —— **删掉旧的"启动减完成"计数**
+- `hub/src/sync/sessionCache.ts`、`hub/src/sync/syncEngine.ts`、
+  `hub/src/socket/handlers/cli/{index,sessionHandlers}.ts`、`hub/src/socket/server.ts`、
+  `hub/src/startHub.ts` —— 拆掉那条管线的全部接线
+- `hub/src/socket/handlers/cli/sessionHandlers.test.ts` —— 新增 1 个用例：
+  工具结果里写着"任务在跑"**不得**再让计数动一下
+- `hub/src/sync/sessionCache.{applySessionPatch,expireInactive}.test.ts` —— 改用绝对计数
 
 **Web**
 - `web/src/hooks/queries/useMcodeModelsForSession.ts` —— 探测预算从"次数"改成"时间"，
@@ -334,15 +344,68 @@ web 侧只在**第二次及以后**的读取才 force（第一次可能吃机器
 | `keeps the model the user picked when the agent is started again` | 重连后 hub 播报的仍是 `m:fast` | 播报 `m:good` → 用户的模型被换回去 |
 | `ends the session when the agent keeps dying after it answered a turn` | "答完一轮再死"也会结束会话 | 无限重启，永不结束 |
 
+另外两个（第四节）：
+
+| 用例 | 钉住什么 |
+|---|---|
+| `settles a task whose end is only reported under details.execution` | 后台任务结束时账本立刻把它摘掉 |
+| `does not count a background task from the text of a tool result` | 工具结果里的字样不得再让计数动一下 |
+
 ### 3.3 验证
 
 - `bun typecheck`（cli / web / hub / relay）—— 全过
 - `bun run test:cli` —— **3385 passed / 11 skipped**
-- `bun run test:web`、`bun run test:hub` —— 见本次提交记录
+- `bun run test:web`、`bun run test:hub`、`bun run test:shared` —— 见本次提交记录
 
 ---
 
-## 四、这轮没做的（留着的）
+## 四、顺带修掉的另一条：后台任务的计数（接 review-4 那条线）
+
+这一条不在"连接"这条线上，是用户看着面板上"1 个后台终端在跑 · 已经 12 分钟"时追出来的。
+但它和本轮是同一个病根：**HAPI 告诉客户端的东西，和 agent 实际在做的事对不上。**
+
+### 4.1 现象
+
+面板上有一个后台终端在跑，计时器已经走了十几分钟。但那个命令其实早就跑完了
+（`bun run test:web`，退出码 0，316 个测试文件全过）。
+
+### 4.2 取证
+
+把 agent 的运行时任务表和 CLI 发布给 hub 的清单对齐之后，时间线是清楚的：
+
+| 时刻 | 事件 | CLI 的账本 | hub 显示 |
+|---|---|---|---|
+| 09:54:02 | `bg_413fa1da`（typecheck + hub/web 测试）启动 | 1 个 | 1 |
+| 10:02:26 | 另一个任务被取消（`details.status = "canceled"`） | 1 个 | 1 |
+| 10:08 | `bg_413fa1da` **实际结束**（退出码 0） | **还是 1 个** | 1 |
+
+hub 侧也只有一个会话的 `backgroundTaskCount` 不是 0，就是这一个。
+
+### 4.3 两个原因
+
+**原因一：hub 里还留着旧的"启动减完成"计数。**
+CLI 早就改成发布整份清单了（review-4），hub 却还在同一批消息上跑旧算法
+（`hub/src/socket/handlers/cli/sessionHandlers.ts`：先 `extractBackgroundTaskDelta`，
+再 `extractBackgroundTaskSnapshot`）。同一个数字有两个来源，后到的那个说了算，
+而下一次清单不一定再来纠正它 —— 计数就会一直挂在 1 上。
+**已删**：hub 只认 CLI 发布的清单，旧的那条路径整个拆掉。
+
+**原因二（这次真正卡住的原因）：CLI 的账本没认出任务的结束。**
+后台命令结束时，运行时把状态放在 `details.execution.status` 里
+（`{ status: "succeeded", reason: "exited", exitCode: 0 }`），而不是顶层的 `details.status`。
+聚合器只读顶层（`readString(details, ['status', 'state'])`），于是这条结束信号它没看见，
+任务就一直留在账本里 —— 只能等"连续两轮不问就自动摘掉"那条兜底规则把它清掉。
+**已修**：聚合器也读 `details.execution.status`。
+
+### 4.4 一并说明
+
+仓库里的修复**不影响正在跑的这次会话**：会话跑的是装好的 0.30.7 二进制
+（`~/.npm-global/lib/node_modules/@twsxtd/hapi`），hub 也是同一个二进制。
+要看到修好的行为，得等重新部署。
+
+---
+
+## 五、这轮没做的（留着的）
 
 1. **每个模型的思考档位目录**。现在探测只返回"当前模型"的档位列表，创建表单会把它
    套到所有模型上（选了不支持的档位，agent 会拒）。要修就得在探测时逐个模型切一遍，

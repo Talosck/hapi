@@ -88,6 +88,28 @@ describe('BackgroundTaskAggregator', () => {
         expect(aggregator.handle(text)).toEqual([text]);
     });
 
+    it('settles a task whose end is only reported under details.execution', () => {
+        // A command that ran in the background reports what happened to it
+        // under `details.execution`, not at the top of the details. A ledger
+        // that only reads the top level never sees the end of such a task, so
+        // the session keeps counting it as running long after it finished.
+        const aggregator = new BackgroundTaskAggregator();
+        startBackgroundTask(aggregator);
+
+        aggregator.handle(taskOutputCall());
+        aggregator.handle(toolResult({
+            id: 'poll-1',
+            text: 'Command exited with code 0',
+            details: {
+                execution: { status: 'succeeded', reason: 'exited', exitCode: 0 },
+                timing: {},
+                output: {}
+            }
+        }));
+
+        expect(aggregator.snapshot()).toEqual([]);
+    });
+
     it('holds a background task launch and folds a running poll into the launch card', () => {
         const aggregator = new BackgroundTaskAggregator();
         startBackgroundTask(aggregator);

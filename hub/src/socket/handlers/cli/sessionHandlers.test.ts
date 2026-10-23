@@ -568,4 +568,42 @@ describe('cli session handlers', () => {
         ])
         store.close()
     })
+
+    it('does not count a background task from the text of a tool result', () => {
+        // The CLI publishes the whole list of background work, and that list is
+        // the only thing that moves the count. A tool result that happens to
+        // say a task is running used to add one, and nothing came to take it
+        // away again: the count then said a task was running for the rest of
+        // the session, long after the task was done.
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession('bg-text', {}, null, 'default')
+        const socket = new FakeSocket()
+        const counts: Array<{ sid: string; running: number }> = []
+
+        registerSessionHandlers(socket as unknown as CliSocketWithData, {
+            store,
+            resolveSessionAccess: (sessionId) => sessionId === session.id
+                ? { ok: true, value: session as StoredSession }
+                : { ok: false, reason: 'not-found' },
+            emitAccessError: () => {},
+            onBackgroundTaskCount: (sid, running) => { counts.push({ sid, running }) }
+        })
+
+        socket.trigger('message', {
+            sid: session.id,
+            message: {
+                role: 'agent',
+                content: {
+                    type: 'output',
+                    data: {
+                        type: 'tool_result',
+                        content: 'Command running in background with ID: bg_1'
+                    }
+                }
+            }
+        })
+
+        expect(counts).toEqual([])
+        store.close()
+    })
 })

@@ -28,7 +28,7 @@ describe('SessionCache.expireInactive', () => {
             'default'
         )
 
-        cache.applyBackgroundTaskDelta(created.id, { started: 2, completed: 0 })
+        cache.setBackgroundTaskCount(created.id, 2)
         expect(cache.getSession(created.id)?.backgroundTaskCount).toBe(2)
 
         // The CLI was connected, then went away.

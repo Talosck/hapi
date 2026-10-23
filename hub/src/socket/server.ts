@@ -42,7 +42,6 @@ export type SocketServerDeps = {
     onSessionReady?: (payload: { sid: string; time: number }) => void
     onSessionEnd?: (payload: { sid: string; time: number }) => void
     onMachineAlive?: (payload: { machineId: string; time: number; health?: unknown }) => void
-    onBackgroundTaskDelta?: (sessionId: string, delta: { started: number; completed: number }) => void
     /** Sets the absolute number of background tasks the session has going. */
     onBackgroundTaskCount?: (sessionId: string, running: number) => void
     onSessionActivity?: (sessionId: string, updatedAt: number) => void
@@ -133,7 +132,6 @@ export function createSocketServer(deps: SocketServerDeps): {
         onSessionEnd: deps.onSessionEnd,
         onMachineAlive: deps.onMachineAlive,
         onWebappEvent: deps.onWebappEvent,
-        onBackgroundTaskDelta: deps.onBackgroundTaskDelta,
         onBackgroundTaskCount: deps.onBackgroundTaskCount,
         onSessionActivity: deps.onSessionActivity,
         onAgentProgress: deps.onAgentProgress,

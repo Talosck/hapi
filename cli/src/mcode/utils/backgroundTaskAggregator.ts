@@ -214,13 +214,31 @@ function parseTaskResult(output: unknown): ParsedTaskResult {
     const text = outputText(output);
     const details = outputDetails(output);
     const taskId = readString(details, ['task_id', 'taskId']) ?? matchAttribute(text, 'task_id');
-    const rawStatus = readString(details, ['status', 'state']) ?? matchAttribute(text, 'status');
+    const rawStatus = readString(details, ['status', 'state'])
+        ?? readExecutionStatus(details)
+        ?? matchAttribute(text, 'status');
     return {
         taskId,
         status: rawStatus ? rawStatus.toLowerCase() : null,
         text,
         details
     };
+}
+
+/**
+ * The status a background command reports when it is done.
+ *
+ * A command that ran in the background reports what happened to it under
+ * `details.execution` ("succeeded", "failed", "canceled"), not at the top of
+ * the details. A ledger that only reads the top level never sees the end of
+ * such a task, so the session keeps counting it as running long after it
+ * finished.
+ */
+function readExecutionStatus(details: Record<string, unknown> | null): string | null {
+    if (!details) return null;
+    const execution = details.execution;
+    if (!isObject(execution)) return null;
+    return readString(execution, ['status', 'state']);
 }
 
 function cleanTaskText(text: string | null): string {

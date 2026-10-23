@@ -214,7 +214,7 @@ describe('SessionCache.applySessionPatch', () => {
             'default'
         )
 
-        cache.applyBackgroundTaskDelta(created.id, { started: 2, completed: 0 })
+        cache.setBackgroundTaskCount(created.id, 2)
         expect(cache.getSession(created.id)?.backgroundTaskCount).toBe(2)
         expect(events.at(-1)).toMatchObject({
             type: 'session-updated',
@@ -222,10 +222,12 @@ describe('SessionCache.applySessionPatch', () => {
             data: { backgroundTaskCount: 2 }
         })
 
-        cache.applyBackgroundTaskDelta(created.id, { started: 0, completed: 1 })
+        // The count is absolute: the CLI publishes the whole list, so it can
+        // go up and down without a start and a completion having to match.
+        cache.setBackgroundTaskCount(created.id, 1)
         expect(cache.getSession(created.id)?.backgroundTaskCount).toBe(1)
 
-        cache.applyBackgroundTaskDelta(created.id, { started: 0, completed: 5 })
+        cache.setBackgroundTaskCount(created.id, 0)
         expect(cache.getSession(created.id)?.backgroundTaskCount).toBe(0)
         expect(events.at(-1)).toMatchObject({
             type: 'session-updated',
