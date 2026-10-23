@@ -145,6 +145,25 @@ The configuration routes in the table above respond `{ok: true}`; apply-failures
 | `GET /api/machines/:id/agy-models`, `/pi-models`, `/codex-models`, `/cursor-models` | Machine-level (pre-spawn pickers). `agy-models` takes `?refresh=true` to skip the machine's cached catalog, and may answer `success: true` with an advisory `error` (see [Errors](./errors.md#rpc-wrapped-endpoints)) |
 | `GET /api/machines/:id/opencode-models?cwd=`, `/grok-models?cwd=`, `/copilot-models?cwd=`, `/kimi-models?cwd=`, `/mcode-models?cwd=` | `cwd` query required (400 without) |
 
+### MiniMax Code — goal and subagents
+
+Source: `hub/src/web/routes/sessions.ts`; schemas `McodeGoalCreateRequestSchema` / `McodeGoalPatchRequestSchema` (`shared/src/apiTypes.ts`), the goal states in `shared/src/apiTypes.ts` (`McodeGoalState`, `McodeGoalStatus`), and the status translation in `shared/src/mcodeGoalStatus.ts`.
+
+All four routes need an **active** session of the `mcode` flavor, and answer 400 `{success: false, error}` otherwise. A body that does not validate answers 400 with the reason; a failure of the call answers 500 `{success: false, error}`.
+
+| Method & path | Request | Response |
+|---|---|---|
+| `POST /api/sessions/:id/mcode/goal` | `{objective: string, tokenBudget?: number \| null}` | `{success, goal?, error?}` |
+| `PATCH /api/sessions/:id/mcode/goal` | `{status?, objective?, tokenBudget?: number \| null}` — at least one field | `{success, goal?, error?}` |
+| `DELETE /api/sessions/:id/mcode/goal` | — | `{success, cleared?, error?}` |
+| `POST /api/sessions/:id/mcode/delegation/stop` | — | `{success, receipt?, error?}` |
+
+- `goal` is a `McodeGoalState`: `{goalId, sessionId, objective, status, createdAt, updatedAt, tokensUsed, turnsUsed, timeUsedSeconds, tokenBudget, statusReason?, hasKickoffAttachments?}`.
+- `status` is HAPI's spelling: `active \| paused \| blocked \| complete \| budgetLimited \| usageLimited`. A client may **set** `active`, `paused`, `blocked`, `complete` and `budgetLimited`; `usageLimited` is derived by the agent from its own usage counters, so a request for it is refused.
+- `tokenBudget` is `null` for "no budget" — in a create that is what omitting the field means, in a patch it clears the budget the goal has. The agent normalizes both the same way.
+- The receipt of the delegation stop is `{schemaVersion, rootSessionId, rootStopped, stoppedSessionIds[], activeSessionIds[], failedSessionIds[]}`. A subagent that is still running is listed in `activeSessionIds`, one that could not be stopped in `failedSessionIds`.
+- The state of the goal reaches the client as a `thread-goal-updated` event and a cleared goal as `thread-goal-cleared` — see [Messages](./messages.md). The routes above are how a client *asks* for a change; the events are how it learns that one happened.
+
 ### Machines & spawning
 
 Source: `hub/src/web/routes/machines.ts`; schemas `SpawnSessionRequestSchema`, `MachineListDirectoryRequestSchema`, `MachinePathsExistsRequestSchema`, `RenameMachineRequestSchema` (`shared/src/apiTypes.ts`), `MachineSchema` (`shared/src/schemas.ts`).
