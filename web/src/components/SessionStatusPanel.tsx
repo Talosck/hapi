@@ -272,8 +272,20 @@ function ConnectedApps(props: {
     apps: McodeConnectorApp[]
     auth: McodeConnectorAuth | null
     error: string | null
+    /** Whether the agent of the session is still starting. */
+    pending?: boolean
 }) {
     const { t } = useTranslation()
+
+    if (props.pending) {
+        // The agent publishes its broker a moment after it is spawned, so a
+        // session that just started has no list yet. That is not a failure.
+        return (
+            <div className="flex flex-col gap-0.5">
+                <div className="text-xs text-[var(--app-hint)]">{t('session.status.apps.starting')}</div>
+            </div>
+        )
+    }
 
     if (props.error) {
         return (
@@ -331,6 +343,8 @@ export function SessionStatusPanel(props: {
         apps: McodeConnectorApp[]
         auth: McodeConnectorAuth | null
         error: string | null
+        /** Whether the agent of the session is still starting. */
+        pending?: boolean
     } | null
     /**
      * Whether the session is still running.
@@ -496,6 +510,7 @@ export function SessionStatusPanel(props: {
                                 apps={props.apps.apps}
                                 auth={props.apps.auth}
                                 error={props.apps.error}
+                                pending={props.apps.pending}
                             />
                         </Section>
                     ) : null}

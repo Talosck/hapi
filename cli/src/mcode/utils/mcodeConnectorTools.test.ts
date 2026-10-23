@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -11,6 +11,7 @@ import {
     groupMcodeConnectorApps,
     knownMcodeAgentHostPids,
     listMcodeConnectorApps,
+    markMcodeAgentStarting,
     mcodeConnectorProbes,
     parseMcodeConnectorAuth,
     parseMcodeConnectorTools,
@@ -75,6 +76,17 @@ function emptyDataDir(): string {
 /** The socket of a broker instance in a data directory. */
 function instanceSocket(dataDir: string, instance: string): string {
     return join(dataDir, 'run', instance, 'mcode-auth-lease-v1.sock')
+}
+
+/**
+ * Makes a broker look like it belongs to a host that left long ago.
+ *
+ * The age is what tells a broker that is still starting from one whose host
+ * is gone: a fresh socket may not be in the table of the kernel yet.
+ */
+function ageBrokerSocket(socketPath: string): void {
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60_000)
+    utimesSync(socketPath, tenMinutesAgo, tenMinutesAgo)
 }
 
 afterEach(() => {
@@ -286,6 +298,64 @@ describe('discoverMcodeConnectorBrokers', () => {
 
         expect(brokers.map((broker) => broker.capabilityFile)).toEqual([
             join(dataDir, 'run', 'mt-bbbbbb', 'mcode-auth-lease-v1.cap')
+        ])
+    })
+
+    it('skips an instance nobody holds the socket of', () => {
+        // The socket of a host that is gone is not in the table of the kernel
+        // any more, so no process holds it. Asking that broker would only
+        // report the failure of a host that left days ago.
+        const dataDir = makeDataDir([
+            { dir: 'mt-aaaaaa', withBroker: true },
+            { dir: 'mt-bbbbbb', withBroker: true }
+        ])
+        ageBrokerSocket(instanceSocket(dataDir, 'mt-aaaaaa'))
+        const owners = new Map([[instanceSocket(dataDir, 'mt-bbbbbb'), 222]])
+
+        const brokers = discoverMcodeConnectorBrokers({
+            tmpRoot: makeBrokerRoot([]),
+            dataDir,
+            owners,
+            isProcessAlive: () => true
+        })
+
+        expect(brokers.map((broker) => broker.capabilityFile)).toEqual([
+            join(dataDir, 'run', 'mt-bbbbbb', 'mcode-auth-lease-v1.cap')
+        ])
+    })
+
+    it('keeps an instance that was just created', () => {
+        // A broker that is a moment old may not be in the table of the kernel
+        // yet, and a host that is still starting has to stay askable.
+        const dataDir = makeDataDir([{ dir: 'mt-aaaaaa', withBroker: true }])
+        const owners = new Map([[instanceSocket(dataDir, 'mt-bbbbbb'), 222]])
+
+        const brokers = discoverMcodeConnectorBrokers({
+            tmpRoot: makeBrokerRoot([]),
+            dataDir,
+            owners,
+            isProcessAlive: () => true
+        })
+
+        expect(brokers.map((broker) => broker.capabilityFile)).toEqual([
+            join(dataDir, 'run', 'mt-aaaaaa', 'mcode-auth-lease-v1.cap')
+        ])
+    })
+
+    it('keeps every instance where the kernel cannot tell who holds the socket', () => {
+        // Only Linux can answer who holds a socket. Elsewhere the instance is
+        // kept and the probe answers for itself.
+        const dataDir = makeDataDir([{ dir: 'mt-aaaaaa', withBroker: true }])
+
+        const brokers = discoverMcodeConnectorBrokers({
+            tmpRoot: makeBrokerRoot([]),
+            dataDir,
+            owners: new Map(),
+            isProcessAlive: () => true
+        })
+
+        expect(brokers.map((broker) => broker.capabilityFile)).toEqual([
+            join(dataDir, 'run', 'mt-aaaaaa', 'mcode-auth-lease-v1.cap')
         ])
     })
 })
@@ -705,5 +775,46 @@ describe('listMcodeConnectorApps', () => {
 
         expect(catalog.apps).toEqual([])
         expect(catalog.error).toContain('No MiniMax Code host is running')
+    })
+
+    it('says that the agent is still starting instead of reporting a failure', async () => {
+        // The agent publishes its broker a moment after it is spawned, so the
+        // first read of a session that just started has no answer yet. That
+        // is not a broken installation.
+        markMcodeAgentStarting(true)
+        const catalog = await listMcodeConnectorApps({
+            mcodeCommand: 'mcode',
+            runTools: async () => {
+                throw new Error('MCode host authentication broker is unavailable.')
+            },
+            probes: TEST_PROBE
+        })
+
+        expect(catalog.pending).toBe(true)
+        expect(catalog.apps).toEqual([])
+        expect(catalog.error).toContain('still starting')
+    })
+
+    it('reports the failure of the agent of the session, not of a fallback', async () => {
+        // The first probe is the agent the user is looking at. The reason
+        // that reaches them has to be that one - the fallback host of the
+        // machine says nothing about their session.
+        const probes = [
+            { command: 'mcode-tools', env: { MCODE_AUTH_BROKER_ENDPOINT: '/tmp/agent.sock' } as NodeJS.ProcessEnv },
+            { command: 'mcode-tools', env: { MCODE_AUTH_BROKER_ENDPOINT: '/tmp/other.sock' } as NodeJS.ProcessEnv }
+        ]
+        const runTools = async (_command: string, args: string[], env: NodeJS.ProcessEnv) => {
+            if (args[0] === 'auth') {
+                throw new Error('no auth')
+            }
+            if (env.MCODE_AUTH_BROKER_ENDPOINT === '/tmp/agent.sock') {
+                throw new Error('the broker of the agent refused')
+            }
+            throw new Error('the host of the machine is gone')
+        }
+
+        const catalog = await listMcodeConnectorApps({ mcodeCommand: 'mcode', runTools, probes })
+
+        expect(catalog.error).toBe('the broker of the agent refused')
     })
 })

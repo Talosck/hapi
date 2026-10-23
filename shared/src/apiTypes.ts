@@ -1014,6 +1014,14 @@ export type McodeAppsResponse = {
     auth?: McodeConnectorAuth
     /** The usage the account has left. Missing when it could not be read. */
     quota?: McodeQuotaWindow | null
+    /**
+     * Whether the answer is not ready yet.
+     *
+     * The agent of a session publishes its broker a moment after it is
+     * spawned, so a read that arrives in that window cannot have an answer.
+     * The client asks again instead of showing a failure.
+     */
+    pending?: boolean
     error?: string
 }
 

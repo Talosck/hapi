@@ -122,4 +122,55 @@ describe('useMcodeApps', () => {
 
         expect(getMachineMcodeApps).not.toHaveBeenCalled()
     })
+
+    it('treats a starting agent as not ready yet, not as a failure', async () => {
+        // The agent of a session publishes its broker a moment after it is
+        // spawned, so the first read has no answer. The panel shows that the
+        // agent is starting and asks again.
+        const getSessionMcodeApps = vi.fn(async () => ({
+            success: false,
+            pending: true,
+            error: 'The MiniMax Code agent is still starting.'
+        }))
+        const api = { getSessionMcodeApps } as unknown as ApiClient
+        const queryClient = createQueryClient()
+
+        const { result } = renderHook(() => useMcodeApps({
+            api,
+            machineId: 'machine-1',
+            sessionId: 'session-1',
+            enabled: true
+        }), { wrapper: wrapper(queryClient) })
+
+        await waitFor(() => expect(result.current.pending).toBe(true))
+        expect(result.current.error).toBeNull()
+        expect(result.current.apps).toEqual([])
+    })
+
+    it('reads again while the agent is starting', async () => {
+        // The answer of a starting agent arrives within seconds, so the read
+        // comes back sooner than the five minutes of a settled catalog.
+        let answer: { success: boolean; pending?: boolean; apps?: unknown[] } = {
+            success: false,
+            pending: true
+        }
+        const getSessionMcodeApps = vi.fn(async () => answer)
+        const api = { getSessionMcodeApps } as unknown as ApiClient
+        const queryClient = createQueryClient()
+
+        const { result } = renderHook(() => useMcodeApps({
+            api,
+            machineId: 'machine-1',
+            sessionId: 'session-1',
+            enabled: true
+        }), { wrapper: wrapper(queryClient) })
+
+        await waitFor(() => expect(result.current.pending).toBe(true))
+        expect(getSessionMcodeApps).toHaveBeenCalledTimes(1)
+
+        answer = { success: true, apps: [{ provider: 'matrix', toolCount: 13, tools: [] }] }
+        await queryClient.refetchQueries()
+        await waitFor(() => expect(result.current.pending).toBe(false))
+        expect(result.current.apps).toHaveLength(1)
+    })
 })

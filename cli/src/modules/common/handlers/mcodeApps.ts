@@ -32,7 +32,15 @@ export function registerMcodeAppHandlers(rpcHandlerManager: RpcHandlerManager): 
                 // - the reason is in the log.
                 const usage = await listMcodeTokenPlanQuota()
                 if (catalog.error) {
-                    return { success: false, auth: catalog.auth, apps: [], error: catalog.error }
+                    // A pending answer is not a failure: the agent of the
+                    // session is still starting, and the client asks again.
+                    return {
+                        success: false,
+                        auth: catalog.auth,
+                        apps: [],
+                        pending: catalog.pending === true,
+                        error: catalog.error
+                    }
                 }
                 return { success: true, auth: catalog.auth, apps: catalog.apps, quota: usage.quota }
             } catch (error) {

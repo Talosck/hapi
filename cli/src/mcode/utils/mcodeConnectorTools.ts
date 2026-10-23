@@ -50,7 +50,17 @@ export type McodeConnectorCatalog = {
     apps: McodeConnectorAppSummary[]
 }
 
-export type McodeConnectorCatalogResult = McodeConnectorCatalog & { error?: string }
+export type McodeConnectorCatalogResult = McodeConnectorCatalog & {
+    error?: string
+    /**
+     * Whether the answer is not ready yet.
+     *
+     * The agent of a session publishes its broker a moment after it is
+     * spawned, so a read that arrives in that window cannot have an answer.
+     * The caller asks again instead of showing a failure.
+     */
+    pending?: boolean
+}
 
 /**
  * The connected apps change when the user connects one, which happens outside
@@ -223,6 +233,51 @@ function unixSocketOwners(): Map<string, number> {
 }
 
 /**
+ * How long a broker instance may look ownerless before it is taken for dead.
+ *
+ * The socket of a broker that was just created can be missing from the table
+ * of the kernel for a moment, and a host that is still starting must not be
+ * written off because of it.
+ */
+const BROKER_STARTING_GRACE_MS = 5_000
+
+/**
+ * The broker of one instance directory, when it can still be asked.
+ *
+ * A host that is gone leaves its instance behind, and nobody can ask that
+ * one. The owner of the socket says whether it is still there - but only
+ * where the kernel can tell: without an owner map the instance is kept and
+ * the probe answers for itself.
+ */
+function readMcodeDataDirBroker(
+    instanceDir: string,
+    owners: Map<string, number>,
+    alive: (pid: number) => boolean
+): { broker: McodeConnectorBroker; startedAt: number } | null {
+    const endpoint = join(instanceDir, BROKER_SOCKET_FILE)
+    const capabilityFile = join(instanceDir, BROKER_CAPABILITY_FILE)
+    if (!existsSync(endpoint) || !existsSync(capabilityFile)) return null
+
+    let startedAt = 0
+    try {
+        startedAt = statSync(endpoint).mtimeMs
+    } catch {
+        // The socket went away between the listing and the stat.
+    }
+
+    const owner = owners.get(endpoint)
+    if (owner !== undefined && !alive(owner)) return null
+    if (owner === undefined && owners.size > 0) {
+        // Nobody holds the socket: the host that made it is gone. A broker
+        // that was created a moment ago may not be in the table yet, so a
+        // fresh one is kept.
+        if (Date.now() - startedAt > BROKER_STARTING_GRACE_MS) return null
+    }
+
+    return { broker: { endpoint, capabilityFile }, startedAt }
+}
+
+/**
  * The brokers the current MiniMax Code keeps in its data directory.
  *
  * The host keeps one instance per host under a generated name, next to one
@@ -246,28 +301,24 @@ export function discoverMcodeDataDirBrokers(options?: {
     }
 
     const found: { broker: McodeConnectorBroker; startedAt: number }[] = []
+    const seen = new Set<string>()
+
+    // The shared instance sits in the run directory itself.
+    const shared = readMcodeDataDirBroker(runDir, owners, alive)
+    if (shared) {
+        seen.add(shared.broker.endpoint)
+        found.push(shared)
+    }
+
     for (const name of entries) {
-        // The shared instance sits in the run directory itself, the per-host
-        // ones in a generated directory below it.
-        const instanceDir = name.startsWith(BROKER_INSTANCE_PREFIX)
-            ? join(runDir, name)
-            : runDir
-        const endpoint = join(instanceDir, BROKER_SOCKET_FILE)
-        const capabilityFile = join(instanceDir, BROKER_CAPABILITY_FILE)
-        if (!existsSync(endpoint) || !existsSync(capabilityFile)) continue
-
-        // A host that is gone leaves its instance behind, and nobody can ask
-        // that one. The owner of the socket says whether it is still there.
-        const owner = owners.get(endpoint)
-        if (owner !== undefined && !alive(owner)) continue
-
-        let startedAt = 0
-        try {
-            startedAt = statSync(instanceDir).mtimeMs
-        } catch {
-            // The directory went away between the listing and the stat.
-        }
-        found.push({ broker: { endpoint, capabilityFile }, startedAt })
+        // The per-host instances live in a generated directory below the run
+        // directory; anything else in it is not a broker.
+        if (!name.startsWith(BROKER_INSTANCE_PREFIX)) continue
+        const entry = readMcodeDataDirBroker(join(runDir, name), owners, alive)
+        if (!entry) continue
+        if (seen.has(entry.broker.endpoint)) continue
+        seen.add(entry.broker.endpoint)
+        found.push(entry)
     }
 
     return found
@@ -422,6 +473,40 @@ export function rememberMcodeAgentHostPid(pid: number): void {
 /** The agent hosts this process knows by pid, newest first. */
 export function knownMcodeAgentHostPids(): number[] {
     return [...knownAgentHostPids]
+}
+
+/**
+ * Whether this process is starting a MiniMax Code agent right now.
+ *
+ * The agent publishes its broker a moment after it is spawned - the broker
+ * belongs to the host, and the host opens it once its runtime is up. A read
+ * in that window has no answer to give, and reporting the missing broker as
+ * a failure would blame the installation for a session that is still coming
+ * up.
+ */
+let agentStarting = false
+
+/** Marks that this process is starting a MiniMax Code agent. */
+export function markMcodeAgentStarting(starting: boolean): void {
+    agentStarting = starting
+}
+
+/**
+ * Whether the agent of this session can be asked yet.
+ *
+ * The agent is the one whose broker holds the connected apps. While it is
+ * starting, it has no broker to sign the request with, so the answer is "not
+ * yet" rather than a failure the user cannot act on.
+ */
+function mcodeAgentBrokerPending(): boolean {
+    if (agentStarting) return true
+    const pids = knownMcodeAgentHostPids()
+    if (pids.length === 0) return false
+    // The newest agent is the one this session is about. It is running but
+    // has no broker: it is still coming up.
+    const newest = pids[0]
+    if (!isProcessAlive(newest)) return false
+    return findMcodeConnectorBrokerForPid(newest) === null
 }
 
 /**
@@ -781,7 +866,7 @@ export async function listMcodeConnectorApps(options?: {
 
     const promise = (async (): Promise<McodeConnectorCatalogResult> => {
         let auth: McodeConnectorAuthSummary = { status: 'unknown', authMode: null, scope: null, expiresAt: null }
-        let lastError: string | null = null
+        let firstError: string | null = null
 
         for (const probe of probes) {
             let authRead = true
@@ -806,15 +891,36 @@ export async function listMcodeConnectorApps(options?: {
                 }
                 return catalog
             } catch (error) {
-                lastError = error instanceof Error ? error.message : 'Failed to list the MiniMax Code apps'
+                // The first probe is the one that matters: the host HAPI runs
+                // in, then the agent of the session. A later probe is a
+                // fallback, so its failure says less about what the user is
+                // looking at - and the reason that reaches the user has to be
+                // the one of the agent they are waiting for.
+                if (firstError === null) {
+                    firstError = error instanceof Error ? error.message : 'Failed to list the MiniMax Code apps'
+                }
                 logger.debug('Failed to list the MiniMax Code connector tools:', error)
+            }
+        }
+
+        // An agent that is still starting has no broker to sign the request
+        // with. That is not a failure of the installation: the read is early,
+        // so the caller asks again instead of showing an error.
+        if (mcodeAgentBrokerPending()) {
+            const reason = 'The MiniMax Code agent is still starting.'
+            logger.debug('Could not read the MiniMax Code connected apps:', reason)
+            return {
+                auth,
+                apps: [],
+                pending: true,
+                error: reason
             }
         }
 
         // Two failures look the same to the caller but mean different things:
         // the host did not answer, or there was no host to ask. The second one
         // says so instead of claiming the apps are missing.
-        const reason = lastError
+        const reason = firstError
             ?? 'No MiniMax Code host is running, so the connected apps cannot be read.'
         logger.debug('Could not read the MiniMax Code connected apps:', reason)
         return {
@@ -848,4 +954,5 @@ export function _resetMcodeConnectorCacheForTests(): void {
     cachedCatalog = null
     inflightCatalog = null
     knownAgentHostPids.length = 0
+    agentStarting = false
 }

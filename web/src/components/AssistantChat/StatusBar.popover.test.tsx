@@ -49,6 +49,44 @@ describe('StatusBar context details popover', () => {
         expect(thinkingLabel.parentElement?.className.split(' ')).toContain('sm:top-0.5')
     })
 
+    it('shows the context window of a session that has not run a turn yet', () => {
+        // MiniMax Code publishes its context window only at the end of a
+        // turn, so the budget stands in until the agent reports its own.
+        render(
+            <I18nProvider>
+                <StatusBar
+                    active
+                    thinking={false}
+                    agentState={null}
+                    agentFlavor="mcode"
+                    model="m:minimax:MiniMax-M3.1-Flash:v:thinking"
+                />
+            </I18nProvider>
+        )
+
+        // The window is on screen before the first turn: it is the budget the
+        // turn will be measured against.
+        expect(screen.getAllByText('ctx 502k').length).toBeGreaterThan(0)
+    })
+
+    it('keeps the context window hidden for the other agents', () => {
+        // The other agents report their window with the first turn, and a
+        // window without a usage next to it only adds noise.
+        render(
+            <I18nProvider>
+                <StatusBar
+                    active
+                    thinking={false}
+                    agentState={null}
+                    agentFlavor="claude"
+                    model="claude-sonnet-4-6"
+                />
+            </I18nProvider>
+        )
+
+        expect(screen.queryByText('ctx 190k')).not.toBeInTheDocument()
+    })
+
     it('uses an effort-only reasoning label on mobile and the full label on desktop', () => {
         render(
             <I18nProvider>

@@ -21,6 +21,11 @@ const DEFAULT_CODEX_CONTEXT_WINDOW_TOKENS = 258_400
 // reports an explicit modelContextWindow via usage events, that takes
 // precedence over this fallback.
 const DEFAULT_PI_CONTEXT_WINDOW_TOKENS = 200_000
+// MiniMax Code publishes its context window only at the end of a turn, so a
+// session that has not run yet has no number to show. The models the agent
+// offers share one window, and the agent's own number takes over as soon as
+// the first turn reports it.
+const DEFAULT_MCODE_CONTEXT_WINDOW_TOKENS = 512_000
 
 function parseCursorWireContextWindow(model: string): number | null {
     const match = model.match(/\[([^\]]+)\]/)
@@ -54,6 +59,10 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
 
     if (flavor === 'pi') {
         return Math.max(1, DEFAULT_PI_CONTEXT_WINDOW_TOKENS - CONTEXT_HEADROOM_TOKENS)
+    }
+
+    if (flavor === 'mcode') {
+        return Math.max(1, DEFAULT_MCODE_CONTEXT_WINDOW_TOKENS - CONTEXT_HEADROOM_TOKENS)
     }
 
     if (flavor === 'cursor') {

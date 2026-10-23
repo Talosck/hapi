@@ -247,6 +247,30 @@ describe('SessionStatusPanel', () => {
     })
 
     /**
+     * An agent that is still starting has no list yet.
+     *
+     * The broker of the agent appears a moment after the session starts, so
+     * the first read cannot have an answer. That is not a failure of the
+     * installation and must not be shown as one.
+     */
+    it('says that the agent is still starting', () => {
+        renderWithProviders(
+            <SessionStatusPanel
+                data={emptyStatus}
+                apps={{
+                    apps: [],
+                    auth: null,
+                    error: 'The MiniMax Code agent is still starting.',
+                    pending: true
+                }}
+            />
+        )
+        expect(screen.getByText('The MiniMax Code agent is still starting…')).toBeInTheDocument()
+        expect(screen.queryByText('The connected apps could not be read')).not.toBeInTheDocument()
+        expect(screen.queryByText('No apps connected')).not.toBeInTheDocument()
+    })
+
+    /**
      * An app that is not signed in looks exactly like a working one until the
      * agent calls it and fails, so the sign-in state belongs in the panel.
      */

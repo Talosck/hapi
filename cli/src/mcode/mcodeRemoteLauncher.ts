@@ -23,7 +23,7 @@ import type { MessageBuffer } from '@/ui/ink/messageBuffer';
 import type { McodeSession } from './session';
 import type { McodeMode, PermissionMode } from './types';
 import { createMcodeBackend } from './utils/mcodeBackend';
-import { rememberMcodeAgentHostPid } from './utils/mcodeConnectorTools';
+import { rememberMcodeAgentHostPid, markMcodeAgentStarting } from './utils/mcodeConnectorTools';
 import { classifyMcodeConnectFailure } from './utils/mcodeConnectFailure';
 import type { AcpSessionStateUpdate } from '@/agent/backends/acp';
 import { isAcpIndeterminateError } from '@/agent/backends/acp/AcpStdioTransport';
@@ -547,6 +547,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             messageBuffer.addMessage(error.message, 'status');
         });
 
+        // The agent publishes its broker a moment after it is spawned, so a
+        // read that arrives while it is coming up has no answer yet. The state
+        // lets the readout say "starting" instead of reporting the missing
+        // broker as a failure of the installation.
+        markMcodeAgentStarting(true);
         try {
             await backend.initialize();
         } catch (error) {
@@ -558,6 +563,8 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             const failure = classifyMcodeConnectFailure(error);
             logger.warn('[mcode-remote] MiniMax Code could not be started', failure.reason, failure.detail);
             throw new Error(failure.message, { cause: error });
+        } finally {
+            markMcodeAgentStarting(false);
         }
 
         // The connected apps of this session live behind the broker of the

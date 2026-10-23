@@ -28,6 +28,12 @@ describe('getContextBudgetTokens', () => {
         expect(getContextBudgetTokens('composer-2.5-fast[context=300k]', 'cursor')).toBe(290_000)
     })
 
+    it('uses the MiniMax Code window with headroom', () => {
+        // MiniMax Code publishes its context window only at the end of a
+        // turn, so the budget stands in until the agent reports its own.
+        expect(getContextBudgetTokens('m:minimax:MiniMax-M3.1-Flash:v:thinking', 'mcode')).toBe(502_000)
+    })
+
     it('returns null for unknown non-Claude sessions', () => {
         expect(getContextBudgetTokens('gemini-3-pro', 'gemini')).toBeNull()
     })

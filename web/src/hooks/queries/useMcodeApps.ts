@@ -13,6 +13,15 @@ import { queryKeys } from '@/lib/query-keys'
 const APPS_REFRESH_MS = 5 * 60_000
 
 /**
+ * How often the connected apps are re-read while the agent is starting.
+ *
+ * The agent publishes its broker a moment after it is spawned, so the first
+ * read of a session that just started has no answer yet. Asking again brings
+ * the list in as soon as the agent is up.
+ */
+const APPS_STARTING_REFRESH_MS = 2_000
+
+/**
  * How long a read counts as "just now" for the forced refresh.
  *
  * The machine caches the catalog for minutes, because reading it costs two
@@ -43,6 +52,8 @@ export function useMcodeApps(args: {
     auth: McodeConnectorAuth | null
     quota: McodeQuotaWindow | null
     isLoading: boolean
+    /** Whether the agent is still starting, so there is no answer yet. */
+    pending: boolean
     error: string | null
 } {
     const { api, machineId, sessionId } = args
@@ -80,21 +91,32 @@ export function useMcodeApps(args: {
         refetchOnWindowFocus: true,
         // The machine caches the catalog for the same span, so polling faster
         // than that would only ask the machine for the answer it already has.
-        refetchInterval: APPS_REFRESH_MS,
+        // An agent that is still starting is the exception: its answer is
+        // not cached, and it appears within seconds.
+        refetchInterval: (query) => query.state.data?.pending === true
+            ? APPS_STARTING_REFRESH_MS
+            : APPS_REFRESH_MS,
         retry: false,
     })
+
+    // An agent that is still starting has no answer yet - that is not a
+    // failure, and the panel says so instead of showing an error.
+    const pending = query.data?.pending === true
 
     return {
         apps: query.data?.apps ?? [],
         auth: query.data?.auth ?? null,
         quota: query.data?.quota ?? null,
         isLoading: query.isLoading,
-        error: query.data?.success === false
-            ? (query.data.error ?? 'Failed to load the MiniMax Code apps')
-            : query.error instanceof Error
-                ? query.error.message
-                : query.error
-                    ? 'Failed to load the MiniMax Code apps'
-                    : null,
+        pending,
+        error: pending
+            ? null
+            : query.data?.success === false
+                ? (query.data.error ?? 'Failed to load the MiniMax Code apps')
+                : query.error instanceof Error
+                    ? query.error.message
+                    : query.error
+                        ? 'Failed to load the MiniMax Code apps'
+                        : null,
     }
 }

@@ -1561,14 +1561,16 @@ function SessionChatInner(props: SessionChatProps) {
         return {
             apps: mcodeApps.apps,
             auth: mcodeApps.auth,
-            error: mcodeApps.error
+            error: mcodeApps.error,
+            pending: mcodeApps.pending
         }
     }, [
         agentFlavor,
         mcodeApps.isLoading,
         mcodeApps.apps,
         mcodeApps.auth,
-        mcodeApps.error
+        mcodeApps.error,
+        mcodeApps.pending
     ])
 
     /**
@@ -1610,8 +1612,11 @@ function SessionChatInner(props: SessionChatProps) {
             alwaysVisible: props.session.metadata?.capabilities?.mcodeExtensions?.goalCreate === true
                 || (mcodeAppsState?.apps.length ?? 0) > 0
                 // The panel is where the probe failure is reported, so it has
-                // to stay when the probe failed.
+                // to stay when the probe failed. The same holds for an agent
+                // that is still starting: the panel says so until the list
+                // arrives.
                 || Boolean(mcodeAppsState?.error)
+                || Boolean(mcodeAppsState?.pending)
         }),
         [
             reduced.latestGoal,
@@ -1622,7 +1627,8 @@ function SessionChatInner(props: SessionChatProps) {
             normalizedGoalStateMessages,
             props.session.metadata?.capabilities?.mcodeExtensions?.goalCreate,
             mcodeAppsState?.apps.length,
-            mcodeAppsState?.error
+            mcodeAppsState?.error,
+            mcodeAppsState?.pending
         ]
     )
 

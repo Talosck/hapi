@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
     formatCompactContextUsageLabel,
     formatContextUsageLabel,
+    formatContextWindowLabel,
     formatQuotaLabel,
     getContextWarning,
     getContextUsageDetails,
@@ -89,6 +90,18 @@ describe('context usage labels', () => {
             usedPercentage: 35,
             remainingPercentage: 65
         })
+    })
+
+    it('names the window of a session that has not run a turn yet', () => {
+        // The window is the budget the first turn is measured against, so it
+        // is shown before there is a usage number next to it.
+        expect(formatContextWindowLabel(502_000)).toBe('ctx 502k')
+    })
+
+    it('has no window label without a window', () => {
+        expect(formatContextWindowLabel(null)).toBeNull()
+        expect(formatContextWindowLabel(undefined)).toBeNull()
+        expect(formatContextWindowLabel(0)).toBeNull()
     })
 })
 

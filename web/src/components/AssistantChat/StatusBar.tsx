@@ -159,6 +159,17 @@ export function formatCompactContextUsageLabel(contextSize: number, maxContextSi
     return `ctx ${formatTokenCount(maxContextSize)} (${remainingPercentage}% left)`
 }
 
+/**
+ * The label of a session that has not run a turn yet.
+ *
+ * The window is the budget the first turn is measured against, so it is worth
+ * showing before there is a usage number to put next to it.
+ */
+export function formatContextWindowLabel(maxContextSize: number | null | undefined): string | null {
+    if (!maxContextSize) return null
+    return `ctx ${formatTokenCount(maxContextSize)}`
+}
+
 export function getContextUsageDetails(
     contextSize: number,
     maxContextSize: number | null | undefined,
@@ -301,30 +312,53 @@ export function StatusBar(props: {
     )
 
     const contextHeuristicModel = props.contextModel ?? props.model
-    const contextWarning = useMemo(
-        () => {
-            if (props.contextSize === undefined) return null
-            const maxContextSize = props.contextWindow ?? getContextBudgetTokens(contextHeuristicModel, props.agentFlavor)
-            if (!maxContextSize) return null
-            return getContextWarning(props.contextSize, maxContextSize)
-        },
-        [props.contextSize, props.contextWindow, contextHeuristicModel, props.agentFlavor]
+    // The window the session is measured against. The agent reports it once a
+    // turn has run; until then the budget of the flavor stands in.
+    const contextMaxSize = useMemo(
+        () => props.contextWindow ?? getContextBudgetTokens(contextHeuristicModel, props.agentFlavor),
+        [props.contextWindow, contextHeuristicModel, props.agentFlavor]
     )
+    /**
+     * Whether the window is shown before the session has run a turn.
+     *
+     * MiniMax Code publishes its context window at the end of a turn, so the
+     * budget of the flavor stands in until the agent reports its own. The
+     * other flavors keep their window hidden until there is a usage to put
+     * next to it.
+     */
+    const showsWindowWithoutUsage = props.agentFlavor === 'mcode'
+    const contextWindowOnly = showsWindowWithoutUsage && props.contextSize === undefined && contextMaxSize !== null
+    const contextWarning = useMemo(() => {
+        if (props.contextSize === undefined) return null
+        if (!contextMaxSize) return null
+        return getContextWarning(props.contextSize, contextMaxSize)
+    }, [props.contextSize, contextMaxSize])
     const contextUsageLabel = useMemo(() => {
-        if (props.contextSize === undefined) return null
-        const maxContextSize = props.contextWindow ?? getContextBudgetTokens(contextHeuristicModel, props.agentFlavor)
-        return formatContextUsageLabel(props.contextSize, maxContextSize)
-    }, [props.contextSize, props.contextWindow, contextHeuristicModel, props.agentFlavor])
+        if (props.contextSize === undefined) {
+            return showsWindowWithoutUsage ? formatContextWindowLabel(contextMaxSize) : null
+        }
+        return formatContextUsageLabel(props.contextSize, contextMaxSize)
+    }, [props.contextSize, contextMaxSize, showsWindowWithoutUsage])
     const compactContextUsageLabel = useMemo(() => {
-        if (props.contextSize === undefined) return null
-        const maxContextSize = props.contextWindow ?? getContextBudgetTokens(contextHeuristicModel, props.agentFlavor)
-        return formatCompactContextUsageLabel(props.contextSize, maxContextSize)
-    }, [props.contextSize, props.contextWindow, contextHeuristicModel, props.agentFlavor])
+        if (props.contextSize === undefined) {
+            return showsWindowWithoutUsage ? formatContextWindowLabel(contextMaxSize) : null
+        }
+        return formatCompactContextUsageLabel(props.contextSize, contextMaxSize)
+    }, [props.contextSize, contextMaxSize, showsWindowWithoutUsage])
     const contextUsageDetails = useMemo(() => {
-        if (props.contextSize === undefined) return null
-        const maxContextSize = props.contextWindow ?? getContextBudgetTokens(contextHeuristicModel, props.agentFlavor)
-        return getContextUsageDetails(props.contextSize, maxContextSize, props.contextCacheRead)
-    }, [props.contextSize, props.contextCacheRead, props.contextWindow, contextHeuristicModel, props.agentFlavor])
+        if (props.contextSize === undefined) {
+            // Nothing has been measured yet: the window is all there is to say.
+            if (!showsWindowWithoutUsage || !contextMaxSize) return null
+            return {
+                cacheRead: null,
+                used: '0',
+                usedPercentage: null,
+                remaining: formatTokenCount(contextMaxSize),
+                remainingPercentage: 100
+            }
+        }
+        return getContextUsageDetails(props.contextSize, contextMaxSize, props.contextCacheRead)
+    }, [props.contextSize, props.contextCacheRead, contextMaxSize, showsWindowWithoutUsage])
     const contextUsedPercentage = contextUsageDetails?.usedPercentage ?? null
 
     const permissionMode = props.permissionMode
@@ -417,27 +451,41 @@ export function StatusBar(props: {
                                 className="z-50 rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 shadow-lg"
                             >
                                 <div className="flex max-w-[min(22rem,calc(100vw-1rem))] flex-col gap-1 text-xs leading-tight text-[var(--app-fg)]">
-                                    {contextUsageDetails?.cacheRead ? (
+                                    {contextWindowOnly ? (
+                                        // The session has not run a turn yet, so
+                                        // there is no usage to report - the
+                                        // window it will be measured against is
+                                        // what there is to say.
                                         <span className="break-words">
-                                            {t('misc.contextCache', { value: contextUsageDetails.cacheRead })}
-                                        </span>
-                                    ) : null}
-                                    <span className="break-words">
-                                        {contextUsageDetails?.usedPercentage === null
-                                            ? t('misc.contextUsedTokens', { value: contextUsageDetails.used })
-                                            : t('misc.contextUsed', {
-                                                value: contextUsageDetails?.used ?? '',
-                                                percent: contextUsageDetails?.usedPercentage ?? 0
-                                            })}
-                                    </span>
-                                    {contextUsageDetails?.remaining && contextUsageDetails.remainingPercentage !== null ? (
-                                        <span className="break-words">
-                                            {t('misc.contextRemaining', {
-                                                value: contextUsageDetails.remaining,
-                                                percent: contextUsageDetails.remainingPercentage
+                                            {t('misc.contextWindow', {
+                                                value: contextUsageDetails?.remaining ?? ''
                                             })}
                                         </span>
-                                    ) : null}
+                                    ) : (
+                                        <>
+                                            {contextUsageDetails?.cacheRead ? (
+                                                <span className="break-words">
+                                                    {t('misc.contextCache', { value: contextUsageDetails.cacheRead })}
+                                                </span>
+                                            ) : null}
+                                            <span className="break-words">
+                                                {contextUsageDetails?.usedPercentage === null
+                                                    ? t('misc.contextUsedTokens', { value: contextUsageDetails.used })
+                                                    : t('misc.contextUsed', {
+                                                        value: contextUsageDetails?.used ?? '',
+                                                        percent: contextUsageDetails?.usedPercentage ?? 0
+                                                    })}
+                                            </span>
+                                            {contextUsageDetails?.remaining && contextUsageDetails.remainingPercentage !== null ? (
+                                                <span className="break-words">
+                                                    {t('misc.contextRemaining', {
+                                                        value: contextUsageDetails.remaining,
+                                                        percent: contextUsageDetails.remainingPercentage
+                                                    })}
+                                                </span>
+                                            ) : null}
+                                        </>
+                                    )}
                                 </div>
                             </Popover.Content>
                         </Popover.Portal>
