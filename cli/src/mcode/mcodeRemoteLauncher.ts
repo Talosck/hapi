@@ -272,7 +272,11 @@ export type McodeRemoteLauncherOptions = {
      * session on the same process, or the user in the agent's own UI.
      */
     onAgentModelChanged?: (model: string) => void;
-    /** Fired after a failed effort switch, with the effort still active. */
+    /**
+     * Fired after an effort switch that did not take, or after a model that
+     * has no effort levels at all, with the effort that is in effect - null
+     * when the session has no thinking effort.
+     */
     onEffortRollback?: (effort: string | null) => void;
     /** Fired after a failed permission-mode apply, with the restored mode. */
     onPermissionModeRollback?: (mode: PermissionMode) => void;
@@ -917,11 +921,22 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 this.currentBackendEffort = effortOptionAfterModel.currentValue === 'default'
                 ? null
                 : effortOptionAfterModel.currentValue ?? null;
+            } else if (modelSwitched) {
+                // The new model reasons by toggle instead of by level, so it
+                // publishes no thinking-effort option at all. The effort of
+                // the old model does not exist anymore: it is dropped here,
+                // so the turn does not ask the agent for a level the new
+                // model cannot take.
+                this.currentBackendEffort = null;
+                batch.mode.effort = null;
+                this.opts.onEffortRollback?.(null);
             }
             const requestedEffort = batch.mode.effort === null
                 ? this.defaultBackendEffort
                 : batch.mode.effort;
-            if (requestedEffort && requestedEffort !== this.currentBackendEffort) {
+            // An agent that publishes no thinking-effort option cannot take
+            // one, so there is nothing to apply.
+            if (effortOptionAfterModel && requestedEffort && requestedEffort !== this.currentBackendEffort) {
                 try {
                     await this.applyEffort(acpSessionId, requestedEffort);
                     this.currentBackendEffort = requestedEffort;

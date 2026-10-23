@@ -594,6 +594,34 @@ describe('mcodeRemoteLauncher config sync', () => {
         expect(backend.setConfigOption).toHaveBeenCalledWith('mcode-session-1', 'thinkingEffort', 'low')
     })
 
+    it('drops the thinking effort when the new model has no effort levels', async () => {
+        // A model that reasons by toggle publishes no thinking-effort option
+        // at all. The effort of the old model does not exist anymore, so
+        // carrying it over asks the agent for a level it cannot take.
+        let switched = false
+        const backend = createBackend({
+            setModel: vi.fn(async () => { switched = true }),
+            getThoughtLevelConfigOption: vi.fn(() => switched ? undefined : {
+                id: 'thinkingEffort',
+                currentValue: 'max',
+                options: [
+                    { value: 'low', name: 'Low' },
+                    { value: 'max', name: 'Max' }
+                ]
+            })
+        })
+        const session = createSession([
+            { message: 'switch model', mode: { permissionMode: 'default', model: 'm:other', effort: 'low' } }
+        ])
+
+        await mcodeRemoteLauncher(session as never, { model: 'm:good' })
+
+        expect(backend.setModel).toHaveBeenCalledWith('mcode-session-1', 'm:other', { flavor: 'mcode' })
+        expect(session.sendSessionEvent).not.toHaveBeenCalledWith(
+            expect.objectContaining({ message: expect.stringContaining('Failed to switch thinking effort') })
+        )
+    })
+
     it('restores the previous permission mode when plan entry is rejected', async () => {
         const backend = createBackend({
             setSessionMode: vi.fn(async (_sessionId: string, mode: string) => {
