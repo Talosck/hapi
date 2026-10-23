@@ -861,4 +861,98 @@ RPC 响应；空队列的 `clear_queue` 返回 `{steering:[],followUp:[]}`；
 | typecheck | cli / web / hub / relay 全过 |
 | fixtures | `bun run gen:fixtures` 重新生成，**零漂移** |
 
+## 十三、真机 e2e：把单元测试证明不了的那一层补上（2026-10-23）
+
+前面三轮都是「读 Pi 源码 + mock 传输层」。这套东西能证明 wrapper 的逻辑自洽，
+但证明不了 **Pi 真的那么干**。第三轮那个 reviewer 用真 `pi --mode rpc` 手工验证过
+10 条行为，可那些验证是一次性的、留在对话里，没进仓库。于是补了一个 e2e：
+`cli/src/pi/piAgent.e2e.test.ts`。
+
+### 13.1 它是怎么跑的
+
+**真 Pi + 假 hub**。`pi --mode rpc` 是真进程、真的模型调用、真的会话文件；
+只有 hub 被换成一个录影机 session double——它把 wrapper 发过来的每一条消息和
+每一条 session event 都记下来。所以断言问的全是「Pi 到底干了什么」，
+而不是「wrapper 以为自己干了什么」。
+
+它默认跳过，要真跑得开闸：
+
+```
+HAPI_RUN_PI_E2E=1 bun run test:cli -- --run src/pi/piAgent.e2e.test.ts
+```
+
+这个门控的写法跟仓库里既有的 `HAPI_RUN_SHARED_CODEX_TESTS` 一致，
+所以它不进 CI 的单元套件，也不会让没有 Pi 登录态的机器红。
+
+### 13.2 它证明了什么
+
+一条测试串起五条链路，跑一轮大约 9 秒：
+
+1. **普通 prompt** —— 模型真的回答了（`E2E_PROMPT_OK`）
+2. **`/bash`** —— 命令真的执行了，卡片里是真实输出（`e2e-bash-output`）
+3. **`/name`** —— `metadata.name` 写了，`metadata.piUserNamedSession` 也置上了
+4. **`/tree`** —— 真的画出了会话树
+5. **被中止的 steer** —— 报了 `Pi discarded 1 queued steer when the turn was aborted: ...`
+
+第 5 条还多了一层**地面真相**：测试直接去读 Pi 自己写的会话文件
+（`~/.pi/agent/sessions/<slug>/<timestamp>_<uuid>.jsonl`），断言那个 steer 的
+标记**在整份 transcript 里根本不出现**。Pi 只有真的把 steer 递出去才会写进
+transcript，所以「wrapper 说丢弃了」和「Pi 确实没递」是两条独立的证据。
+
+实跑的 transcript 长这样（Pi 自己的文件）：
+
+```
+system:
+user: Reply with exactly: E2E_PROMPT_OK
+assistant: E2E_PROMPT_OK
+bashExecution:
+user: Write an exhaustive essay of at least 2500 words about the history of printing technology...
+assistant:                                    ← 这一轮被中止了，assistant 是空的
+user: Reply with exactly: E2E_AFTER_ABORT_OK
+```
+
+那个 steer 不在里面。
+
+### 13.3 跑出来的东西，有两条是单元测试给不了的
+
+**第一条：abort 必须在轮次还在跑的时候落地，否则根本没有「丢弃」这回事。**
+
+Pi 是**在轮次结束的那一刻**把 steering 队列 drain 进下一轮的。这在真机上看得一清二楚：
+中间有一次 steer 在 16:50:16.078 进入 Pi 的队列，轮次在 16:50:17.996 结束，
+Pi 紧接着在 16:50:17.997 起了一个新轮次，16:50:18.081 把 steer 当成 user 消息递了出去。
+等 abort 到 16:50:18.084 才确认，**队列早就空了**，`clear_queue` 回来是空的，
+wrapper 于是什么都没报——这是对的：确实什么都没丢。
+
+也就是说，abort 落晚了不是 bug，是「按得太晚」。但这直接决定了 e2e 怎么写才不 flaky：
+测试不能只 sleep 一段固定时间然后 abort，它得**先证明轮次还在流式输出**
+（wrapper 只在流式时发 `live` / `streamSnapshot` 的增量消息，计数一下就行），
+发完 steer 再确认流式还在继续，最后才 abort。第一版就是栽在这儿——
+计数器把前面几轮的增量也算进去了，闸门提前放行，abort 在轮次开始前就发了，
+steer 退化成普通 prompt，测试当然等不到「discarded」。
+
+**第二条：runner 的崩溃处理在 Vitest 里会自己咬自己。**
+
+Pi 死掉时 wrapper 走 `markCrash` → `cleanupAndExit` → `process.exit`。
+Vitest 把 `process.exit` 换成了会抛异常的桩，于是 `cleanupAndExit` 抛出去、
+被 `unhandledRejection` 接住、又进 `cleanupAndExit`，**无限循环**——
+第一轮跑完这个循环把日志写了 309 MB 才被 `timeout` 砍掉。
+
+生产环境不受影响（真的 `process.exit` 就是退出），但 e2e 的收尾必须绕开它：
+测试在 `afterAll` 里先把 `process.exit` 换成空实现，走 wrapper 自己的
+`killSession` 生命周期让 Pi 被**正常清理**掉（不是被 SIGKILL——SIGKILL 会让
+wrapper 以为 Pi 崩了，又回到那条崩溃路径），最后再把 `process.exit` 还原。
+
+顺带说清楚：前面几轮跑出来的「Pi 被 SIGKILL 杀了」全是**测试自己杀的**
+（`afterAll` 里的 `process.kill(pid,'SIGKILL')`），一度看着像 HAPI 的 bug，
+其实是测试的清理逻辑。这个坑记在这里，免得下次再被它骗一次。
+
+### 13.4 这轮的验证
+
+| 项 | 结果 |
+|---|---|
+| 真机 e2e | **1 passed**，8.6s（`HAPI_RUN_PI_E2E=1`） |
+| cli 全套 | 全过（e2e 文件默认跳过） |
+| typecheck | cli 全过 |
+| fixtures | `bun run gen:fixtures` 重新生成，**零漂移** |
+
 
