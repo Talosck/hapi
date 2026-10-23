@@ -59,6 +59,7 @@ import {
 } from './utils/mcodeExtensions';
 import { McodeExtensionControl } from './utils/mcodeExtensionControl';
 import { readMcodeTurnLease, type McodeTurnLeaseState } from './utils/mcodeTurnLease';
+import { renderMcodeDeliverables, splitMcodeDeliverables } from './utils/mcodeDeliverables';
 import { findMcodeMessagesPath } from './utils/mcodeUsage';
 import { readMcodeTranscriptToolMessages } from './utils/mcodeSessionTranscript';
 import { McodeConversationHistory } from './conversationHistory';
@@ -2281,6 +2282,26 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         // card. HAPI's clients do not know the markup, so it would reach the
         // chat - and the transcript - as raw XML. The block is taken out of
         // the answer and the files it names are reported on their own.
+        if (message.type === 'text') {
+            const split = splitMcodeDeliverables(message.text);
+            if (split.deliverables.length > 0) {
+                // The files are reported as file citations, the way HAPI
+                // reports a file anywhere else: the clients turn the path into
+                // a link that opens the file.
+                const text = [
+                    split.text.trim(),
+                    renderMcodeDeliverables(split.deliverables, this.session.path)
+                ].filter((part) => part.length > 0).join('\n\n');
+                this.emitAgentMessage({
+                    type: 'text',
+                    text,
+                    ...(message.id !== undefined ? { id: message.id } : {}),
+                    ...(message.streamSnapshot === true ? { streamSnapshot: true } : {})
+                });
+                return;
+            }
+        }
+
         const converted = convertAgentMessage(message, this.currentBackendModel);
         if (converted) {
             this.session.sendAgentMessage(converted);

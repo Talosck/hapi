@@ -4,6 +4,8 @@ import {
     DISPLAY_IMAGE_PROMPT_CODEX,
     DISPLAY_IMAGE_PROMPT_CURSOR,
     DISPLAY_IMAGE_PROMPT_HAPI_MCP,
+    DISPLAY_MEDIA_PROMPT_CURSOR,
+    DISPLAY_VIDEO_PROMPT_CURSOR,
 } from './displayImagePrompt'
 
 const displayImagePrompts = [
@@ -29,5 +31,15 @@ describe('display_image prompt semantics', () => {
         expect(DISPLAY_IMAGE_PROMPT_CODEX).toContain('functions.hapi__display_image')
         expect(DISPLAY_IMAGE_PROMPT_HAPI_MCP).toContain('hapi_display_image')
         expect(DISPLAY_IMAGE_PROMPT_CURSOR).toContain('"display_image"')
+    })
+
+    it('tells the agent that the card is the way to deliver a file', () => {
+        // MiniMax Code declares the files it hands over in a `<deliver-assets>`
+        // block in its answer, because the MiniMax Code apps render that
+        // block. HAPI does not, so the tool description has to say so.
+        for (const prompt of [DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR, DISPLAY_MEDIA_PROMPT_CURSOR]) {
+            expect(prompt).toContain('"<deliver-assets>"')
+            expect(prompt).toContain('the card is the way to deliver a file')
+        }
     })
 })

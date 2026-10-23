@@ -2713,3 +2713,59 @@ describe('mcodeRemoteLauncher session resume', () => {
     })
 })
 
+describe('mcodeRemoteLauncher delivered files', () => {
+    it('takes the delivery block out of the answer and reports the file', async () => {
+        // MiniMax Code declares the files it hands over in a `<deliver-assets>`
+        // block. The MiniMax Code apps render that block; HAPI's clients do
+        // not know it, so it would reach the chat as raw XML.
+        const backend = createBackend({
+            prompt: vi.fn(async (
+                _sessionId: string,
+                _content: unknown,
+                onMessage: (message: unknown) => void
+            ) => {
+                onMessage({
+                    type: 'text',
+                    text: 'The report is ready.\n\n<deliver-assets><media type="text" src="/home/talos/coding/hapi/report.md" title="report.md" /></deliver-assets>'
+                })
+            })
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+        session.path = '/home/talos/coding/hapi'
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const spoken = session.sendAgentMessage.mock.calls
+            .map((call) => call[0] as { type?: string; message?: string })
+        expect(spoken.some((message) => (message.message ?? '').includes('deliver-assets'))).toBe(false)
+        expect(spoken.some((message) => (message.message ?? '').includes('The report is ready.'))).toBe(true)
+
+        // The file is reported the way HAPI reports a file anywhere else: a
+        // path relative to the session's working directory, which the clients
+        // turn into a link that opens the file.
+        const answer = spoken.map((message) => message.message ?? '').join('\n')
+        expect(answer).toContain('Delivered: `report.md`')
+    })
+
+    it('keeps an answer that only talks about the markup', async () => {
+        const backend = createBackend({
+            prompt: vi.fn(async (
+                _sessionId: string,
+                _content: unknown,
+                onMessage: (message: unknown) => void
+            ) => {
+                onMessage({
+                    type: 'text',
+                    text: 'The tag <deliver-assets></deliver-assets> means a delivery.'
+                })
+            })
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const spoken = session.sendAgentMessage.mock.calls
+            .map((call) => call[0] as { message?: string })
+        expect(spoken.some((message) => (message.message ?? '').includes('deliver-assets'))).toBe(true)
+    })
+})

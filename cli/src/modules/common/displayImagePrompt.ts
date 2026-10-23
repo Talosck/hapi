@@ -1,6 +1,20 @@
 import { trimIdent } from '@/utils/trimIdent';
 
 /**
+ * How a file reaches the user in HAPI.
+ *
+ * MiniMax Code declares the files it hands over in a `<deliver-assets>` block
+ * in its answer, because the MiniMax Code apps render that block as a file
+ * card. HAPI does not, so an agent that follows that convention leaves the
+ * user with markup instead of a file. The tool is the way to deliver a file
+ * here, and the description is the only instruction an agent that cannot take
+ * a system prompt gets.
+ */
+const DISPLAY_DELIVERY_RULE = trimIdent(`
+    The host shows the file in the chat as a card. A file declared in the answer text - a "<deliver-assets>" block - is not understood here, so the card is the way to deliver a file.
+`);
+
+/**
  * Shared display_image MCP tool hints — one export per tool naming convention.
  * Inject into flavor system prompts and first-prompt bridge instructions.
  */
@@ -34,10 +48,12 @@ export const DISPLAY_VIDEO_PROMPT_HAPI_MCP = trimIdent(`
 export const DISPLAY_IMAGE_PROMPT_CURSOR = trimIdent(`
     When you create or find a local image file that the human user should see, call the tool "display_image" with the absolute filesystem path so HAPI can show it inline.
     This tool sends the image to the human user for inline display in HAPI. It is not an image-reading or image-understanding tool: it does not provide image input to the model and cannot be used to read, inspect, or analyze image contents.
+    ${DISPLAY_DELIVERY_RULE}
 `);
 
 export const DISPLAY_VIDEO_PROMPT_CURSOR = trimIdent(`
     When you create or find a local mp4 or webm recording the user should see, call the tool "display_video" with the absolute filesystem path so HAPI can show it inline.
+    ${DISPLAY_DELIVERY_RULE}
 `);
 
 export const DISPLAY_MEDIA_PROMPT_CLAUDE = trimIdent(`
@@ -54,4 +70,5 @@ export const DISPLAY_MEDIA_PROMPT_HAPI_MCP = trimIdent(`
 
 export const DISPLAY_MEDIA_PROMPT_CURSOR = trimIdent(`
     When you create or find a local audio file or other non-image file that the user should receive, call the tool "display_media" with the absolute filesystem path so HAPI can show a player or download card.
+    ${DISPLAY_DELIVERY_RULE}
 `);
