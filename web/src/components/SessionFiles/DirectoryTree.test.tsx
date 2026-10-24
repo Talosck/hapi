@@ -24,9 +24,13 @@ vi.mock('@/hooks/queries/useSessionDirectory', () => ({
 function renderTree(handlers: {
     onOpenFile?: () => void
     onRequestFileMenu?: (path: string, point: { x: number; y: number }) => void
+    onUploadFiles?: (path: string) => void
+    onUploadFolder?: (path: string) => void
 } = {}) {
     const onOpenFile = handlers.onOpenFile ?? vi.fn()
     const onRequestFileMenu = handlers.onRequestFileMenu ?? vi.fn()
+    const onUploadFiles = handlers.onUploadFiles ?? vi.fn()
+    const onUploadFolder = handlers.onUploadFolder ?? vi.fn()
 
     render(
         <I18nProvider>
@@ -37,13 +41,15 @@ function renderTree(handlers: {
                     rootLabel="project"
                     onOpenFile={onOpenFile}
                     onRequestFileMenu={onRequestFileMenu}
+                    onUploadFiles={onUploadFiles}
+                    onUploadFolder={onUploadFolder}
                     sort={DEFAULT_DIRECTORY_SORT}
                 />
             </ToastProvider>
         </I18nProvider>
     )
 
-    return { onOpenFile, onRequestFileMenu }
+    return { onOpenFile, onRequestFileMenu, onUploadFiles, onUploadFolder }
 }
 
 /** The file name button (a directory row's download button also mentions the name in its aria-label). */
@@ -85,5 +91,43 @@ describe('DirectoryTree file context menu', () => {
         } finally {
             vi.useRealTimers()
         }
+    })
+})
+
+describe('DirectoryTree upload actions', () => {
+    it('asks for the files to upload into the picked directory', () => {
+        const { onUploadFiles } = renderTree()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Upload to src' }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Upload files to src' }))
+
+        expect(onUploadFiles).toHaveBeenCalledWith('src')
+    })
+
+    it('asks for the folder to upload into the picked directory', () => {
+        const { onUploadFolder } = renderTree()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Upload to src' }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Upload folder to src' }))
+
+        expect(onUploadFolder).toHaveBeenCalledWith('src')
+    })
+
+    it('has no upload action when the page does not offer one', () => {
+        render(
+            <I18nProvider>
+                <ToastProvider>
+                    <DirectoryTree
+                        api={{} as never}
+                        sessionId="session-1"
+                        rootLabel="project"
+                        onOpenFile={vi.fn()}
+                        sort={DEFAULT_DIRECTORY_SORT}
+                    />
+                </ToastProvider>
+            </I18nProvider>
+        )
+
+        expect(screen.queryByRole('button', { name: 'Upload to src' })).toBeNull()
     })
 })

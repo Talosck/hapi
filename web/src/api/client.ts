@@ -65,7 +65,11 @@ import type {
     HubSettingsResponse,
     UpdateHubSettingsRequest,
     UsageSummaryResponse,
-    UploadFileResponse
+    UploadFileResponse,
+    WorkspaceUploadAbortResponse,
+    WorkspaceUploadChunkResponse,
+    WorkspaceUploadFinishResponse,
+    WorkspaceUploadStartResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
 import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
@@ -723,6 +727,60 @@ export class ApiClient {
             method: 'POST',
             body: JSON.stringify({ path })
         })
+    }
+
+    /** Open a chunked upload of a file into the session working directory. */
+    async startWorkspaceUpload(
+        sessionId: string,
+        options: { path: string; size: number; overwrite: boolean },
+        signal?: AbortSignal
+    ): Promise<WorkspaceUploadStartResponse> {
+        return await this.request<WorkspaceUploadStartResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/workspace/upload`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ action: 'start', ...options }),
+                signal
+            }
+        )
+    }
+
+    /** Send one chunk of an open workspace upload. */
+    async appendWorkspaceUpload(
+        sessionId: string,
+        options: { uploadId: string; offset: number; content: string },
+        signal?: AbortSignal
+    ): Promise<WorkspaceUploadChunkResponse> {
+        return await this.request<WorkspaceUploadChunkResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/workspace/upload`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ action: 'chunk', ...options }),
+                signal
+            }
+        )
+    }
+
+    /** Close an open workspace upload and move the file into place. */
+    async finishWorkspaceUpload(sessionId: string, uploadId: string): Promise<WorkspaceUploadFinishResponse> {
+        return await this.request<WorkspaceUploadFinishResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/workspace/upload`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ action: 'finish', uploadId })
+            }
+        )
+    }
+
+    /** Drop an open workspace upload and its partial file. */
+    async abortWorkspaceUpload(sessionId: string, uploadId: string): Promise<WorkspaceUploadAbortResponse> {
+        return await this.request<WorkspaceUploadAbortResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/workspace/upload`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ action: 'abort', uploadId })
+            }
+        )
     }
 
     async resumeSession(sessionId: string, opts?: { permissionMode?: string }): Promise<string> {

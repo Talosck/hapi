@@ -38,7 +38,7 @@ When no `code` is present, branch on status alone and treat the failure generica
 | 409 | `control_mode_not_applicable` | `sessions.ts` switch | Concurrent clients do not use ownership switching; hide takeover controls |
 | 409 | — (version conflict) | `sessions.ts` PATCH rename/summary, `machines.ts` PATCH rename — message mentions `version`/`concurrently`; **no code** | Concurrent edit — refetch and reapply |
 | 409 | — | `sessions.ts` delete-while-active, archive of plain inactive row, fork/rewind refusals, remote-only config on terminal-controlled sessions (`controlledByUser`) | Surface message; refresh session state |
-| 413 | — | `sessions.ts` upload (> 50 MB decoded), export too large (`{error, count, limit}`); `voice.ts` transcription (`Audio file too large`, 25 MB audio / ~26 MB body) | Reduce payload |
+| 413 | — | `sessions.ts` upload (> 50 MB decoded), export too large (`{error, count, limit}`); `voice.ts` transcription (`Audio file too large`, 25 MB audio / ~26 MB body); `workspaceUploads.ts` upload chunk (> ~1.5 MB body) | Reduce payload |
 | 413 | `scratchlist_attachment_too_large` | `sessions.ts` scratchlist upload | Reduce attachment |
 | 422 | — | `sessions.ts` reopen with incomplete metadata (`{error, missing[]}`); title-suggestion pass-through (`TitleSuggestionError`, statuses 422/429/502/503) | Not reopenable / feature unavailable |
 | 429 | — | Title suggestion (provider rate limit) | Back off |

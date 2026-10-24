@@ -67,7 +67,11 @@ export type {
     SessionTitleSuggestionResponse,
     SessionsResponse,
     SpawnResponse,
-    UploadFileResponse
+    UploadFileResponse,
+    WorkspaceUploadAbortResponse,
+    WorkspaceUploadChunkResponse,
+    WorkspaceUploadFinishResponse,
+    WorkspaceUploadStartResponse
 } from '@hapi/protocol/apiTypes'
 
 export type {

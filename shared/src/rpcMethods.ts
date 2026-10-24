@@ -23,6 +23,14 @@ export const RPC_METHODS = {
     GetDirectoryTree: 'getDirectoryTree',
     UploadFile: 'uploadFile',
     DeleteUpload: 'deleteUpload',
+    /** Open a chunked upload of a file into the session working directory. */
+    StartWorkspaceUpload: 'startWorkspaceUpload',
+    /** Append one chunk to an open workspace upload. */
+    AppendWorkspaceUpload: 'appendWorkspaceUpload',
+    /** Close an open workspace upload and move the file into place. */
+    FinishWorkspaceUpload: 'finishWorkspaceUpload',
+    /** Drop an open workspace upload and its temporary file. */
+    AbortWorkspaceUpload: 'abortWorkspaceUpload',
     Ripgrep: 'ripgrep',
     Difftastic: 'difftastic',
     Bash: 'bash',

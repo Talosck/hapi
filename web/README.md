@@ -84,6 +84,14 @@ See `src/router.tsx` for route definitions.
 - Git status view (staged/unstaged files).
 - File search with ripgrep.
 - Navigate to file viewer.
+- Upload files and folders into the session workspace.
+  - The toolbar uploads into the workspace root; a folder row in the directory
+    tree uploads into that folder.
+  - The files travel to the machine in chunks (`src/lib/workspace-upload.ts`),
+    so a large file does not need one huge request.
+  - A file only appears at its final path once the last chunk landed, and a
+    cancelled upload leaves nothing behind.
+  - An existing file with the same name is replaced.
 
 ### File viewer (`src/routes/sessions/file.tsx`)
 
@@ -196,6 +204,13 @@ bun run test:e2e:ui       # Playwright UI mode (debug)
 The spec drives a Vite-served fixture page (`web/e2e-fixtures/scratchlist-fixture.html`)
 that mounts the production `ScratchlistPanel` in isolation, so no hub /
 auth / socket setup is required.
+
+The workspace upload has the same kind of spec
+(`e2e/workspace-upload.spec.ts`, fixture
+`web/e2e-fixtures/workspace-upload-fixture.html`). It exists because a file
+input hands out a **live** `FileList` in a browser, while jsdom hands out a
+fresh one on every access: the upload has to snapshot the files before it
+resets the input, and only a real browser can prove that.
 
 ## Build
 

@@ -157,6 +157,15 @@ for request/response shapes and error semantics, and `src/web/routes/` for all e
 - `GET /api/sessions/:id/file` - Read file content.
 - `GET /api/sessions/:id/files` - File search with ripgrep.
 
+### Workspace uploads (`src/web/routes/workspaceUploads.ts`)
+
+- `POST /api/sessions/:id/workspace/upload` - Upload a file into the working
+  directory of the session. The body carries an `action`: `start` (opens the
+  upload and returns an `uploadId`), `chunk` (appends one base64 chunk),
+  `finish` (moves the file to its final path) and `abort` (drops the partial
+  file). The chunks keep every request small enough for the socket buffer, and
+  the CLI rejects any path outside of the working directory.
+
 ### Events (`src/web/routes/events.ts`)
 
 - `GET /api/events` - SSE stream for live updates.

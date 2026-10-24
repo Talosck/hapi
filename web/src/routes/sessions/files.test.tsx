@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { I18nProvider } from '@/lib/i18n-context'
+import { ToastProvider } from '@/lib/toast-context'
 import { clearDraft, getDraft } from '@/lib/composer-drafts'
 import { encodeBase64 } from '@/lib/utils'
 import FilesPage from './files'
@@ -27,6 +28,20 @@ const mocks = vi.hoisted(() => ({
         isLoading: false,
         refetch: vi.fn(),
     },
+    api: {
+        startWorkspaceUpload: vi.fn<(sessionId: string, options: unknown) => Promise<{ success: boolean; uploadId?: string; error?: string }>>(
+            async () => ({ success: true, uploadId: 'upload-1' })
+        ),
+        appendWorkspaceUpload: vi.fn<(sessionId: string, options: unknown) => Promise<{ success: boolean; received?: number; error?: string }>>(
+            async () => ({ success: true, received: 5 })
+        ),
+        finishWorkspaceUpload: vi.fn<(sessionId: string, uploadId: string) => Promise<{ success: boolean; path?: string; size?: number; replaced?: boolean; error?: string }>>(
+            async () => ({ success: true, path: 'a.txt', size: 5, replaced: false })
+        ),
+        abortWorkspaceUpload: vi.fn<(sessionId: string, uploadId: string) => Promise<{ success: boolean; error?: string }>>(
+            async () => ({ success: true })
+        ),
+    },
 }))
 
 vi.mock('@tanstack/react-router', () => ({
@@ -40,7 +55,7 @@ vi.mock('@/lib/composer-draft-transfer', () => ({
 }))
 
 vi.mock('@/lib/app-context', () => ({
-    useAppContext: () => ({ api: {} }),
+    useAppContext: () => ({ api: mocks.api }),
 }))
 
 vi.mock('@/hooks/useAppGoBack', () => ({
@@ -98,7 +113,9 @@ function renderFilesPage() {
     return render(
         <QueryClientProvider client={queryClient}>
             <I18nProvider>
-                <FilesPage />
+                <ToastProvider>
+                    <FilesPage />
+                </ToastProvider>
             </I18nProvider>
         </QueryClientProvider>
     )
@@ -125,8 +142,17 @@ describe('FilesPage search navigation', () => {
         expect(input).toHaveValue('感')
         const sortButton = screen.getByRole('button', { name: 'Sort files' })
         const refreshButton = screen.getByRole('button', { name: 'Refresh filesystem view' })
+        const uploadFilesButton = screen.getByRole('button', { name: 'Upload files' })
+        const uploadFolderButton = screen.getByRole('button', { name: 'Upload folder' })
         expect(sortButton.parentElement?.parentElement).toBe(input.parentElement)
-        expect(input.parentElement?.nextElementSibling).toBe(refreshButton)
+        // The toolbar order is search, upload files, upload folder, refresh.
+        // The hidden file inputs sit between the buttons, so the order is
+        // checked by document position rather than by sibling.
+        const toolbarOrder = [input, uploadFilesButton, uploadFolderButton, refreshButton]
+        for (let index = 1; index < toolbarOrder.length; index += 1) {
+            const follows = toolbarOrder[index - 1].compareDocumentPosition(toolbarOrder[index]) & Node.DOCUMENT_POSITION_FOLLOWING
+            expect(follows).toBeTruthy()
+        }
         expect(sortButton).toHaveClass('w-10', 'self-stretch')
         expect(refreshButton).toHaveClass('h-9', 'w-9')
         expect(mocks.fileSearch).toHaveBeenCalledWith(
@@ -383,5 +409,125 @@ describe('FilesPage changes-row context menu', () => {
         } finally {
             vi.useRealTimers()
         }
+    })
+})
+
+describe('FilesPage workspace upload', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        mocks.sessionId = 'session-1'
+        mocks.search = { tab: 'directories' }
+        mocks.api.startWorkspaceUpload.mockImplementation(async () => ({ success: true, uploadId: 'upload-1' }))
+        mocks.api.appendWorkspaceUpload.mockImplementation(async () => ({ success: true, received: 5 }))
+        mocks.api.finishWorkspaceUpload.mockImplementation(async () => ({ success: true, path: 'a.txt', size: 5, replaced: false }))
+        mocks.api.abortWorkspaceUpload.mockImplementation(async () => ({ success: true }))
+        window.localStorage.clear()
+        window.sessionStorage.clear()
+    })
+
+    function fileInput(): HTMLInputElement {
+        return document.querySelector('input[type="file"]') as HTMLInputElement
+    }
+
+    it('opens the file picker from the toolbar', () => {
+        renderFilesPage()
+
+        const input = fileInput()
+        const click = vi.spyOn(input, 'click')
+        fireEvent.click(screen.getByRole('button', { name: 'Upload files' }))
+
+        expect(click).toHaveBeenCalled()
+    })
+
+    it('uploads the picked file even though the input is reset afterwards', async () => {
+        renderFilesPage()
+
+        const input = fileInput()
+        const file = new File(['hello'], 'a.txt')
+
+        // The FileList of a file input is live: browsers empty it when the
+        // input is reset. The fake below behaves that way, so the upload only
+        // works when the files are snapshotted before the reset.
+        const liveFiles = {
+            0: file,
+            length: 1,
+            item: (index: number) => (index === 0 ? file : null)
+        }
+        Object.defineProperty(input, 'files', { value: liveFiles, configurable: true, writable: true })
+        let currentValue = ''
+        Object.defineProperty(input, 'value', {
+            configurable: true,
+            get: () => currentValue,
+            set: (next: string) => {
+                currentValue = next
+                liveFiles.length = 0
+            }
+        })
+
+        await act(async () => {
+            fireEvent.change(input, { target: { files: liveFiles } })
+        })
+
+        expect(mocks.api.startWorkspaceUpload).toHaveBeenCalledWith('session-1', {
+            path: 'a.txt',
+            size: 5,
+            overwrite: true
+        }, expect.any(AbortSignal))
+    })
+
+    it('uploads the picked file into the workspace', async () => {
+        renderFilesPage()
+
+        const file = new File(['hello'], 'a.txt')
+        await act(async () => {
+            fireEvent.change(fileInput(), { target: { files: [file] } })
+        })
+
+        expect(mocks.api.startWorkspaceUpload).toHaveBeenCalledWith('session-1', {
+            path: 'a.txt',
+            size: 5,
+            overwrite: true
+        }, expect.any(AbortSignal))
+        await vi.waitFor(() => {
+            expect(mocks.api.appendWorkspaceUpload).toHaveBeenCalledWith('session-1', {
+                uploadId: 'upload-1',
+                offset: 0,
+                content: btoa('hello')
+            }, expect.any(AbortSignal))
+        })
+        await vi.waitFor(() => {
+            expect(mocks.api.finishWorkspaceUpload).toHaveBeenCalledWith('session-1', 'upload-1')
+        })
+    })
+
+    it('keeps the folder structure of a picked folder', async () => {
+        renderFilesPage()
+
+        const file = new File(['hello'], 'a.txt')
+        Object.defineProperty(file, 'webkitRelativePath', { value: 'myfolder/a.txt' })
+        await act(async () => {
+            fireEvent.change(fileInput(), { target: { files: [file] } })
+        })
+
+        expect(mocks.api.startWorkspaceUpload).toHaveBeenCalledWith('session-1', {
+            path: 'myfolder/a.txt',
+            size: 5,
+            overwrite: true
+        }, expect.any(AbortSignal))
+    })
+
+    it('drops the partial file when the upload fails', async () => {
+        mocks.api.appendWorkspaceUpload.mockImplementation(async () => ({ success: false, error: 'Chunk too large' }))
+        renderFilesPage()
+
+        const file = new File(['hello'], 'a.txt')
+        await act(async () => {
+            fireEvent.change(fileInput(), { target: { files: [file] } })
+        })
+
+        await vi.waitFor(() => {
+            expect(mocks.api.abortWorkspaceUpload).toHaveBeenCalledWith('session-1', 'upload-1')
+        })
+        expect(mocks.api.finishWorkspaceUpload).not.toHaveBeenCalled()
     })
 })

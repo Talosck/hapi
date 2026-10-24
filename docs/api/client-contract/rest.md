@@ -215,6 +215,26 @@ Source: `hub/src/web/routes/git.ts`. Git endpoints return the **raw command outp
 
 When the session has no `metadata.path` yet, these return HTTP 200 `{success: false, error: 'Session path not available'}`.
 
+### Workspace uploads (RPC-wrapped)
+
+Source: `hub/src/web/routes/workspaceUploads.ts`. A file is uploaded into the
+working directory of the session in four steps, so no single request has to
+carry the whole file. The hub relays every step to the CLI of the session; the
+CLI validates the path and writes the file.
+
+| Method & path | Request | Response |
+|---|---|---|
+| `POST /api/sessions/:id/workspace/upload` | `{action: 'start', path, size?, overwrite?}` | `{success, uploadId?, error?}` — `path` is relative to the session working directory |
+| `POST /api/sessions/:id/workspace/upload` | `{action: 'chunk', uploadId, offset, content}` | `{success, received?, error?}` — `content` is **base64**; `offset` must continue the previous chunk |
+| `POST /api/sessions/:id/workspace/upload` | `{action: 'finish', uploadId}` | `{success, path?, size?, replaced?, error?}` — the file appears at its final path here |
+| `POST /api/sessions/:id/workspace/upload` | `{action: 'abort', uploadId}` | `{success}` — drops the partial file |
+
+The session must be active (409 `{error: 'Session is inactive', code:
+'session_inactive'}` otherwise), one request body is limited to one chunk (~1.5 MB), and a
+path outside of the working directory is refused by the CLI. A file only
+becomes visible when the upload is finished, so an aborted upload leaves
+nothing behind. `overwrite: true` replaces a file with the same name.
+
 ### Generated images
 
 Source: `hub/src/web/routes/git.ts` (same file).

@@ -62,7 +62,11 @@ import {
     type RpcOpencodeModel,
     type RpcPathExistsResponse,
     type RpcReadFileResponse,
-    type RpcUploadFileResponse
+    type RpcUploadFileResponse,
+    type RpcWorkspaceUploadStartResponse,
+    type RpcWorkspaceUploadChunkResponse,
+    type RpcWorkspaceUploadFinishResponse,
+    type RpcWorkspaceUploadAbortResponse
 } from './rpcGateway'
 import { SessionCache } from './sessionCache'
 import { ingestNotifySummaryFromMessage } from './workGraphNotifyIngest'
@@ -98,7 +102,11 @@ export type {
     RpcOpencodeModel,
     RpcPathExistsResponse,
     RpcReadFileResponse,
-    RpcUploadFileResponse
+    RpcUploadFileResponse,
+    RpcWorkspaceUploadStartResponse,
+    RpcWorkspaceUploadChunkResponse,
+    RpcWorkspaceUploadFinishResponse,
+    RpcWorkspaceUploadAbortResponse
 } from './rpcGateway'
 
 export type ResumeSessionResult =
@@ -4304,6 +4312,28 @@ export class SyncEngine {
 
     async deleteUploadFile(sessionId: string, path: string): Promise<RpcDeleteUploadResponse> {
         return await this.rpcGateway.deleteUploadFile(sessionId, path)
+    }
+
+    async startWorkspaceUpload(
+        sessionId: string,
+        options: { path: string; size?: number; overwrite?: boolean }
+    ): Promise<RpcWorkspaceUploadStartResponse> {
+        return await this.rpcGateway.startWorkspaceUpload(sessionId, options)
+    }
+
+    async appendWorkspaceUpload(
+        sessionId: string,
+        options: { uploadId: string; offset: number; content: string }
+    ): Promise<RpcWorkspaceUploadChunkResponse> {
+        return await this.rpcGateway.appendWorkspaceUpload(sessionId, options)
+    }
+
+    async finishWorkspaceUpload(sessionId: string, uploadId: string): Promise<RpcWorkspaceUploadFinishResponse> {
+        return await this.rpcGateway.finishWorkspaceUpload(sessionId, uploadId)
+    }
+
+    async abortWorkspaceUpload(sessionId: string, uploadId: string): Promise<RpcWorkspaceUploadAbortResponse> {
+        return await this.rpcGateway.abortWorkspaceUpload(sessionId, uploadId)
     }
 
     async runRipgrep(sessionId: string, args: string[], cwd?: string, fileSearch?: FileSearchOptions): Promise<RpcCommandResponse> {

@@ -730,6 +730,52 @@ export type DeleteUploadResponse = {
     error?: string
 }
 
+/**
+ * Raw bytes of one workspace upload chunk.
+ *
+ * The chunk travels base64 encoded over the REST + socket.io hop, so the wire
+ * cost is ~4/3 of this. Keep it well below the socket buffer
+ * (`SOCKET_MAX_HTTP_BUFFER_SIZE`) so a chunk always fits in one frame.
+ *
+ * The hub holds the HTTP request open until the machine acknowledged the
+ * chunk, so a chunk must also arrive within the idle timeout of the hub
+ * connection. One megabyte leaves room for a slow uplink between the hub and
+ * the machine.
+ */
+export const WORKSPACE_UPLOAD_CHUNK_BYTES = 1 * 1024 * 1024
+
+/** Largest workspace file a client may upload (raw bytes). */
+export const MAX_WORKSPACE_UPLOAD_BYTES = 512 * 1024 * 1024
+
+export type WorkspaceUploadStartResponse = {
+    success: boolean
+    /** Handle of the open upload; used by the chunk/finish/abort calls. */
+    uploadId?: string
+    error?: string
+}
+
+export type WorkspaceUploadChunkResponse = {
+    success: boolean
+    /** Bytes stored so far. */
+    received?: number
+    error?: string
+}
+
+export type WorkspaceUploadFinishResponse = {
+    success: boolean
+    /** Workspace-relative path of the written file. */
+    path?: string
+    size?: number
+    /** True when an existing file was replaced. */
+    replaced?: boolean
+    error?: string
+}
+
+export type WorkspaceUploadAbortResponse = {
+    success: boolean
+    error?: string
+}
+
 export type DirectoryEntry = {
     name: string
     type: 'file' | 'directory' | 'other'

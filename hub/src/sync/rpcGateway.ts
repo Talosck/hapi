@@ -44,13 +44,22 @@ import type {
     PiModelsResponse,
     SlashCommandsResponse,
     StatFilesResponse,
-    UploadFileResponse
+    UploadFileResponse,
+    WorkspaceUploadAbortResponse,
+    WorkspaceUploadChunkResponse,
+    WorkspaceUploadFinishResponse,
+    WorkspaceUploadStartResponse
 } from '@hapi/protocol/apiTypes'
 import type { Server } from 'socket.io'
 import type { RpcRegistry } from '../socket/rpcRegistry'
 
 const DEFAULT_RPC_TIMEOUT_MS = 30_000
 const MODEL_LIST_RPC_TIMEOUT_MS = 120_000
+/**
+ * Upload chunks travel between the hub and the machine over the socket, so a
+ * slow uplink needs more than the default timeout to deliver one chunk.
+ */
+const WORKSPACE_UPLOAD_RPC_TIMEOUT_MS = 120_000
 
 /**
  * tiann/hapi#916: thrown by {@link RpcGateway.rpcCall} when the target CLI is
@@ -104,6 +113,10 @@ export type RpcReadFileResponse = FileReadResponse
 export type RpcGeneratedImageResponse = GeneratedImageResponse
 export type RpcUploadFileResponse = UploadFileResponse
 export type RpcDeleteUploadResponse = DeleteUploadResponse
+export type RpcWorkspaceUploadStartResponse = WorkspaceUploadStartResponse
+export type RpcWorkspaceUploadChunkResponse = WorkspaceUploadChunkResponse
+export type RpcWorkspaceUploadFinishResponse = WorkspaceUploadFinishResponse
+export type RpcWorkspaceUploadAbortResponse = WorkspaceUploadAbortResponse
 export type RpcDirectoryEntry = DirectoryEntry
 export type RpcListDirectoryResponse = ListDirectoryResponse
 export type RpcStatFilesResponse = StatFilesResponse
@@ -423,6 +436,28 @@ export class RpcGateway {
 
     async deleteUploadFile(sessionId: string, path: string): Promise<RpcDeleteUploadResponse> {
         return await this.sessionRpc(sessionId, RPC_METHODS.DeleteUpload, { sessionId, path }) as RpcDeleteUploadResponse
+    }
+
+    async startWorkspaceUpload(
+        sessionId: string,
+        options: { path: string; size?: number; overwrite?: boolean }
+    ): Promise<RpcWorkspaceUploadStartResponse> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.StartWorkspaceUpload, options, WORKSPACE_UPLOAD_RPC_TIMEOUT_MS) as RpcWorkspaceUploadStartResponse
+    }
+
+    async appendWorkspaceUpload(
+        sessionId: string,
+        options: { uploadId: string; offset: number; content: string }
+    ): Promise<RpcWorkspaceUploadChunkResponse> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.AppendWorkspaceUpload, options, WORKSPACE_UPLOAD_RPC_TIMEOUT_MS) as RpcWorkspaceUploadChunkResponse
+    }
+
+    async finishWorkspaceUpload(sessionId: string, uploadId: string): Promise<RpcWorkspaceUploadFinishResponse> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.FinishWorkspaceUpload, { uploadId }, WORKSPACE_UPLOAD_RPC_TIMEOUT_MS) as RpcWorkspaceUploadFinishResponse
+    }
+
+    async abortWorkspaceUpload(sessionId: string, uploadId: string): Promise<RpcWorkspaceUploadAbortResponse> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.AbortWorkspaceUpload, { uploadId }) as RpcWorkspaceUploadAbortResponse
     }
 
     async runRipgrep(sessionId: string, args: string[], cwd?: string, fileSearch?: FileSearchOptions): Promise<RpcCommandResponse> {

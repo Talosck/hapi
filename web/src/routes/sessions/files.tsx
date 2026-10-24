@@ -28,6 +28,8 @@ import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer
 import { formatFileMetadata } from '@/lib/file-metadata'
 import { useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from '@/lib/use-translation'
+import { useWorkspaceUpload } from '@/hooks/useWorkspaceUpload'
+import { WorkspaceUploadControls, WorkspaceUploadProgress } from '@/components/SessionFiles/WorkspaceUploadControls'
 import * as Popover from '@radix-ui/react-popover'
 import { CheckIcon, CloseIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
@@ -422,6 +424,19 @@ export default function FilesPage() {
         refetch: refetchGit
     } = useGitStatusFiles(api, sessionId)
 
+    const handleUploadFinished = useCallback(() => {
+        // The tree, the search results and the git status all changed.
+        void queryClient.invalidateQueries({ queryKey: ['session-directory', sessionId] })
+        void queryClient.invalidateQueries({ queryKey: ['session-files', sessionId] })
+        void refetchGit()
+    }, [queryClient, refetchGit, sessionId])
+
+    const workspaceUpload = useWorkspaceUpload({
+        api,
+        sessionId,
+        onUploaded: handleUploadFinished
+    })
+
     const shouldSearch = Boolean(searchQuery)
 
     const searchResults = useSessionFileSearch(api, sessionId, searchQuery, {
@@ -585,6 +600,7 @@ export default function FilesPage() {
                             </div>
                         ) : null}
                     </div>
+                    <WorkspaceUploadControls upload={workspaceUpload} />
                     <Button
                         variant="outline"
                         type="button"
@@ -597,6 +613,8 @@ export default function FilesPage() {
                     </Button>
                 </div>
             </div>
+
+            <WorkspaceUploadProgress upload={workspaceUpload} />
 
             <div className="bg-[var(--app-bg)] border-b border-[var(--app-divider)]" role="tablist">
                 <div className="mx-auto w-full max-w-content grid grid-cols-2">
@@ -685,6 +703,8 @@ export default function FilesPage() {
                             rootLabel={rootLabel}
                             onOpenFile={(path) => handleOpenFile(path)}
                             onRequestFileMenu={openFileMenu}
+                            onUploadFiles={(path) => workspaceUpload.pickFiles(path)}
+                            onUploadFolder={(path) => workspaceUpload.pickFolder(path)}
                             sort={directorySort}
                         />
                     ) : gitLoading ? (

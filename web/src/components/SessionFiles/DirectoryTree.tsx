@@ -10,6 +10,7 @@ import { useToast } from '@/lib/toast-context'
 import { downloadBase64File } from '@/lib/file-download'
 import { formatFileMetadata } from '@/lib/file-metadata'
 import { sortDirectoryEntries, type DirectorySort } from '@/lib/directory-sort'
+import * as Popover from '@radix-ui/react-popover'
 
 function ChevronIcon(props: { className?: string; collapsed: boolean }) {
     return (
@@ -55,6 +56,16 @@ function DownloadIcon(props: { className?: string }) {
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
             <polyline points="7 10 12 15 17 10" />
             <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+    )
+}
+
+function UploadIcon(props: { className?: string }) {
+    return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}>
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 9 12 4 17 9" />
+            <line x1="12" y1="4" x2="12" y2="15" />
         </svg>
     )
 }
@@ -146,6 +157,8 @@ function DirectoryNode(props: {
     depth: number
     onOpenFile: (path: string) => void
     onRequestFileMenu?: FileMenuRequestHandler
+    onUploadFiles?: (path: string) => void
+    onUploadFolder?: (path: string) => void
     expanded: Set<string>
     onToggle: (path: string) => void
     sort: DirectorySort
@@ -192,18 +205,63 @@ function DirectoryNode(props: {
 
     return (
         <div>
-            <button
-                type="button"
-                onClick={() => props.onToggle(props.path)}
-                className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-[var(--app-subtle-bg)] transition-colors"
+            <div
+                className="flex w-full items-center gap-1 px-3 py-2 text-left hover:bg-[var(--app-subtle-bg)] transition-colors"
                 style={{ paddingLeft: indent }}
             >
-                <ChevronIcon collapsed={!isExpanded} className="text-[var(--app-hint)]" />
-                <FolderIcon className="text-[var(--app-link)]" />
-                <div className="min-w-0 flex-1">
-                    <div className="truncate font-medium">{props.label}</div>
-                </div>
-            </button>
+                <button
+                    type="button"
+                    onClick={() => props.onToggle(props.path)}
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                >
+                    <ChevronIcon collapsed={!isExpanded} className="text-[var(--app-hint)]" />
+                    <FolderIcon className="text-[var(--app-link)]" />
+                    <div className="min-w-0 flex-1">
+                        <div className="truncate font-medium">{props.label}</div>
+                    </div>
+                </button>
+                {props.onUploadFiles ? (
+                    <Popover.Root>
+                        <Popover.Trigger asChild>
+                            <button
+                                type="button"
+                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
+                                title={t('files.directories.uploadNamed', { name: props.label })}
+                                aria-label={t('files.directories.uploadNamed', { name: props.label })}
+                            >
+                                <UploadIcon className="h-4 w-4" />
+                            </button>
+                        </Popover.Trigger>
+                        <Popover.Portal>
+                            <Popover.Content
+                                role="menu"
+                                side="bottom"
+                                align="end"
+                                sideOffset={6}
+                                collisionPadding={8}
+                                className="z-50 w-48 rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] p-2 shadow-lg"
+                            >
+                                <button
+                                    type="button"
+                                    role="menuitem"
+                                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-[var(--app-subtle-bg)]"
+                                    onClick={() => props.onUploadFiles?.(props.path)}
+                                >
+                                    {t('files.directories.uploadFilesNamed', { name: props.label })}
+                                </button>
+                                <button
+                                    type="button"
+                                    role="menuitem"
+                                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-[var(--app-subtle-bg)]"
+                                    onClick={() => props.onUploadFolder?.(props.path)}
+                                >
+                                    {t('files.directories.uploadFolderNamed', { name: props.label })}
+                                </button>
+                            </Popover.Content>
+                        </Popover.Portal>
+                    </Popover.Root>
+                ) : null}
+            </div>
 
             {isExpanded ? (
                 isLoading ? (
@@ -224,6 +282,8 @@ function DirectoryNode(props: {
                                     depth={childDepth}
                                     onOpenFile={props.onOpenFile}
                                     onRequestFileMenu={props.onRequestFileMenu}
+                                    onUploadFiles={props.onUploadFiles}
+                                    onUploadFolder={props.onUploadFolder}
                                     expanded={props.expanded}
                                     onToggle={props.onToggle}
                                     sort={props.sort}
@@ -296,6 +356,10 @@ export function DirectoryTree(props: {
     rootLabel: string
     onOpenFile: (path: string) => void
     onRequestFileMenu?: FileMenuRequestHandler
+    /** Open the file picker for the given directory of the workspace. */
+    onUploadFiles?: (path: string) => void
+    /** Open the folder picker for the given directory of the workspace. */
+    onUploadFolder?: (path: string) => void
     sort: DirectorySort
 }) {
     const [expanded, setExpanded] = useState<Set<string>>(() => readExpanded(props.sessionId))
@@ -326,6 +390,8 @@ export function DirectoryTree(props: {
                 depth={0}
                 onOpenFile={props.onOpenFile}
                 onRequestFileMenu={props.onRequestFileMenu}
+                onUploadFiles={props.onUploadFiles}
+                onUploadFolder={props.onUploadFolder}
                 expanded={expanded}
                 onToggle={handleToggle}
                 sort={props.sort}
