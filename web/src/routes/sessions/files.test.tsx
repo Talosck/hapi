@@ -582,6 +582,44 @@ describe('FilesPage workspace upload', () => {
         }, expect.any(AbortSignal))
     })
 
+    it('uploads a file that is dropped on the page', async () => {
+        const { container } = renderFilesPage()
+
+        const file = new File(['hello'], 'dropped.txt')
+        const event = new Event('drop', { bubbles: true, cancelable: true })
+        Object.defineProperty(event, 'dataTransfer', {
+            value: { types: ['Files'], files: [file], items: [] },
+            configurable: true,
+        })
+
+        await act(async () => {
+            fireEvent(container.firstChild as HTMLElement, event)
+        })
+
+        expect(event.defaultPrevented).toBe(true)
+        expect(mocks.api.startWorkspaceUpload).toHaveBeenCalledWith('session-1', {
+            path: 'dropped.txt',
+            size: 5,
+            overwrite: true
+        }, expect.any(AbortSignal))
+    })
+
+    it('ignores a drop that carries no files', async () => {
+        const { container } = renderFilesPage()
+
+        const event = new Event('drop', { bubbles: true, cancelable: true })
+        Object.defineProperty(event, 'dataTransfer', {
+            value: { types: ['text/plain'], files: [], items: [] },
+            configurable: true,
+        })
+
+        await act(async () => {
+            fireEvent(container.firstChild as HTMLElement, event)
+        })
+
+        expect(mocks.api.startWorkspaceUpload).not.toHaveBeenCalled()
+    })
+
     it('drops the partial file when the upload fails', async () => {
         mocks.api.appendWorkspaceUpload.mockImplementation(async () => ({ success: false, error: 'Chunk too large' }))
         renderFilesPage()

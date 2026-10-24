@@ -26,11 +26,13 @@ function renderTree(handlers: {
     onRequestFileMenu?: (path: string, point: { x: number; y: number }) => void
     onUploadFiles?: (path: string) => void
     onUploadFolder?: (path: string) => void
+    onDropTargetChange?: (path: string | null) => void
 } = {}) {
     const onOpenFile = handlers.onOpenFile ?? vi.fn()
     const onRequestFileMenu = handlers.onRequestFileMenu ?? vi.fn()
     const onUploadFiles = handlers.onUploadFiles ?? vi.fn()
     const onUploadFolder = handlers.onUploadFolder ?? vi.fn()
+    const onDropTargetChange = handlers.onDropTargetChange ?? vi.fn()
 
     render(
         <I18nProvider>
@@ -43,13 +45,14 @@ function renderTree(handlers: {
                     onRequestFileMenu={onRequestFileMenu}
                     onUploadFiles={onUploadFiles}
                     onUploadFolder={onUploadFolder}
+                    onDropTargetChange={onDropTargetChange}
                     sort={DEFAULT_DIRECTORY_SORT}
                 />
             </ToastProvider>
         </I18nProvider>
     )
 
-    return { onOpenFile, onRequestFileMenu, onUploadFiles, onUploadFolder }
+    return { onOpenFile, onRequestFileMenu, onUploadFiles, onUploadFolder, onDropTargetChange }
 }
 
 /** The file name button (a directory row's download button also mentions the name in its aria-label). */
@@ -129,5 +132,67 @@ describe('DirectoryTree upload actions', () => {
         )
 
         expect(screen.queryByRole('button', { name: 'Upload to src' })).toBeNull()
+    })
+})
+
+describe('DirectoryTree drop target', () => {
+    /** A drag event with a file in it, as the browser hands it out. */
+    function dragEvent(type: string, relatedTarget: EventTarget | null = null): Event {
+        const event = new Event(type, { bubbles: true, cancelable: true })
+        Object.defineProperty(event, 'dataTransfer', {
+            value: { types: ['Files'], files: [], items: [] },
+            configurable: true,
+        })
+        Object.defineProperty(event, 'relatedTarget', {
+            value: relatedTarget,
+            configurable: true,
+        })
+        return event
+    }
+
+    it('reports the directory the drag hovers', () => {
+        const { onDropTargetChange } = renderTree()
+
+        fireEvent(screen.getByText('src'), dragEvent('dragover'))
+
+        expect(onDropTargetChange).toHaveBeenCalledWith('src')
+    })
+
+    it('reports the root when the drag hovers the root row', () => {
+        const { onDropTargetChange } = renderTree()
+
+        fireEvent(screen.getByText('project'), dragEvent('dragover'))
+
+        expect(onDropTargetChange).toHaveBeenCalledWith('')
+    })
+
+    it('reports no directory when the drag hovers a file', () => {
+        const { onDropTargetChange } = renderTree()
+
+        // The drag has to leave a directory first: the target is only
+        // reported when it changes.
+        fireEvent(screen.getByText('src'), dragEvent('dragover'))
+        fireEvent(fileRow(), dragEvent('dragover'))
+
+        expect(onDropTargetChange).toHaveBeenLastCalledWith(null)
+    })
+
+    it('reports no directory when the drag leaves the tree', () => {
+        const { onDropTargetChange } = renderTree()
+
+        fireEvent(screen.getByText('src'), dragEvent('dragover'))
+        fireEvent(screen.getByText('src').closest('div')!, dragEvent('dragleave', document.body))
+
+        expect(onDropTargetChange).toHaveBeenLastCalledWith(null)
+    })
+
+    it('keeps the directory when the drag moves to another row of the tree', () => {
+        const { onDropTargetChange } = renderTree()
+        const tree = screen.getByText('project').closest('div')!
+
+        fireEvent(screen.getByText('src'), dragEvent('dragover'))
+        fireEvent(tree, dragEvent('dragleave', screen.getByText('src')))
+
+        expect(onDropTargetChange).toHaveBeenLastCalledWith('src')
     })
 })

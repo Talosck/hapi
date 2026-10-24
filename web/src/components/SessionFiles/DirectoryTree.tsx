@@ -1,16 +1,33 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 import { FileIcon } from '@/components/FileIcon'
 import { useSessionDirectory } from '@/hooks/queries/useSessionDirectory'
 import { useFileMenuTrigger } from '@/hooks/useFileMenuTrigger'
 import type { AnchoredMenuPoint } from '@/hooks/useAnchoredMenu'
 import { formatDirectoryError } from '@/lib/files-i18n'
+import { hasFileDrag } from '@/lib/workspace-drop'
 import { useTranslation } from '@/lib/use-translation'
 import { useToast } from '@/lib/toast-context'
 import { downloadBase64File } from '@/lib/file-download'
 import { formatFileMetadata } from '@/lib/file-metadata'
 import { sortDirectoryEntries, type DirectorySort } from '@/lib/directory-sort'
 import * as Popover from '@radix-ui/react-popover'
+
+/**
+ * The workspace path of a directory row.
+ *
+ * The row carries its path in the DOM so the tree can tell which directory a
+ * drag is over: the drop event only knows the element under the pointer.
+ */
+const DIRECTORY_PATH_ATTRIBUTE = 'data-hapi-directory-path'
+
+/** The directory a drag is over, or null when it is not over a directory. */
+function directoryPathFromEvent(event: React.DragEvent): string | null {
+    const target = event.target
+    if (!(target instanceof Element)) return null
+    const row = target.closest(`[${DIRECTORY_PATH_ATTRIBUTE}]`)
+    return row?.getAttribute(DIRECTORY_PATH_ATTRIBUTE) ?? null
+}
 
 function ChevronIcon(props: { className?: string; collapsed: boolean }) {
     return (
@@ -159,6 +176,8 @@ function DirectoryNode(props: {
     onRequestFileMenu?: FileMenuRequestHandler
     onUploadFiles?: (path: string) => void
     onUploadFolder?: (path: string) => void
+    /** The directory a drag hovers, if any. */
+    dropTarget?: string | null
     expanded: Set<string>
     onToggle: (path: string) => void
     sort: DirectorySort
@@ -206,8 +225,13 @@ function DirectoryNode(props: {
     return (
         <div>
             <div
-                className="flex w-full items-center gap-1 px-3 py-2 text-left hover:bg-[var(--app-subtle-bg)] transition-colors"
+                className={`flex w-full items-center gap-1 px-3 py-2 text-left transition-colors ${
+                    props.dropTarget === props.path
+                        ? 'bg-[var(--app-link)]/10 ring-1 ring-inset ring-[var(--app-link)]'
+                        : 'hover:bg-[var(--app-subtle-bg)]'
+                }`}
                 style={{ paddingLeft: indent }}
+                {...{ [DIRECTORY_PATH_ATTRIBUTE]: props.path }}
             >
                 <button
                     type="button"
@@ -284,6 +308,7 @@ function DirectoryNode(props: {
                                     onRequestFileMenu={props.onRequestFileMenu}
                                     onUploadFiles={props.onUploadFiles}
                                     onUploadFolder={props.onUploadFolder}
+                                    dropTarget={props.dropTarget}
                                     expanded={props.expanded}
                                     onToggle={props.onToggle}
                                     sort={props.sort}
@@ -360,9 +385,19 @@ export function DirectoryTree(props: {
     onUploadFiles?: (path: string) => void
     /** Open the folder picker for the given directory of the workspace. */
     onUploadFolder?: (path: string) => void
+    /**
+     * Report the directory a drag hovers.
+     *
+     * The drop itself is handled by the drop zone of the page: the tree only
+     * tells it where the drop lands. Null means "not over a directory", so
+     * the drop lands in the workspace root.
+     */
+    onDropTargetChange?: (path: string | null) => void
     sort: DirectorySort
 }) {
     const [expanded, setExpanded] = useState<Set<string>>(() => readExpanded(props.sessionId))
+    const [dropTarget, setDropTarget] = useState<string | null>(null)
+    const dropTargetRef = useRef<string | null>(null)
 
     useEffect(() => {
         writeExpanded(props.sessionId, expanded)
@@ -380,8 +415,37 @@ export function DirectoryTree(props: {
         })
     }, [])
 
+    const handleDropTarget = useCallback((path: string | null) => {
+        // The drag reports the hovered row on every `dragover`, so the parent
+        // is only told when the target actually changed.
+        if (dropTargetRef.current === path) return
+        dropTargetRef.current = path
+        setDropTarget(path)
+        props.onDropTargetChange?.(path)
+    }, [props.onDropTargetChange])
+
+    // The drag hovers the row under the pointer, so the target is read from
+    // the event instead of from enter/leave events: those arrive in an order
+    // that would let the row the pointer left win over the row it entered.
+    const handleDragOver = useCallback((event: React.DragEvent) => {
+        if (!hasFileDrag(event.dataTransfer)) return
+        handleDropTarget(directoryPathFromEvent(event))
+    }, [handleDropTarget])
+
+    const handleDragLeave = useCallback((event: React.DragEvent) => {
+        const related = event.relatedTarget
+        // Moving between two rows of the tree keeps the target: the leave
+        // event carries the row the pointer entered.
+        if (related instanceof Node && event.currentTarget.contains(related)) return
+        handleDropTarget(null)
+    }, [handleDropTarget])
+
     return (
-        <div className="border-t border-[var(--app-divider)]">
+        <div
+            className="border-t border-[var(--app-divider)]"
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+        >
             <DirectoryNode
                 api={props.api}
                 sessionId={props.sessionId}
@@ -392,6 +456,7 @@ export function DirectoryTree(props: {
                 onRequestFileMenu={props.onRequestFileMenu}
                 onUploadFiles={props.onUploadFiles}
                 onUploadFolder={props.onUploadFolder}
+                dropTarget={dropTarget}
                 expanded={expanded}
                 onToggle={handleToggle}
                 sort={props.sort}

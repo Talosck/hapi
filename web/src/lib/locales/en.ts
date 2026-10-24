@@ -517,6 +517,8 @@ export default {
   'files.directories.uploadFolderNamed': 'Upload folder to {name}',
   'files.upload.files': 'Upload files',
   'files.upload.folder': 'Upload folder',
+  'files.upload.dropToUpload': 'Drop files to upload',
+  'files.upload.dropIntoDirectory': 'Drop into {name}',
   'files.upload.progress': 'Uploading {completed}/{total}',
   'files.upload.cancel': 'Cancel',
   'files.upload.success.title': 'Upload complete',

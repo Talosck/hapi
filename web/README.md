@@ -87,6 +87,12 @@ See `src/router.tsx` for route definitions.
 - Upload files and folders into the session workspace.
   - The toolbar uploads into the workspace root; a folder row in the directory
     tree uploads into that folder.
+  - A file can also be dragged onto the page (`src/components/SessionFiles/WorkspaceDropZone.tsx`):
+    dropped anywhere it lands in the workspace root, dropped onto a folder row
+    of the tree it lands in that folder. The page shows the drop target while
+    the file is dragged over it.
+  - A dropped folder keeps its structure: the files inside it are uploaded
+    relative to the folder (`src/lib/workspace-drop.ts`).
   - The files travel to the machine in chunks (`src/lib/workspace-upload.ts`),
     so a large file does not need one huge request.
   - A file only appears at its final path once the last chunk landed, and a

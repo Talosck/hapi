@@ -521,6 +521,8 @@ export default {
   'files.directories.uploadFolderNamed': '上传文件夹到 {name}',
   'files.upload.files': '上传文件',
   'files.upload.folder': '上传文件夹',
+  'files.upload.dropToUpload': '拖放文件即可上传',
+  'files.upload.dropIntoDirectory': '拖放到 {name}',
   'files.upload.progress': '正在上传 {completed}/{total}',
   'files.upload.cancel': '取消',
   'files.upload.success.title': '上传完成',

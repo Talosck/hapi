@@ -31,6 +31,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { useWorkspaceUpload } from '@/hooks/useWorkspaceUpload'
 import { useWorkspaceDelete } from '@/hooks/useWorkspaceDelete'
 import { WorkspaceUploadControls, WorkspaceUploadProgress } from '@/components/SessionFiles/WorkspaceUploadControls'
+import { WorkspaceDropZone } from '@/components/SessionFiles/WorkspaceDropZone'
 import { WorkspaceDeleteDialog } from '@/components/SessionFiles/WorkspaceDeleteDialog'
 import * as Popover from '@radix-ui/react-popover'
 import { CheckIcon, CloseIcon } from '@/components/icons'
@@ -443,6 +444,10 @@ export default function FilesPage() {
         onUploaded: handleWorkspaceChanged
     })
 
+    // The directory a drag hovers in the tree; null means the drop lands in
+    // the workspace root.
+    const [dropDirectory, setDropDirectory] = useState<string | null>(null)
+
     const workspaceDelete = useWorkspaceDelete({
         api,
         sessionId,
@@ -498,6 +503,16 @@ export default function FilesPage() {
         const parts = base.split(/[/\\]/).filter(Boolean)
         return parts.length ? parts[parts.length - 1] : base
     }, [session?.metadata?.path, sessionId])
+
+    // The name of the directory a drop lands in, shown in the drop hint.
+    // Without a directory the hint stays generic: the drop lands in the
+    // workspace root.
+    const dropTargetLabel = useMemo(() => {
+        if (dropDirectory === null) return null
+        if (dropDirectory === '') return rootLabel
+        const parts = dropDirectory.split('/').filter(Boolean)
+        return parts.length ? parts[parts.length - 1] : rootLabel
+    }, [dropDirectory, rootLabel])
 
     const handleRefresh = useCallback(() => {
         if (searchQuery) {
@@ -558,247 +573,255 @@ export default function FilesPage() {
     }
 
     return (
-        <div className="flex h-full min-h-0 flex-col">
-            <SessionHeader
-                session={session}
-                onBack={goBack}
-                onToggleFiles={session.metadata?.path ? handleToggleFiles : undefined}
-                filesActive={true}
-                onToggleOutline={handleToggleOutline}
-                outlineActive={false}
-                api={api}
-                titleSuggestionAvailable={titleSuggestionAvailable}
-                onSessionDeleted={goBack}
-                onSessionReopened={async (newSessionId) => {
-                    await transferComposerDraftThenNavigate(
-                        session.id,
-                        newSessionId,
-                        () => navigate({
-                            to: '/sessions/$sessionId/files',
-                            params: { sessionId: newSessionId },
-                            replace: true,
-                            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
-                        }),
-                    )
-                }}
-            />
-
-            <div className="bg-[var(--app-bg)]">
-                <div className="mx-auto flex w-full max-w-content items-center gap-2 border-b border-[var(--app-border)] p-3">
-                    <div className="relative min-w-0 flex-1">
-                        <SearchIcon className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--app-hint)]" />
-                        <input
-                            value={searchQuery}
-                            onChange={(event) => setSearchQuery(event.target.value)}
-                            placeholder={t('files.page.searchPlaceholder')}
-                            className="h-9 w-full rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] py-2 pl-9 pr-20 text-sm text-[var(--app-fg)] outline-none placeholder:text-[var(--app-hint)] focus:border-[var(--app-link)] focus:ring-1 focus:ring-[var(--app-link)]"
-                            autoCapitalize="none"
-                            autoCorrect="off"
-                        />
-                        {searchQuery ? (
-                            <button
-                                type="button"
-                                onClick={() => setSearchQuery('')}
-                                className="absolute inset-y-0 right-10 flex items-center rounded p-0.5 text-[var(--app-hint)] hover:text-[var(--app-fg)]"
-                                title={t('sessions.search.clear')}
-                                aria-label={t('sessions.search.clear')}
-                            >
-                                <CloseIcon className="h-3.5 w-3.5" />
-                            </button>
-                        ) : null}
-                        {activeTab === 'directories' || searchQuery ? (
-                            <div className="absolute inset-y-0 right-0 flex items-stretch">
-                                <DirectorySortMenu sort={directorySort} onChange={setDirectorySort} embedded />
-                            </div>
-                        ) : null}
-                    </div>
-                    <WorkspaceUploadControls upload={workspaceUpload} />
-                    <Button
-                        variant="outline"
-                        type="button"
-                        onClick={handleRefresh}
-                        className="h-9 w-9 shrink-0 px-0"
-                        title={t('files.page.refreshFilesystem')}
-                        aria-label={t('files.page.refreshFilesystem')}
-                    >
-                        <RefreshIcon />
-                    </Button>
-                </div>
-            </div>
-
-            <WorkspaceUploadProgress upload={workspaceUpload} />
-
-            <div className="bg-[var(--app-bg)] border-b border-[var(--app-divider)]" role="tablist">
-                <div className="mx-auto w-full max-w-content grid grid-cols-2">
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={activeTab === 'changes'}
-                        onClick={() => handleTabChange('changes')}
-                        className={`relative py-3 text-center text-sm font-semibold transition-colors hover:bg-[var(--app-subtle-bg)] ${activeTab === 'changes' ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
-                    >
-                        {t('files.tab.changes')}
-                        <span
-                            className={`absolute bottom-0 left-1/2 h-0.5 w-10 -translate-x-1/2 rounded-full ${activeTab === 'changes' ? 'bg-[var(--app-link)]' : 'bg-transparent'}`}
-                        />
-                    </button>
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={activeTab === 'directories'}
-                        onClick={() => handleTabChange('directories')}
-                        className={`relative py-3 text-center text-sm font-semibold transition-colors hover:bg-[var(--app-subtle-bg)] ${activeTab === 'directories' ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
-                    >
-                        {t('files.tab.directories')}
-                        <span
-                            className={`absolute bottom-0 left-1/2 h-0.5 w-10 -translate-x-1/2 rounded-full ${activeTab === 'directories' ? 'bg-[var(--app-link)]' : 'bg-transparent'}`}
-                        />
-                    </button>
-                </div>
-            </div>
-
-            {!gitLoading && gitStatus && !searchQuery && activeTab === 'changes' ? (
-                <div className="bg-[var(--app-bg)]">
-                    <div className="mx-auto w-full max-w-content px-3 py-2 border-b border-[var(--app-divider)]">
-                        <div className="flex items-center gap-2 text-sm">
-                            <GitBranchIcon className="text-[var(--app-hint)]" />
-                            <span className="font-semibold">{branchLabel}</span>
-                        </div>
-                        <div className="text-xs text-[var(--app-hint)]">
-                            {t('files.branch.summary', {
-                                staged: gitStatus.totalStaged,
-                                unstaged: gitStatus.totalUnstaged,
-                            })}
-                        </div>
-                    </div>
-                </div>
-            ) : null}
-
-            <div
-                ref={scrollRef}
-                data-hapi-session-files-scroll="true"
-                className="app-scroll-y flex-1 min-h-0"
-            >
-                <div className="mx-auto w-full max-w-content">
-                    {showGitErrorBanner && activeTab === 'changes' ? (
-                        <div className="border-b border-[var(--app-divider)] bg-amber-500/10 px-3 py-2 text-xs text-[var(--app-hint)]">
-                            {gitErrorMessage}
-                        </div>
-                    ) : null}
-                    {shouldSearch ? (
-                        searchResults.isLoading ? (
-                            <FileListSkeleton label={t('loading.files')} />
-                        ) : searchResults.error ? (
-                            <div className="p-6 text-sm text-[var(--app-hint)]">{searchErrorMessage}</div>
-                        ) : searchResults.files.length === 0 ? (
-                            <div className="p-6 text-sm text-[var(--app-hint)]">
-                                {t('files.search.empty')}
-                            </div>
-                        ) : (
-                            <div className="border-t border-[var(--app-divider)]">
-                                {sortedSearchResults.map((file, index) => (
-                                    <SearchResultRow
-                                        key={file.fullPath}
-                                        file={file}
-                                        onOpen={() => handleOpenFile(file.fullPath)}
-                                        onOpenMenu={(point) => openFileMenu(
-                                            file.fullPath,
-                                            point,
-                                            file.fileType === 'folder' ? 'directory' : 'file'
-                                        )}
-                                        showDivider={index < sortedSearchResults.length - 1}
-                                    />
-                                ))}
-                            </div>
+        <WorkspaceDropZone
+            upload={workspaceUpload}
+            targetDirectory={dropDirectory ?? ''}
+            targetLabel={dropTargetLabel}
+            disabled={!workspaceUpload.canUpload}
+        >
+            <div className="flex min-h-0 flex-1 flex-col">
+                <SessionHeader
+                    session={session}
+                    onBack={goBack}
+                    onToggleFiles={session.metadata?.path ? handleToggleFiles : undefined}
+                    filesActive={true}
+                    onToggleOutline={handleToggleOutline}
+                    outlineActive={false}
+                    api={api}
+                    titleSuggestionAvailable={titleSuggestionAvailable}
+                    onSessionDeleted={goBack}
+                    onSessionReopened={async (newSessionId) => {
+                        await transferComposerDraftThenNavigate(
+                            session.id,
+                            newSessionId,
+                            () => navigate({
+                                to: '/sessions/$sessionId/files',
+                                params: { sessionId: newSessionId },
+                                replace: true,
+                                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+                            }),
                         )
-                    ) : activeTab === 'directories' ? (
-                        <DirectoryTree
-                            key={sessionId}
-                            api={api}
-                            sessionId={sessionId}
-                            rootLabel={rootLabel}
-                            onOpenFile={(path) => handleOpenFile(path)}
-                            onRequestFileMenu={openFileMenu}
-                            onUploadFiles={(path) => workspaceUpload.pickFiles(path)}
-                            onUploadFolder={(path) => workspaceUpload.pickFolder(path)}
-                            sort={directorySort}
-                        />
-                    ) : gitLoading ? (
-                        <FileListSkeleton label={t('loading.git')} />
-                    ) : (
-                        <div>
-                            {gitStatus?.stagedFiles.length ? (
-                                <div>
-                                    <div className="border-b border-[var(--app-divider)] bg-[var(--app-bg)] px-3 py-2 text-xs font-semibold text-[var(--app-git-staged-color)]">
-                                        {t('files.changes.section.staged', { n: gitStatus.stagedFiles.length })}
-                                    </div>
-                                    {gitStatus.stagedFiles.map((file, index) => (
-                                        <GitFileRow
-                                            key={`staged-${file.fullPath}-${index}`}
-                                            file={file}
-                                            onOpen={() => handleOpenFile(file.fullPath, file.isStaged)}
-                                            onOpenMenu={(point) => openFileMenu(file.fullPath, point)}
-                                            showDivider={index < gitStatus.stagedFiles.length - 1 || gitStatus.unstagedFiles.length > 0}
-                                        />
-                                    ))}
-                                </div>
-                            ) : null}
+                    }}
+                />
 
-                            {gitStatus?.unstagedFiles.length ? (
-                                <div>
-                                    <div className="border-b border-[var(--app-divider)] bg-[var(--app-bg)] px-3 py-2 text-xs font-semibold text-[var(--app-git-unstaged-color)]">
-                                        {t('files.changes.section.unstaged', { n: gitStatus.unstagedFiles.length })}
-                                    </div>
-                                    {gitStatus.unstagedFiles.map((file, index) => (
-                                        <GitFileRow
-                                            key={`unstaged-${file.fullPath}-${index}`}
-                                            file={file}
-                                            onOpen={() => handleOpenFile(file.fullPath, file.isStaged)}
-                                            onOpenMenu={(point) => openFileMenu(file.fullPath, point)}
-                                            showDivider={index < gitStatus.unstagedFiles.length - 1}
-                                        />
-                                    ))}
-                                </div>
+                <div className="bg-[var(--app-bg)]">
+                    <div className="mx-auto flex w-full max-w-content items-center gap-2 border-b border-[var(--app-border)] p-3">
+                        <div className="relative min-w-0 flex-1">
+                            <SearchIcon className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--app-hint)]" />
+                            <input
+                                value={searchQuery}
+                                onChange={(event) => setSearchQuery(event.target.value)}
+                                placeholder={t('files.page.searchPlaceholder')}
+                                className="h-9 w-full rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] py-2 pl-9 pr-20 text-sm text-[var(--app-fg)] outline-none placeholder:text-[var(--app-hint)] focus:border-[var(--app-link)] focus:ring-1 focus:ring-[var(--app-link)]"
+                                autoCapitalize="none"
+                                autoCorrect="off"
+                            />
+                            {searchQuery ? (
+                                <button
+                                    type="button"
+                                    onClick={() => setSearchQuery('')}
+                                    className="absolute inset-y-0 right-10 flex items-center rounded p-0.5 text-[var(--app-hint)] hover:text-[var(--app-fg)]"
+                                    title={t('sessions.search.clear')}
+                                    aria-label={t('sessions.search.clear')}
+                                >
+                                    <CloseIcon className="h-3.5 w-3.5" />
+                                </button>
                             ) : null}
-
-                            {!gitStatus ? (
-                                <div className="p-6 text-sm text-[var(--app-hint)]">
-                                    {t('files.changes.empty.unavailable')}
-                                </div>
-                            ) : null}
-
-                            {gitStatus && gitStatus.stagedFiles.length === 0 && gitStatus.unstagedFiles.length === 0 ? (
-                                <div className="p-6 text-sm text-[var(--app-hint)]">
-                                    {t('files.changes.empty.none')}
+                            {activeTab === 'directories' || searchQuery ? (
+                                <div className="absolute inset-y-0 right-0 flex items-stretch">
+                                    <DirectorySortMenu sort={directorySort} onChange={setDirectorySort} embedded />
                                 </div>
                             ) : null}
                         </div>
-                    )}
+                        <WorkspaceUploadControls upload={workspaceUpload} />
+                        <Button
+                            variant="outline"
+                            type="button"
+                            onClick={handleRefresh}
+                            className="h-9 w-9 shrink-0 px-0"
+                            title={t('files.page.refreshFilesystem')}
+                            aria-label={t('files.page.refreshFilesystem')}
+                        >
+                            <RefreshIcon />
+                        </Button>
+                    </div>
                 </div>
+
+                <WorkspaceUploadProgress upload={workspaceUpload} />
+
+                <div className="bg-[var(--app-bg)] border-b border-[var(--app-divider)]" role="tablist">
+                    <div className="mx-auto w-full max-w-content grid grid-cols-2">
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={activeTab === 'changes'}
+                            onClick={() => handleTabChange('changes')}
+                            className={`relative py-3 text-center text-sm font-semibold transition-colors hover:bg-[var(--app-subtle-bg)] ${activeTab === 'changes' ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
+                        >
+                            {t('files.tab.changes')}
+                            <span
+                                className={`absolute bottom-0 left-1/2 h-0.5 w-10 -translate-x-1/2 rounded-full ${activeTab === 'changes' ? 'bg-[var(--app-link)]' : 'bg-transparent'}`}
+                            />
+                        </button>
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={activeTab === 'directories'}
+                            onClick={() => handleTabChange('directories')}
+                            className={`relative py-3 text-center text-sm font-semibold transition-colors hover:bg-[var(--app-subtle-bg)] ${activeTab === 'directories' ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
+                        >
+                            {t('files.tab.directories')}
+                            <span
+                                className={`absolute bottom-0 left-1/2 h-0.5 w-10 -translate-x-1/2 rounded-full ${activeTab === 'directories' ? 'bg-[var(--app-link)]' : 'bg-transparent'}`}
+                            />
+                        </button>
+                    </div>
+                </div>
+
+                {!gitLoading && gitStatus && !searchQuery && activeTab === 'changes' ? (
+                    <div className="bg-[var(--app-bg)]">
+                        <div className="mx-auto w-full max-w-content px-3 py-2 border-b border-[var(--app-divider)]">
+                            <div className="flex items-center gap-2 text-sm">
+                                <GitBranchIcon className="text-[var(--app-hint)]" />
+                                <span className="font-semibold">{branchLabel}</span>
+                            </div>
+                            <div className="text-xs text-[var(--app-hint)]">
+                                {t('files.branch.summary', {
+                                    staged: gitStatus.totalStaged,
+                                    unstaged: gitStatus.totalUnstaged,
+                                })}
+                            </div>
+                        </div>
+                    </div>
+                ) : null}
+
+                <div
+                    ref={scrollRef}
+                    data-hapi-session-files-scroll="true"
+                    className="app-scroll-y flex-1 min-h-0"
+                >
+                    <div className="mx-auto w-full max-w-content">
+                        {showGitErrorBanner && activeTab === 'changes' ? (
+                            <div className="border-b border-[var(--app-divider)] bg-amber-500/10 px-3 py-2 text-xs text-[var(--app-hint)]">
+                                {gitErrorMessage}
+                            </div>
+                        ) : null}
+                        {shouldSearch ? (
+                            searchResults.isLoading ? (
+                                <FileListSkeleton label={t('loading.files')} />
+                            ) : searchResults.error ? (
+                                <div className="p-6 text-sm text-[var(--app-hint)]">{searchErrorMessage}</div>
+                            ) : searchResults.files.length === 0 ? (
+                                <div className="p-6 text-sm text-[var(--app-hint)]">
+                                    {t('files.search.empty')}
+                                </div>
+                            ) : (
+                                <div className="border-t border-[var(--app-divider)]">
+                                    {sortedSearchResults.map((file, index) => (
+                                        <SearchResultRow
+                                            key={file.fullPath}
+                                            file={file}
+                                            onOpen={() => handleOpenFile(file.fullPath)}
+                                            onOpenMenu={(point) => openFileMenu(
+                                                file.fullPath,
+                                                point,
+                                                file.fileType === 'folder' ? 'directory' : 'file'
+                                            )}
+                                            showDivider={index < sortedSearchResults.length - 1}
+                                        />
+                                    ))}
+                                </div>
+                            )
+                        ) : activeTab === 'directories' ? (
+                            <DirectoryTree
+                                key={sessionId}
+                                api={api}
+                                sessionId={sessionId}
+                                rootLabel={rootLabel}
+                                onOpenFile={(path) => handleOpenFile(path)}
+                                onRequestFileMenu={openFileMenu}
+                                onUploadFiles={(path) => workspaceUpload.pickFiles(path)}
+                                onUploadFolder={(path) => workspaceUpload.pickFolder(path)}
+                                onDropTargetChange={setDropDirectory}
+                                sort={directorySort}
+                            />
+                        ) : gitLoading ? (
+                            <FileListSkeleton label={t('loading.git')} />
+                        ) : (
+                            <div>
+                                {gitStatus?.stagedFiles.length ? (
+                                    <div>
+                                        <div className="border-b border-[var(--app-divider)] bg-[var(--app-bg)] px-3 py-2 text-xs font-semibold text-[var(--app-git-staged-color)]">
+                                            {t('files.changes.section.staged', { n: gitStatus.stagedFiles.length })}
+                                        </div>
+                                        {gitStatus.stagedFiles.map((file, index) => (
+                                            <GitFileRow
+                                                key={`staged-${file.fullPath}-${index}`}
+                                                file={file}
+                                                onOpen={() => handleOpenFile(file.fullPath, file.isStaged)}
+                                                onOpenMenu={(point) => openFileMenu(file.fullPath, point)}
+                                                showDivider={index < gitStatus.stagedFiles.length - 1 || gitStatus.unstagedFiles.length > 0}
+                                            />
+                                        ))}
+                                    </div>
+                                ) : null}
+
+                                {gitStatus?.unstagedFiles.length ? (
+                                    <div>
+                                        <div className="border-b border-[var(--app-divider)] bg-[var(--app-bg)] px-3 py-2 text-xs font-semibold text-[var(--app-git-unstaged-color)]">
+                                            {t('files.changes.section.unstaged', { n: gitStatus.unstagedFiles.length })}
+                                        </div>
+                                        {gitStatus.unstagedFiles.map((file, index) => (
+                                            <GitFileRow
+                                                key={`unstaged-${file.fullPath}-${index}`}
+                                                file={file}
+                                                onOpen={() => handleOpenFile(file.fullPath, file.isStaged)}
+                                                onOpenMenu={(point) => openFileMenu(file.fullPath, point)}
+                                                showDivider={index < gitStatus.unstagedFiles.length - 1}
+                                            />
+                                        ))}
+                                    </div>
+                                ) : null}
+
+                                {!gitStatus ? (
+                                    <div className="p-6 text-sm text-[var(--app-hint)]">
+                                        {t('files.changes.empty.unavailable')}
+                                    </div>
+                                ) : null}
+
+                                {gitStatus && gitStatus.stagedFiles.length === 0 && gitStatus.unstagedFiles.length === 0 ? (
+                                    <div className="p-6 text-sm text-[var(--app-hint)]">
+                                        {t('files.changes.empty.none')}
+                                    </div>
+                                ) : null}
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                <FileActionMenu
+                    isOpen={fileMenu !== null}
+                    onClose={closeFileMenu}
+                    relativePath={fileMenu?.path ?? ''}
+                    absolutePath={resolveAbsoluteFilePath(session.metadata?.path, fileMenu?.path ?? '')}
+                    anchorPoint={fileMenu?.point ?? { x: 0, y: 0 }}
+                    onAddToComposer={() => {
+                        if (fileMenu) handleAddFileToComposer(fileMenu.path)
+                    }}
+                    onDelete={workspaceDelete.canDelete && fileMenu ? () => {
+                        workspaceDelete.requestDelete(fileMenu.path, fileMenu.kind === 'directory')
+                    } : undefined}
+                />
+
+                <WorkspaceDeleteDialog
+                    isOpen={workspaceDelete.target !== null}
+                    path={workspaceDelete.target?.path ?? ''}
+                    directory={workspaceDelete.target?.directory ?? false}
+                    isPending={workspaceDelete.isDeleting}
+                    onCancel={workspaceDelete.cancelDelete}
+                    onConfirm={workspaceDelete.confirmDelete}
+                />
             </div>
-
-            <FileActionMenu
-                isOpen={fileMenu !== null}
-                onClose={closeFileMenu}
-                relativePath={fileMenu?.path ?? ''}
-                absolutePath={resolveAbsoluteFilePath(session.metadata?.path, fileMenu?.path ?? '')}
-                anchorPoint={fileMenu?.point ?? { x: 0, y: 0 }}
-                onAddToComposer={() => {
-                    if (fileMenu) handleAddFileToComposer(fileMenu.path)
-                }}
-                onDelete={workspaceDelete.canDelete && fileMenu ? () => {
-                    workspaceDelete.requestDelete(fileMenu.path, fileMenu.kind === 'directory')
-                } : undefined}
-            />
-
-            <WorkspaceDeleteDialog
-                isOpen={workspaceDelete.target !== null}
-                path={workspaceDelete.target?.path ?? ''}
-                directory={workspaceDelete.target?.directory ?? false}
-                isPending={workspaceDelete.isDeleting}
-                onCancel={workspaceDelete.cancelDelete}
-                onConfirm={workspaceDelete.confirmDelete}
-            />
-        </div>
+        </WorkspaceDropZone>
     )
 }

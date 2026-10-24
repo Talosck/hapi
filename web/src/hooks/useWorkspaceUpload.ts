@@ -5,8 +5,10 @@ import {
     collectUploadEntries,
     uploadWorkspaceFiles,
     WorkspaceUploadCancelledError,
+    type WorkspaceUploadEntry,
     type WorkspaceUploadSummary,
 } from '@/lib/workspace-upload'
+import { collectDroppedEntries } from '@/lib/workspace-drop'
 import { useToast } from '@/lib/toast-context'
 import { useTranslation } from '@/lib/use-translation'
 
@@ -86,12 +88,11 @@ export function useWorkspaceUpload(options: {
     const fileInputRef = useRef<HTMLInputElement | null>(null)
     const folderInputRef = useRef<HTMLInputElement | null>(null)
 
-    const runUpload = useCallback(async (files: File[], targetDirectory: string) => {
-        if (!api || files.length === 0) {
+    const runUploadEntries = useCallback(async (entries: WorkspaceUploadEntry[], targetDirectory: string) => {
+        if (!api) {
             return
         }
 
-        const entries = collectUploadEntries(files)
         if (entries.length === 0) {
             toast.addToast({
                 title: t('files.upload.error.title'),
@@ -185,6 +186,13 @@ export function useWorkspaceUpload(options: {
         }
     }, [api, sessionId, onUploaded, toast, t])
 
+    const runUpload = useCallback(async (files: File[], targetDirectory: string) => {
+        if (!api || files.length === 0) {
+            return
+        }
+        await runUploadEntries(collectUploadEntries(files), targetDirectory)
+    }, [api, runUploadEntries])
+
     const handleFilesPicked = useCallback((event: ChangeEvent<HTMLInputElement>) => {
         // The FileList of an input is live: clearing the input empties the
         // list the browser handed us. Snapshot the files before the reset,
@@ -194,6 +202,20 @@ export function useWorkspaceUpload(options: {
         event.target.value = ''
         void runUpload(files, targetDirectoryRef.current)
     }, [runUpload])
+
+    /**
+     * Upload the files of a drag-and-drop into a directory of the workspace.
+     *
+     * The drop carries the files itself, so the entries are read from the
+     * data transfer: a dropped folder keeps its structure.
+     */
+    const dropFiles = useCallback(async (dataTransfer: DataTransfer, targetDirectory: string) => {
+        if (!api) {
+            return
+        }
+        const entries = await collectDroppedEntries(dataTransfer)
+        await runUploadEntries(entries, targetDirectory)
+    }, [api, runUploadEntries])
 
     const pickFiles = useCallback((targetDirectory: string) => {
         targetDirectoryRef.current = targetDirectory
@@ -241,6 +263,8 @@ export function useWorkspaceUpload(options: {
         },
         pickFiles,
         pickFolder,
+        /** Upload the files of a drag-and-drop into the given directory. */
+        dropFiles,
         cancel
     }
 }

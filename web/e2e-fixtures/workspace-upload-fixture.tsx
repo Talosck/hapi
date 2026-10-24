@@ -14,7 +14,7 @@
  * what the client sent, and can make a call fail on demand.
  */
 
-import React from 'react'
+import React, { useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import '../src/index.css'
@@ -25,6 +25,7 @@ import {
     WorkspaceUploadControls,
     WorkspaceUploadProgress,
 } from '../src/components/SessionFiles/WorkspaceUploadControls'
+import { WorkspaceDropZone } from '../src/components/SessionFiles/WorkspaceDropZone'
 import { DirectoryTree } from '../src/components/SessionFiles/DirectoryTree'
 import { DEFAULT_DIRECTORY_SORT } from '../src/lib/directory-sort'
 import type { ApiClient } from '../src/api/client'
@@ -133,24 +134,33 @@ function App() {
             record('onUploaded', [])
         }
     })
+    // The directory a drag hovers in the tree; null is the workspace root.
+    const [dropDirectory, setDropDirectory] = useState<string | null>(null)
 
     return (
-        <div data-testid="workspace-upload-fixture">
-            <ToastMessages />
-            <div className="flex items-center gap-2 border-b border-[var(--app-divider)] p-3">
-                <WorkspaceUploadControls upload={upload} />
+        <WorkspaceDropZone
+            upload={upload}
+            targetDirectory={dropDirectory ?? ''}
+            targetLabel={dropDirectory === null ? null : 'project'}
+        >
+            <div data-testid="workspace-upload-fixture">
+                <ToastMessages />
+                <div className="flex items-center gap-2 border-b border-[var(--app-divider)] p-3">
+                    <WorkspaceUploadControls upload={upload} />
+                </div>
+                <WorkspaceUploadProgress upload={upload} />
+                <DirectoryTree
+                    api={api}
+                    sessionId={SESSION_ID}
+                    rootLabel="project"
+                    onOpenFile={() => record('onOpenFile', [])}
+                    onUploadFiles={(path) => upload.pickFiles(path)}
+                    onUploadFolder={(path) => upload.pickFolder(path)}
+                    onDropTargetChange={setDropDirectory}
+                    sort={DEFAULT_DIRECTORY_SORT}
+                />
             </div>
-            <WorkspaceUploadProgress upload={upload} />
-            <DirectoryTree
-                api={api}
-                sessionId={SESSION_ID}
-                rootLabel="project"
-                onOpenFile={() => record('onOpenFile', [])}
-                onUploadFiles={(path) => upload.pickFiles(path)}
-                onUploadFolder={(path) => upload.pickFolder(path)}
-                sort={DEFAULT_DIRECTORY_SORT}
-            />
-        </div>
+        </WorkspaceDropZone>
     )
 }
 

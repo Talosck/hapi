@@ -16,7 +16,7 @@
  * stub API that records every call.
  */
 
-import { test, expect, Page } from '@playwright/test'
+import { test, expect, Page, Locator } from '@playwright/test'
 import path from 'node:path'
 
 type RecordedCall = {
@@ -216,5 +216,87 @@ test.describe('workspace upload e2e', () => {
             'appendWorkspaceUpload',
             'abortWorkspaceUpload'
         ])
+    })
+})
+
+test.describe('workspace upload drag and drop', () => {
+    /** Drag a file over an element of the fixture. */
+    async function dragFileOver(
+        page: Page,
+        locator: Locator,
+        file: { name: string; mimeType: string; content: string }
+    ): Promise<void> {
+        const element = await locator.elementHandle()
+        if (!element) throw new Error('No drop target')
+        await page.evaluate(({ file, element }) => {
+            const dataTransfer = new DataTransfer()
+            dataTransfer.items.add(new File([file.content], file.name, { type: file.mimeType }))
+            element.dispatchEvent(new DragEvent('dragenter', { dataTransfer, bubbles: true, cancelable: true }))
+            element.dispatchEvent(new DragEvent('dragover', { dataTransfer, bubbles: true, cancelable: true }))
+        }, { file, element })
+    }
+
+    /** Drop a file onto an element of the fixture. */
+    async function dropFile(
+        page: Page,
+        locator: Locator,
+        file: { name: string; mimeType: string; content: string }
+    ): Promise<void> {
+        const element = await locator.elementHandle()
+        if (!element) throw new Error('No drop target')
+        await page.evaluate(({ file, element }) => {
+            const dataTransfer = new DataTransfer()
+            dataTransfer.items.add(new File([file.content], file.name, { type: file.mimeType }))
+            element.dispatchEvent(new DragEvent('drop', { dataTransfer, bubbles: true, cancelable: true }))
+        }, { file, element })
+    }
+
+    test('uploads a file that is dropped on the page', async ({ page }) => {
+        await gotoFixture(page)
+
+        const file = { name: 'dropped.txt', mimeType: 'text/plain', content: 'hello world' }
+        await dragFileOver(page, page.getByTestId('workspace-upload-fixture'), file)
+        await dropFile(page, page.getByTestId('workspace-upload-fixture'), file)
+
+        await expect.poll(async () => (await calls(page)).some((call) => call.method === 'finishWorkspaceUpload'))
+            .toBe(true)
+
+        const recorded = await calls(page)
+        expect(recorded.find((call) => call.method === 'startWorkspaceUpload')?.args[1]).toEqual({
+            path: 'dropped.txt',
+            size: 11,
+            overwrite: true
+        })
+    })
+
+    test('uploads a file that is dropped on a directory of the tree', async ({ page }) => {
+        await gotoFixture(page)
+
+        // The tree lists a `src` directory; the drop lands in it.
+        const file = { name: 'app.ts', mimeType: 'text/plain', content: 'export const app = 1' }
+        await dragFileOver(page, page.getByText('src', { exact: true }), file)
+        await dropFile(page, page.getByText('src', { exact: true }), file)
+
+        await expect.poll(async () => (await calls(page)).some((call) => call.method === 'finishWorkspaceUpload'))
+            .toBe(true)
+
+        const recorded = await calls(page)
+        expect(recorded.find((call) => call.method === 'startWorkspaceUpload')?.args[1]).toEqual({
+            path: 'src/app.ts',
+            size: 20,
+            overwrite: true
+        })
+    })
+
+    test('shows the drop hint while a file is dragged over the page', async ({ page }) => {
+        await gotoFixture(page)
+
+        await dragFileOver(page, page.getByTestId('workspace-upload-fixture'), {
+            name: 'dropped.txt',
+            mimeType: 'text/plain',
+            content: 'hello world'
+        })
+
+        await expect(page.getByText('Drop files to upload')).toBeVisible()
     })
 })

@@ -517,6 +517,8 @@ export default {
   'files.directories.uploadFolderNamed': 'Загрузить папку в {name}',
   'files.upload.files': 'Загрузить файлы',
   'files.upload.folder': 'Загрузить папку',
+  'files.upload.dropToUpload': 'Перетащите файлы для загрузки',
+  'files.upload.dropIntoDirectory': 'Перетащите в {name}',
   'files.upload.progress': 'Загрузка {completed}/{total}',
   'files.upload.cancel': 'Отмена',
   'files.upload.success.title': 'Загрузка завершена',
