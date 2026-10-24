@@ -611,10 +611,19 @@ describe('Pi abort queue boundary', () => {
         expect(harness.sent.filter((item) => (item as { type?: string }).type === 'abort')).toHaveLength(0);
         expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt', message: 'second' }));
 
+        const getStateCountBefore = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state').length;
         harness.onEvent!({
             type: 'response', id: setModelCommand.id, command: 'set_model', success: true,
             data: { id: 'model', provider: 'provider' },
         });
+        // The model switch reads Pi's thinking level back, because Pi picks
+        // the level of the new model itself.
+        const levelSync = await vi.waitFor(() => {
+            const sent = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state');
+            expect(sent.length).toBeGreaterThan(getStateCountBefore);
+            return sent.at(-1)! as { id: string };
+        });
+        harness.onEvent!({ type: 'response', id: levelSync.id, command: 'get_state', success: true, data: { thinkingLevel: 'high' } });
         await expect(configPromise).resolves.toMatchObject({ applied: { model: { provider: 'provider', modelId: 'model' } } });
         await expect(abortPromise).resolves.toEqual({ success: true });
         expect(harness.sent.filter((item) => (item as { type?: string }).type === 'abort')).toHaveLength(0);
@@ -985,6 +994,13 @@ describe('Pi native steering delivery mode', () => {
             data: { sessionId: 'pi-steering-session', sessionFile: '/tmp/pi-steering.jsonl', isStreaming: true },
         });
         harness.onEvent!({ type: 'response', id: setThinking.id, command: 'set_thinking_level', success: true });
+        // The effort change reads Pi's thinking level back.
+        const levelSync = await vi.waitFor(() => {
+            const sent = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state');
+            expect(sent.length).toBeGreaterThan(1);
+            return sent.at(-1)! as { id: string };
+        });
+        harness.onEvent!({ type: 'response', id: levelSync.id, command: 'get_state', success: true, data: { thinkingLevel: 'low' } });
         await configRequest;
 
         // The stale steer is a normal prompt now, but Pi turn B is still
@@ -2244,7 +2260,15 @@ describe('Pi built-in slash commands', () => {
             return found!;
         });
         expect(setModel).toMatchObject({ provider: 'openai', modelId: 'gpt-4.1' });
+        const getStateCountBefore = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state').length;
         harness.onEvent!({ type: 'response', id: setModel.id, command: 'set_model', success: true });
+        // The model switch reads Pi's thinking level back.
+        const levelSync = await vi.waitFor(() => {
+            const sent = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state');
+            expect(sent.length).toBeGreaterThan(getStateCountBefore);
+            return sent.at(-1)! as { id: string };
+        });
+        harness.onEvent!({ type: 'response', id: levelSync.id, command: 'get_state', success: true, data: { thinkingLevel: 'high' } });
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: 'Model switched to gpt-4.1',
         })));
@@ -2254,6 +2278,127 @@ describe('Pi built-in slash commands', () => {
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: '⚠️ Unknown model: does-not-exist. Use /model to list available models.',
         })));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('reports the thinking level Pi picked for the new model', async () => {
+        const { running } = await startReadySession();
+        const setConfig = harness.rpcHandlers.get(RPC_METHODS.SetSessionConfig)!;
+
+        // The session runs with a level of its own before the model changes.
+        const effortPromise = setConfig({ effort: 'low' });
+        const setThinking = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_thinking_level') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({ type: 'response', id: setThinking.id, command: 'set_thinking_level', success: true });
+        const effortLevelSync = await vi.waitFor(() => {
+            const sent = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state');
+            expect(sent.length).toBeGreaterThan(1);
+            return sent.at(-1)! as { id: string };
+        });
+        harness.onEvent!({ type: 'response', id: effortLevelSync.id, command: 'get_state', success: true, data: { thinkingLevel: 'low' } });
+        await expect(effortPromise).resolves.toMatchObject({ applied: { effort: 'low' } });
+
+        const configPromise = setConfig({ model: { provider: 'openai', modelId: 'gpt-5.2' } });
+        const setModel = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_model') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        const getStateCountBefore = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state').length;
+        harness.onEvent!({ type: 'response', id: setModel.id, command: 'set_model', success: true, data: { id: 'gpt-5.2', provider: 'openai' } });
+
+        // Pi picks the level of the new model itself, so the session has to
+        // read it back instead of keeping the level of the old model.
+        const levelSync = await vi.waitFor(() => {
+            const sent = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state');
+            expect(sent.length).toBeGreaterThan(getStateCountBefore);
+            return sent.at(-1)! as { id: string };
+        });
+        harness.onEvent!({ type: 'response', id: levelSync.id, command: 'get_state', success: true, data: { thinkingLevel: 'medium' } });
+
+        await expect(configPromise).resolves.toMatchObject({
+            applied: { model: { provider: 'openai', modelId: 'gpt-5.2' }, effort: 'medium' },
+        });
+        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: 'MiniMax Code picked the thinking effort "medium" for the new model.',
+        }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('tells the user when Pi picks a level for the new model although the thinking was off', async () => {
+        const { running } = await startReadySession();
+        const setConfig = harness.rpcHandlers.get(RPC_METHODS.SetSessionConfig)!;
+
+        // The user turns the thinking off, so the session manages no level.
+        const effortPromise = setConfig({ effort: null });
+        const setThinking = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_thinking_level') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({ type: 'response', id: setThinking.id, command: 'set_thinking_level', success: true });
+        await expect(effortPromise).resolves.toMatchObject({ applied: { effort: null } });
+
+        const configPromise = setConfig({ model: { provider: 'openai', modelId: 'gpt-5.2' } });
+        const setModel = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_model') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        const getStateCountBefore = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state').length;
+        harness.onEvent!({ type: 'response', id: setModel.id, command: 'set_model', success: true, data: { id: 'gpt-5.2', provider: 'openai' } });
+
+        // Pi picks the level of the new model itself, even though the user
+        // had turned the thinking off, so the user has to hear about it.
+        const levelSync = await vi.waitFor(() => {
+            const sent = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state');
+            expect(sent.length).toBeGreaterThan(getStateCountBefore);
+            return sent.at(-1)! as { id: string };
+        });
+        harness.onEvent!({ type: 'response', id: levelSync.id, command: 'get_state', success: true, data: { thinkingLevel: 'medium' } });
+
+        await expect(configPromise).resolves.toMatchObject({
+            applied: { model: { provider: 'openai', modelId: 'gpt-5.2' }, effort: 'medium' },
+        });
+        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: 'MiniMax Code picked the thinking effort "medium" for the new model.',
+        }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('tells the user when Pi clamps the thinking effort the model cannot take', async () => {
+        const { running } = await startReadySession();
+        const setConfig = harness.rpcHandlers.get(RPC_METHODS.SetSessionConfig)!;
+        const configPromise = setConfig({ effort: 'max' });
+        const setThinking = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_thinking_level') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        const getStateCountBefore = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state').length;
+
+        // Pi clamps a level its model cannot take and still answers success.
+        harness.onEvent!({ type: 'response', id: setThinking.id, command: 'set_thinking_level', success: true });
+        const levelSync = await vi.waitFor(() => {
+            const sent = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state');
+            expect(sent.length).toBeGreaterThan(getStateCountBefore);
+            return sent.at(-1)! as { id: string };
+        });
+        harness.onEvent!({ type: 'response', id: levelSync.id, command: 'get_state', success: true, data: { thinkingLevel: 'high' } });
+
+        await expect(configPromise).resolves.toMatchObject({ applied: { effort: 'high' } });
+        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: 'MiniMax Code cannot run the thinking effort "max" on this model, so it runs with "high".',
+        }));
 
         harness.onError?.(new Error('finish test'));
         await running;
@@ -2487,7 +2632,15 @@ describe('Pi built-in slash commands', () => {
             return found!;
         });
         expect(setModel).toMatchObject({ provider: 'azure', modelId: 'gpt-5.2' });
+        const getStateCountBefore = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state').length;
         harness.onEvent!({ type: 'response', id: setModel.id, command: 'set_model', success: true });
+        // The model switch reads Pi's thinking level back.
+        const levelSync = await vi.waitFor(() => {
+            const sent = harness.sent.filter((item) => (item as { type?: string }).type === 'get_state');
+            expect(sent.length).toBeGreaterThan(getStateCountBefore);
+            return sent.at(-1)! as { id: string };
+        });
+        harness.onEvent!({ type: 'response', id: levelSync.id, command: 'get_state', success: true, data: { thinkingLevel: 'high' } });
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: 'Model switched to azure/gpt-5.2',
         })));

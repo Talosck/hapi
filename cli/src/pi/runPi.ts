@@ -43,6 +43,40 @@ const PI_BASH_TIMEOUT_MS = 120_000;
 /** How long the cancellation of an over-running shell command may take. */
 const PI_BASH_ABORT_TIMEOUT_MS = 5_000;
 
+/**
+ * Reads back the thinking level Pi ended up with.
+ *
+ * Pi never rejects a level its model cannot take — it clamps it to the
+ * closest one the model supports and still answers `success: true` — and it
+ * picks the level of a new model itself when the model changes. Its answers
+ * carry only what was asked for, so without asking Pi again the session would
+ * report a level the agent is not using.
+ *
+ * A level that was not managed at all (`null`) counts as a difference too:
+ * Pi picks one for a new model even when the user had turned the thinking
+ * off, so the user has to hear about it.
+ */
+async function syncThinkingLevelFromPi(
+    session: PiSession,
+    transport: PiTransport,
+    expected: PiThinkingLevel | null | undefined,
+    onChanged: (level: string) => string,
+): Promise<void> {
+    try {
+        const data = await sendPiRpcAndWait(session, transport, { type: 'get_state' }) as { thinkingLevel?: string } | undefined;
+        const level = data?.thinkingLevel;
+        if (typeof level !== 'string' || level.length === 0) return;
+        session.currentThinkingLevel = level as PiThinkingLevel;
+        if (expected !== undefined && expected !== level) {
+            session.sendSessionEvent({ type: 'message', message: onChanged(level) });
+        }
+    } catch (error) {
+        // The change itself already succeeded; a failed read only means the
+        // session keeps the level it had.
+        logger.debug('[pi] Could not read the thinking level from Pi:', error);
+    }
+}
+
 const PI_HELP_TEXT = [
     'Supported HAPI Pi commands:',
     '/compact [instructions] — compress conversation history to save context',
@@ -827,6 +861,7 @@ export async function runPi(opts: {
                 // can never finish against a temporary history branch.
                 if (requestedModel) {
                     if (requestedModel.modelId && requestedModel.provider) {
+                        const levelBefore = piSession.currentThinkingLevel;
                         await sendPiRpcAndWait(piSession, transport, {
                             type: 'set_model',
                             provider: requestedModel.provider,
@@ -834,6 +869,12 @@ export async function runPi(opts: {
                         });
                         piSession.currentModel = requestedModel.modelId;
                         piSession.currentProvider = requestedModel.provider;
+                        await syncThinkingLevelFromPi(
+                            piSession,
+                            transport,
+                            levelBefore,
+                            (level) => `MiniMax Code picked the thinking effort "${level}" for the new model.`,
+                        );
                     } else if (requestedModel.modelId && !requestedModel.provider) {
                         // Provider is unknown until get_state/get_available_models resolve.
                         // Committing now would persist piSelectedModel while Pi never received
@@ -853,6 +894,17 @@ export async function runPi(opts: {
                     const level = requestedThinkingLevel ?? 'off';
                     await sendPiRpcAndWait(piSession, transport, { type: 'set_thinking_level', level });
                     piSession.currentThinkingLevel = requestedThinkingLevel;
+                    if (requestedThinkingLevel !== null) {
+                        // Pi clamps a level the model cannot take instead of
+                        // rejecting it, so the level Pi really runs with has
+                        // to be read back before it is reported to the hub.
+                        await syncThinkingLevelFromPi(
+                            piSession,
+                            transport,
+                            requestedThinkingLevel,
+                            (actual) => `MiniMax Code cannot run the thinking effort "${requestedThinkingLevel}" on this model, so it runs with "${actual}".`,
+                        );
+                    }
                 }
                 piSession.pushKeepAlive();
 
@@ -1012,6 +1064,7 @@ export async function runPi(opts: {
                 }
                 try {
                     await piSession.runRuntimeMutation(async () => {
+                        const levelBefore = piSession.currentThinkingLevel;
                         await sendPiRpcAndWait(piSession, transport, {
                             type: 'set_model',
                             provider: match.provider,
@@ -1019,6 +1072,12 @@ export async function runPi(opts: {
                         });
                         piSession.currentModel = match.modelId;
                         piSession.currentProvider = match.provider;
+                        await syncThinkingLevelFromPi(
+                            piSession,
+                            transport,
+                            levelBefore,
+                            (level) => `MiniMax Code picked the thinking effort "${level}" for the new model.`,
+                        );
                         // The web picker prefers piSelectedModel metadata for
                         // selection, context-window resolution, and effort
                         // options; a bare keepalive model is not enough to
@@ -1749,9 +1808,15 @@ export async function runPi(opts: {
                             level: startupThinkingLevel,
                         });
                         piSession.currentThinkingLevel = startupThinkingLevel;
+                        await syncThinkingLevelFromPi(
+                            piSession,
+                            transport,
+                            startupThinkingLevel,
+                            (actual) => `MiniMax Code cannot run the thinking effort "${startupThinkingLevel}" on this model, so it runs with "${actual}".`,
+                        );
                         piSession.pushKeepAlive();
                     }, { poisonOnError: (error) => error instanceof PiRpcTimeoutError });
-                    logger.debug(`[pi] Startup effort applied: ${startupThinkingLevel}`);
+                    logger.debug(`[pi] Startup effort applied: ${piSession.currentThinkingLevel ?? startupThinkingLevel}`);
                 } catch (error) {
                     if (error instanceof PiRpcTimeoutError) {
                         failNativeStartup(new Error(`Pi startup effort outcome is indeterminate: ${error.message}`));
