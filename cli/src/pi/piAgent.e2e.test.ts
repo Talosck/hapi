@@ -52,6 +52,8 @@ type AgentMessage = {
     status?: string;
     live?: boolean;
     streamSnapshot?: boolean;
+    /** The token counts of a finished turn. */
+    info?: { total?: { totalTokens?: number } };
 };
 
 class RecordingSession {
@@ -62,6 +64,8 @@ class RecordingSession {
     readonly agentMessages: AgentMessage[] = [];
     /** Every session event (the ⚠️ lines and the status messages). */
     readonly sessionEvents: Array<{ type?: string; message?: string }> = [];
+    /** Every keepalive runtime the hub was told about. */
+    readonly keepAliveRuntimes: Array<{ model?: string; effort?: string | null } | undefined> = [];
     readonly consumed: string[] = [];
     /** Set when the wrapper reported the session as dead (Pi went away). */
     dead = false;
@@ -111,7 +115,11 @@ class RecordingSession {
     }
     emitMessagesConsumed(ids: string[]): void { this.consumed.push(...ids); }
     emitSteerIndeterminate(): void {}
-    keepAlive(): void {}
+    keepAlive(_thinking?: boolean, _mode?: unknown, runtime?: unknown): void {
+        // The runtime is the only place the hub learns which model and which
+        // thinking effort the session really runs with.
+        this.keepAliveRuntimes.push(runtime as { model?: string; effort?: string | null } | undefined);
+    }
     emitSessionReady(): void {}
     async setSteerDeliveryState(): Promise<boolean> { return true; }
     syncNativeQueuedMessage(): void {}
@@ -217,14 +225,60 @@ function transcriptText(entry: PiTranscriptEntry): string {
         .join('');
 }
 
+/**
+ * The newest Pi session transcript on this machine.
+ *
+ * Pi writes one JSONL file per native session, so this is the ground truth
+ * for what the running agent really did — the hub only ever sees what the
+ * wrapper chose to forward.
+ */
+async function newestPiTranscript(): Promise<string> {
+    const transcripts = await listPiTranscripts();
+    const withTime = await Promise.all([...transcripts].map(async (path) => ({
+        path,
+        time: (await stat(path)).mtimeMs,
+    })));
+    withTime.sort((a, b) => b.time - a.time);
+    return withTime[0]!.path;
+}
+
+/** The raw text of the newest Pi session transcript. */
+async function newestPiTranscriptText(): Promise<string> {
+    return readFile(await newestPiTranscript(), 'utf8');
+}
+
+/**
+ * The thinking level Pi recorded last in its own session log.
+ *
+ * Pi writes a `thinking_level_change` entry whenever the level moves — also
+ * when a model switch makes it pick the level of the new model. That entry is
+ * the ground truth for the level the agent really runs with.
+ */
+async function piRecordedThinkingLevel(): Promise<string | undefined> {
+    const raw = await newestPiTranscriptText();
+    const levels = [...raw.matchAll(/"thinkingLevel"\s*:\s*"([^"]+)"/g)].map((match) => match[1]!);
+    return levels[levels.length - 1];
+}
+
 describe.skipIf(process.env.HAPI_RUN_PI_E2E !== '1')('Pi agent end to end', () => {
     let session: RecordingSession;
     let run: Promise<void>;
     let workingDirectory: string;
     let home: string;
     let transcriptsBefore: Set<string>;
+    let originalProcessExit: typeof process.exit;
 
     beforeAll(async () => {
+        // Vitest replaces `process.exit` with a throwing stub, so the runner's
+        // crash handler would re-enter itself forever when it tries to exit.
+        // Neutralize it for the whole run, then restore it in the teardown.
+        //
+        // The override lives in `beforeAll`, not at module level: a skipped
+        // suite never runs its hooks, and a module-level override would stay
+        // in place for every other test file that the worker picks up
+        // afterwards.
+        originalProcessExit = process.exit;
+        process.exit = (() => undefined) as unknown as typeof process.exit;
         await rm(LOG_PATH, { force: true });
         writeLog('info', ['=== e2e run start ===']);
         home = await mkdtemp(join(tmpdir(), 'hapi-pi-e2e-home-'));
@@ -237,14 +291,9 @@ describe.skipIf(process.env.HAPI_RUN_PI_E2E !== '1')('Pi agent end to end', () =
     }, 60_000);
 
     afterAll(async () => {
-        // Vitest replaces `process.exit` with a throwing stub, so the runner's
-        // crash handler would re-enter itself forever when it tries to exit.
-        // Neutralize it while the session shuts down, then restore it.
-        const originalExit = process.exit;
-        process.exit = (() => undefined) as unknown as typeof process.exit;
+        // The wrapper's own lifecycle kills Pi as part of its cleanup, so
+        // the teardown does not look like a crash to the runner.
         try {
-            // The wrapper's own lifecycle kills Pi as part of its cleanup, so
-            // the teardown does not look like a crash to the runner.
             const kill = session.rpc.get('killSession');
             if (kill) await kill({});
             await Promise.race([
@@ -258,11 +307,98 @@ describe.skipIf(process.env.HAPI_RUN_PI_E2E !== '1')('Pi agent end to end', () =
                 try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
             }
         } finally {
-            process.exit = originalExit;
+            if (originalProcessExit) process.exit = originalProcessExit;
         }
         await rm(home, { recursive: true, force: true });
         await rm(workingDirectory, { recursive: true, force: true });
     }, 60_000);
+
+    it('delivers a prompt that arrives while Pi is still starting', async () => {
+        // The wrapper registers its message handler before Pi even starts, so
+        // a prompt can arrive in the window before Pi answers its first
+        // get_state. That prompt has to be buffered and released later — it
+        // must not be swallowed (issue #1143).
+        await vi.waitFor(() => {
+            expect(session.user).toBeDefined();
+        }, 30_000);
+
+        // Pi really was not ready yet — that is the whole point of this link.
+        expect(session.metadata.piSessionId).toBeUndefined();
+
+        session.user?.({
+            role: 'user',
+            content: { type: 'text', text: 'Reply with exactly: E2E_STARTUP_PROMPT_OK' },
+        }, 'e2e-startup-1');
+
+        await vi.waitFor(() => {
+            const answer = session.agentMessages.find((message) => JSON.stringify(message).includes('E2E_STARTUP_PROMPT_OK'));
+            expect(answer).toBeDefined();
+        }, 180_000);
+
+        // The usage of that turn is Pi's own, and the hub has to see it.
+        await vi.waitFor(() => {
+            const usage = session.agentMessages.find((message) => message.type === 'token_count');
+            expect(usage).toBeDefined();
+            expect(usage?.info?.total?.totalTokens ?? 0).toBeGreaterThan(0);
+        }, 60_000);
+    }, 300_000);
+
+    it('reports a compaction the agent refuses without wedging the session', async () => {
+        // Pi refuses to compact a session that is too small. The refusal has
+        // to reach the user, and the session has to stay usable: this path
+        // poisons the runtime lease on a timeout, so a failed compaction must
+        // not leave the session unable to run anything else.
+        session.user?.({
+            role: 'user',
+            content: { type: 'text', text: '/compact' },
+        }, 'e2e-compact-1');
+        await vi.waitFor(() => {
+            const report = session.sessionEvents.find((event) => {
+                return typeof event.message === 'string' && /Compaction (failed|completed)/.test(event.message);
+            });
+            expect(report).toBeDefined();
+        }, 120_000);
+
+        // The session still answers afterwards.
+        session.user?.({
+            role: 'user',
+            content: { type: 'text', text: 'Reply with exactly: E2E_AFTER_COMPACT_OK' },
+        }, 'e2e-after-compact-1');
+        await vi.waitFor(() => {
+            const answer = session.agentMessages.find((message) => JSON.stringify(message).includes('E2E_AFTER_COMPACT_OK'));
+            expect(session.dead).toBe(false);
+            expect(answer).toBeDefined();
+        }, 180_000);
+    }, 400_000);
+
+    it('titles the chat with the tool that the Pi title extension gives the model', async () => {
+        // HAPI ships a Pi extension with a `hapi_change_title` tool, and Pi
+        // turns the call into an extension UI request. The hub has to see the
+        // title that comes out of it.
+        //
+        // This runs before the rename test on purpose: a name the user picked
+        // is never overwritten, so the title can only be observed while the
+        // session still has no user name.
+        await vi.waitFor(() => {
+            expect(session.metadata.piSessionId).toBeTruthy();
+        }, 60_000);
+
+        session.user?.({
+            role: 'user',
+            content: { type: 'text', text: 'Use the hapi_change_title tool to title this chat "Sea Haiku", then write one haiku about the sea.' },
+        }, 'e2e-title-1');
+
+        await vi.waitFor(() => {
+            expect(session.metadata.name).toBeTruthy();
+        }, 180_000);
+
+        // The ground truth: Pi really ran the tool HAPI gave it, and the
+        // title really came out of the extension UI channel.
+        await vi.waitFor(async () => {
+            const raw = await newestPiTranscriptText();
+            expect(raw).toContain('hapi_change_title');
+        }, 60_000);
+    }, 300_000);
 
     it('runs a prompt, a shell command, a rename, a tree and an aborted steer against the real Pi', async () => {
         const transcript: string[] = [];
@@ -418,4 +554,224 @@ describe.skipIf(process.env.HAPI_RUN_PI_E2E !== '1')('Pi agent end to end', () =
         }
         console.log('=====================================\n');
     }, 600_000);
+
+    it('steers a queued message into the turn that is running', async () => {
+        // Pi delivers a steering message after the current turn finished its
+        // tool calls and before the next model call, so the turn has to be
+        // long enough for the steer to arrive while it is still running.
+        const marker = `E2E_STEER_DELIVERED_${Date.now()}`;
+        session.resetStreamingUpdates();
+        session.user?.({
+            role: 'user',
+            content: { type: 'text', text: 'Run the shell command `sleep 25` with the bash tool and then reply with exactly: STEER_TARGET_DONE' },
+        }, 'e2e-steer-prompt-1');
+        await vi.waitFor(() => {
+            expect(session.streamingUpdates).toBeGreaterThan(0);
+        }, 120_000);
+
+        // The steer goes in while the turn is still live.
+        session.user?.({
+            role: 'user',
+            content: { type: 'text', text: `IMPORTANT: remember to use ${marker}` },
+            meta: { deliveryMode: 'steer' },
+        }, 'e2e-steer-2');
+
+        // The ground truth: Pi really delivered the steer into the running
+        // turn, so the marker is in Pi's own transcript.
+        await vi.waitFor(async () => {
+            const raw = await newestPiTranscriptText();
+            expect(raw).toContain(marker);
+        }, 180_000);
+
+        // The turn still finishes normally afterwards.
+        await vi.waitFor(() => {
+            const answer = session.agentMessages.find((message) => JSON.stringify(message).includes('STEER_TARGET_DONE'));
+            expect(session.dead).toBe(false);
+            expect(answer).toBeDefined();
+        }, 180_000);
+    }, 600_000);
+
+    it('publishes the model catalog of the running Pi and switches its thinking effort', async () => {
+        // The catalog the hub asks the session for.
+        const listModels = session.rpc.get('listPiModels');
+        expect(listModels).toBeDefined();
+        const catalog = await listModels!({}) as {
+            success?: boolean;
+            availableModels?: Array<{ provider?: string; modelId?: string }>;
+            currentModelId?: string | null;
+        };
+        expect(catalog.success).toBe(true);
+        const models = catalog.availableModels ?? [];
+        expect(models.length).toBeGreaterThan(0);
+        // Every entry has to be usable as a selector, so both halves of it
+        // have to be there.
+        for (const model of models) {
+            expect(model.provider).toBeTruthy();
+            expect(model.modelId).toBeTruthy();
+        }
+
+        // The thinking effort: Pi has to take it and say so.
+        const setConfig = session.rpc.get('set-session-config');
+        expect(setConfig).toBeDefined();
+        const applied = await setConfig!({ effort: 'low' }) as { applied?: { effort?: string | null } };
+        expect(applied.applied?.effort).toBe('low');
+
+        // The ground truth: Pi's own session log records the level change.
+        await vi.waitFor(async () => {
+            const raw = await newestPiTranscriptText();
+            expect(raw).toMatch(/"thinkingLevel"\s*:\s*"low"/);
+        }, 60_000);
+    }, 300_000);
+
+    it('switches the model of the running Pi and Pi really uses it', async () => {
+        const listModels = session.rpc.get('listPiModels');
+        expect(listModels).toBeDefined();
+        const catalog = await listModels!({}) as {
+            availableModels?: Array<{ provider?: string; modelId?: string }>;
+        };
+        const models = catalog.availableModels ?? [];
+        const selected = session.metadata.piSelectedModel as { modelId?: string } | undefined;
+        const target = models.find((model) => model.modelId !== selected?.modelId);
+        expect(target).toBeDefined();
+
+        const setConfig = session.rpc.get('set-session-config');
+        expect(setConfig).toBeDefined();
+        const applied = await setConfig!({
+            model: { provider: target!.provider, modelId: target!.modelId },
+        }) as { applied?: { model?: { provider?: string; modelId?: string } } };
+        expect(applied.applied?.model?.modelId).toBe(target!.modelId);
+        expect(applied.applied?.model?.provider).toBe(target!.provider);
+
+        // The hub's own selection follows the switch.
+        await vi.waitFor(() => {
+            const current = session.metadata.piSelectedModel as { modelId?: string; provider?: string } | undefined;
+            expect(current?.modelId).toBe(target!.modelId);
+            expect(current?.provider).toBe(target!.provider);
+        }, 30_000);
+
+        // The ground truth: Pi's own session log records the model change.
+        await vi.waitFor(async () => {
+            const raw = await newestPiTranscriptText();
+            expect(raw).toMatch(new RegExp(`"modelId"\\s*:\\s*"${target!.modelId!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
+        }, 60_000);
+
+        // Pi picks the thinking level of the new model itself, and the hub
+        // has to be told the level the agent really runs with — not the one
+        // of the model that was running before.
+        await vi.waitFor(async () => {
+            const level = await piRecordedThinkingLevel();
+            expect(level).toBeTruthy();
+            const told = session.keepAliveRuntimes
+                .filter((runtime): runtime is { model?: string; effort?: string | null } => runtime !== undefined);
+            expect(told.length).toBeGreaterThan(0);
+            expect(told[told.length - 1]?.effort).toBe(level);
+        }, 60_000);
+    }, 300_000);
+
+    it('reports the session stats of the running Pi', async () => {
+        const before = session.sessionEvents.length;
+        session.user?.({
+            role: 'user',
+            content: { type: 'text', text: '/session' },
+        }, 'e2e-session-1');
+        await vi.waitFor(() => {
+            const stats = session.sessionEvents.slice(before).find((event) => {
+                return typeof event.message === 'string' && event.message.includes('Pi session stats');
+            });
+            expect(stats).toBeDefined();
+            // The numbers are the agent's own, not a placeholder.
+            expect(String(stats?.message)).toMatch(/Tokens: total \d+/);
+        }, 60_000);
+    }, 120_000);
+
+    it('publishes the slash commands and the skills of the running Pi', async () => {
+        const listCommands = session.rpc.get('listSlashCommands');
+        expect(listCommands).toBeDefined();
+        const commands = await listCommands!({}) as {
+            success?: boolean;
+            commands?: Array<{ name?: string }>;
+        };
+        expect(commands.success).toBe(true);
+        const names = (commands.commands ?? []).map((command) => command.name);
+        // The built-ins Pi's RPC surface can actually serve.
+        expect(names).toContain('compact');
+        expect(names).toContain('session');
+        expect(names).toContain('model');
+        expect(names).toContain('bash');
+        expect(names).toContain('tree');
+        expect(names).toContain('name');
+        expect(names).toContain('help');
+
+        const listSkills = session.rpc.get('listSkills');
+        expect(listSkills).toBeDefined();
+        const skills = await listSkills!({}) as { success?: boolean; skills?: unknown[] };
+        expect(skills.success).toBe(true);
+        expect(Array.isArray(skills.skills)).toBe(true);
+    }, 120_000);
+
+    it('refuses a terminal-only Pi command instead of passing it to the model', async () => {
+        const before = session.sessionEvents.length;
+        session.user?.({
+            role: 'user',
+            content: { type: 'text', text: '/export' },
+        }, 'e2e-export-1');
+        await vi.waitFor(() => {
+            const refusal = session.sessionEvents.slice(before).find((event) => {
+                return typeof event.message === 'string' && event.message.includes('terminal-only');
+            });
+            expect(refusal).toBeDefined();
+        }, 60_000);
+    }, 120_000);
+
+    it('forks the conversation of the running Pi', async () => {
+        const transcriptsBefore = await listPiTranscripts();
+        const nativeSessionIdBefore = session.metadata.piSessionId;
+
+        const fork = session.rpc.get('fork-conversation');
+        expect(fork).toBeDefined();
+        const result = await fork!({}) as { nativeSessionId?: string; error?: string };
+        expect(result.nativeSessionId, result.error).toBeTruthy();
+        expect(result.nativeSessionId).not.toBe(nativeSessionIdBefore);
+
+        // The ground truth: Pi really wrote a second session of its own.
+        await vi.waitFor(async () => {
+            const transcriptsAfter = await listPiTranscripts();
+            const created = [...transcriptsAfter].filter((path) => !transcriptsBefore.has(path));
+            expect(created.length).toBeGreaterThan(0);
+            const withTime = await Promise.all(created.map(async (path) => ({ path, time: (await stat(path)).mtimeMs })));
+            withTime.sort((a, b) => b.time - a.time);
+            expect(withTime[0]!.path).toContain(result.nativeSessionId!);
+        }, 60_000);
+    }, 300_000);
+
+    it('rewinds the conversation of the running Pi to an earlier message', async () => {
+        const nativeSessionIdBefore = session.metadata.piSessionId;
+
+        const rewind = session.rpc.get('rewind-conversation');
+        expect(rewind).toBeDefined();
+        const result = await rewind!({ messageLocalId: 'e2e-prompt-1' }) as {
+            success?: boolean;
+            error?: string;
+            outcome?: string;
+        };
+        expect(result.success, result.error).toBe(true);
+
+        // Pi forks the session at that message, so the running session has a
+        // new native identity.
+        await vi.waitFor(() => {
+            expect(session.metadata.piSessionId).toBeTruthy();
+            expect(session.metadata.piSessionId).not.toBe(nativeSessionIdBefore);
+        }, 60_000);
+
+        // The session is still usable after the rewind.
+        session.user?.({
+            role: 'user',
+            content: { type: 'text', text: 'Reply with exactly: E2E_AFTER_REWIND_OK' },
+        }, 'e2e-after-rewind-1');
+        await vi.waitFor(() => {
+            const answer = session.agentMessages.find((message) => JSON.stringify(message).includes('E2E_AFTER_REWIND_OK'));
+            expect(session.dead).toBe(false);
+            expect(answer).toBeDefined();
+        }, 120_000);
+    }, 300_000);
 });
