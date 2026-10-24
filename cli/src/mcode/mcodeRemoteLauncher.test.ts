@@ -910,6 +910,70 @@ describe('mcodeRemoteLauncher config sync', () => {
             { type: 'background-task-snapshot', tasks: [] }
         ])
     })
+
+    it('settles a background task the agent runtime reports as finished', async () => {
+        // The runtime reports a finished background task into the owner
+        // session with a turn of the agent's own, and that turn is not
+        // streamed to the client. The agent polled the task once and never
+        // again, so the runtime's record is the only place that knows the
+        // task is over.
+        const backend = createBackend({
+            prompt: vi.fn(async (
+                _sessionId: string,
+                _content: unknown,
+                onMessage: (message: unknown) => void
+            ) => {
+                onMessage({
+                    type: 'tool_call',
+                    id: 'task-call',
+                    name: 'bash',
+                    input: { command: 'npm run dev', run_in_background: true },
+                    status: 'in_progress'
+                })
+                onMessage({
+                    type: 'tool_result',
+                    id: 'task-call',
+                    output: {
+                        content: [{ type: 'text', text: '<bash_background task_id="bg_1">Started.</bash_background>' }],
+                        details: { task_id: 'bg_1', status: 'started' }
+                    },
+                    status: 'completed'
+                })
+                onMessage({
+                    type: 'tool_call',
+                    id: 'poll-1',
+                    name: 'task_output',
+                    input: { task_id: 'bg_1' },
+                    status: 'completed'
+                })
+                onMessage({
+                    type: 'tool_result',
+                    id: 'poll-1',
+                    output: {
+                        content: [{ type: 'text', text: '<task_output status="running">halfway there</task_output>' }],
+                        details: { task_id: 'bg_1', status: 'running' }
+                    },
+                    status: 'completed'
+                })
+            })
+        })
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {
+            readBackgroundTaskStates: async () => new Map([
+                ['bg_1', { taskId: 'bg_1', status: 'succeeded', endedAt: 1_792_831_484_711 }]
+            ])
+        })
+
+        // The task is out of the count and its card is done.
+        const snapshots = session.sendSessionEvent.mock.calls
+            .map((call) => call[0] as { type?: string; tasks?: unknown })
+            .filter((event) => event.type === 'background-task-snapshot')
+        expect(snapshots[snapshots.length - 1]).toEqual({ type: 'background-task-snapshot', tasks: [] })
+
+        const sent = session.sendAgentMessage.mock.calls.map((call) => call[0])
+        expect(sent.some((message: any) => message?.type === 'tool-call-result' && message?.callId === 'task-call')).toBe(true)
+    })
 })
 
 describe('mcodeRemoteLauncher ACP extensions', () => {

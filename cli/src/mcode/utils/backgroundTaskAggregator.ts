@@ -1,5 +1,6 @@
 import { isObject } from '@hapi/protocol';
 import type { AgentMessage } from '@/agent/types';
+import type { McodeBackgroundTaskState } from './mcodeBackgroundTaskState';
 
 /**
  * mcode runs background work out-of-band: the launch tool (`bash` with
@@ -55,21 +56,43 @@ const RUNNING_TASK_STATUSES = new Set([
     'stopping'
 ]);
 
+/**
+ * The statuses that mean the task is over.
+ *
+ * The vocabulary comes from two places: what the agent reports when the task
+ * is polled, and what the agent's runtime records for it (succeeded, failed,
+ * canceled, lost). A status that is not on the list says the task still runs.
+ */
 const TERMINAL_TASK_STATUSES = new Set([
     'completed',
     'complete',
+    'done',
+    'finished',
+    'exited',
     'succeeded',
     'success',
     'failed',
+    'failure',
     'error',
+    'crashed',
     'canceled',
     'cancelled',
     'lost',
     'stopped',
-    'killed'
+    'killed',
+    'abandoned',
+    'timeout',
+    'timed_out'
 ]);
 
-const FAILED_TASK_STATUSES = new Set(['failed', 'error']);
+const FAILED_TASK_STATUSES = new Set([
+    'failed',
+    'failure',
+    'error',
+    'crashed',
+    'timeout',
+    'timed_out'
+]);
 
 /**
  * How many turns may pass without the agent asking about a task before HAPI
@@ -107,6 +130,8 @@ type TrackedTask = {
     name: string;
     input: unknown;
     status: string | null;
+    /** Epoch milliseconds: when HAPI first saw the task start. */
+    startedAt: number;
     /** True once a task_* poll has been folded into the launch card. */
     polled: boolean;
     /**
@@ -454,6 +479,80 @@ export class BackgroundTaskAggregator {
     }
 
     /**
+     * Settles the tasks the agent's runtime has the record of.
+     *
+     * The runtime is the only place that knows when a background task ended:
+     * it reports the completion into the owner session with a turn of the
+     * agent's own, and that turn is not streamed to the client. A task that
+     * ended between two turns therefore stays in the ledger - and on its card
+     * - as if it still ran, until the agent happens to poll it again.
+     *
+     * The runtime's record settles it: a task it reports as finished leaves
+     * the running count and its card completes; a task it reports as running
+     * belongs in the count, even when HAPI stopped watching it.
+     *
+     * A task the runtime does not know about is left alone. The record may be
+     * unreadable, and a ledger that drops work it cannot prove is gone would
+     * hide a task that really runs.
+     */
+    applyRuntimeTaskStates(states: ReadonlyMap<string, McodeBackgroundTaskState>): AgentMessage[] {
+        const forwarded: AgentMessage[] = [];
+
+        for (const task of this.tasks.values()) {
+            // A task HAPI already settled stays settled: a stop the user
+            // asked for does not start running again because the runtime has
+            // not noticed it yet.
+            if (task.completed) continue;
+
+            const state = states.get(task.taskId);
+            if (!state) continue;
+
+            if (!isTerminalStatus(state.status)) {
+                // The runtime still has it running: it counts as running.
+                this.markRunning(task);
+                continue;
+            }
+
+            task.status = state.status;
+            task.completed = true;
+            this.tasks.delete(task.taskId);
+            this.records.delete(task.taskId);
+            this.heldLaunchResults.delete(task.callId);
+
+            // The card of a task that ended must stop showing it as running.
+            // A card that was already handed out stays as it is.
+            if (task.launchResultForwarded) continue;
+
+            forwarded.push({
+                type: 'tool_result',
+                id: task.callId,
+                output: {
+                    content: [
+                        {
+                            type: 'text',
+                            text: formatUpdateText(
+                                task.taskId,
+                                state.status,
+                                null,
+                                `Background task ${task.taskId} ${state.status}`
+                            )
+                        }
+                    ],
+                    details: { task_id: task.taskId, status: state.status }
+                },
+                status: isFailedStatus(state.status) ? 'failed' : 'completed'
+            });
+        }
+
+        return forwarded;
+    }
+
+    /** Whether HAPI still tracks a background task at all. */
+    hasTrackedTasks(): boolean {
+        return this.tasks.size > 0;
+    }
+
+    /**
      * Completes every tracked task, e.g. when the user aborts the session.
      * Buffered, unresulted polls are discarded for the same reason as above.
      */
@@ -524,6 +623,7 @@ export class BackgroundTaskAggregator {
                     name: call.name,
                     input: call.input,
                     status: parsed.status,
+                    startedAt: Date.now(),
                     polled: false,
                     askedThisTurn: false,
                     turnsUnasked: 0,
@@ -634,7 +734,7 @@ export class BackgroundTaskAggregator {
             id: task.taskId,
             command: readCommand(task.input) ?? task.taskId,
             cwd: readCwd(task.input) ?? this.defaultCwd,
-            startedAt: Date.now()
+            startedAt: task.startedAt
         });
     }
 
@@ -665,6 +765,7 @@ export class BackgroundTaskAggregator {
                 name: call.name,
                 input: call.input,
                 status: parsed.status,
+                startedAt: Date.now(),
                 polled: false,
                 askedThisTurn: false,
                 turnsUnasked: 0,

@@ -59,6 +59,10 @@ import {
 } from './utils/mcodeExtensions';
 import { McodeExtensionControl } from './utils/mcodeExtensionControl';
 import { readMcodeTurnLease, type McodeTurnLeaseState } from './utils/mcodeTurnLease';
+import {
+    readMcodeBackgroundTaskStates,
+    type McodeBackgroundTaskState
+} from './utils/mcodeBackgroundTaskState';
 import { renderMcodeDeliverables, splitMcodeDeliverables } from './utils/mcodeDeliverables';
 import { findMcodeMessagesPath } from './utils/mcodeUsage';
 import { readMcodeTranscriptToolMessages } from './utils/mcodeSessionTranscript';
@@ -85,6 +89,18 @@ const MCODE_TURN_LEASE_POLL_MS = 400;
  * wait is not ending.
  */
 const MCODE_TURN_LEASE_STUCK_MS = 60_000;
+
+/**
+ * How often the background work of a session is checked against the record
+ * the agent's runtime keeps of it.
+ *
+ * The runtime reports a finished background task into the owner session with a
+ * turn of the agent's own, and that turn is not streamed to the client. A
+ * client that only watches the tool stream therefore keeps showing a task that
+ * ended as one that still runs. The runtime's record settles it, and the
+ * check is a local file read - no round trip to the agent.
+ */
+const MCODE_BACKGROUND_TASK_POLL_MS = 5_000;
 
 /**
  * How often the agent may be started again in a row before the session ends.
@@ -293,6 +309,14 @@ export type McodeRemoteLauncherOptions = {
      * be driven without the agent's runtime index.
      */
     readTurnLease?: (sessionId: string) => Promise<McodeTurnLeaseState>;
+    /**
+     * Reads the background tasks the agent's runtime recorded for a session.
+     *
+     * The runtime knows when a background task ended, and the completion it
+     * reports into the owner session is not streamed to the client. Injectable
+     * so the launcher can be driven without the agent's runtime index.
+     */
+    readBackgroundTaskStates?: (sessionId: string) => Promise<Map<string, McodeBackgroundTaskState>>;
 };
 
 class McodeRemoteLauncher extends RemoteLauncherBase {
@@ -328,6 +352,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * number, so an unchanged ledger does not need a new message.
      */
     private publishedBackgroundTasks: string | null = null;
+    /** The timer that checks the background work against the runtime's record. */
+    private backgroundTaskTimer: ReturnType<typeof setInterval> | null = null;
+    /** True while the background work is being reconciled with the runtime. */
+    private backgroundTaskReconcileRunning = false;
     /** ACP session id of the running MiniMax Code session. */
     private acpSessionId: string | null = null;
     /** The MCP servers handed to the agent, kept for a restart. */
@@ -1121,6 +1149,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 }
             } finally {
                 this.flushBackgroundTasks();
+                await this.reconcileBackgroundTasksWithRuntime();
                 session.onThinkingChange(false);
                 this.conversationHistory?.setBusy(false);
                 this.setSteeringActive(false);
@@ -1455,6 +1484,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+
+        if (this.backgroundTaskTimer) {
+            clearInterval(this.backgroundTaskTimer);
+            this.backgroundTaskTimer = null;
+        }
 
         this.pendingAskUserCall = null;
         if (this.questionHandler) {
@@ -2137,6 +2171,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             this.emitAgentMessage(forwarded);
         }
         this.reportBackgroundTasks();
+        // The agent reports a finished background task with a turn of its own,
+        // and that turn reaches the client as a plain usage update. It is the
+        // one moment the client learns that a task ended without the agent
+        // polling it, so the ledger is checked against the runtime's record.
+        void this.reconcileBackgroundTasksWithRuntime();
     }
 
     /**
@@ -2150,6 +2189,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private reportBackgroundTasks(): void {
         const tasks = this.backgroundTasks.snapshot();
         const signature = JSON.stringify(tasks);
+        this.syncBackgroundTaskTimer();
         if (signature === this.publishedBackgroundTasks) return;
         // A session that never had background work does not publish an empty
         // list: the snapshot is a chat message, and a client that has none
@@ -2398,6 +2438,65 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             this.emitAgentMessage(message);
         }
         this.reportBackgroundTasks();
+    }
+
+    /**
+     * Settles the background work against the record the agent's runtime keeps.
+     *
+     * The runtime reports a finished background task into the owner session
+     * with a turn of the agent's own, and that turn is not streamed to the
+     * client: a task that ended between two turns stays "running" in the
+     * ledger and on its card until the agent happens to poll it again. The
+     * runtime's record is the one place that knows the task is over, so the
+     * ledger is checked against it.
+     */
+    private async reconcileBackgroundTasksWithRuntime(): Promise<void> {
+        const sessionId = this.acpSessionId;
+        if (!sessionId) return;
+        if (!this.backgroundTasks.hasTrackedTasks()) return;
+        if (this.backgroundTaskReconcileRunning) return;
+        this.backgroundTaskReconcileRunning = true;
+
+        try {
+            const states = await this.readBackgroundTaskStates(sessionId);
+            if (states.size === 0) return;
+            for (const message of this.backgroundTasks.applyRuntimeTaskStates(states)) {
+                this.emitAgentMessage(message);
+            }
+            this.reportBackgroundTasks();
+        } catch (error) {
+            logger.debug('[mcode-remote] background task reconcile failed', error);
+        } finally {
+            this.backgroundTaskReconcileRunning = false;
+        }
+    }
+
+    private readBackgroundTaskStates(
+        sessionId: string
+    ): Promise<Map<string, McodeBackgroundTaskState>> {
+        const read = this.opts.readBackgroundTaskStates ?? readMcodeBackgroundTaskStates;
+        return read(sessionId);
+    }
+
+    /**
+     * Watches the background work of the session while it has some.
+     *
+     * The check is a local read of the runtime's record, and it stops as soon
+     * as the session has no background work left.
+     */
+    private syncBackgroundTaskTimer(): void {
+        const wanted = this.backgroundTasks.hasTrackedTasks();
+        if (wanted) {
+            if (this.backgroundTaskTimer) return;
+            this.backgroundTaskTimer = setInterval(() => {
+                void this.reconcileBackgroundTasksWithRuntime();
+            }, MCODE_BACKGROUND_TASK_POLL_MS);
+            this.backgroundTaskTimer.unref?.();
+            return;
+        }
+        if (!this.backgroundTaskTimer) return;
+        clearInterval(this.backgroundTaskTimer);
+        this.backgroundTaskTimer = null;
     }
 
     private applyDisplayMode(permissionMode: PermissionMode | undefined, model?: string): void {

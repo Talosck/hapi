@@ -644,4 +644,86 @@ describe('BackgroundTaskAggregator', () => {
             expect(aggregator.handle(toolCall({ id: 'call-1', name: 'Bash' }))).toHaveLength(1);
         });
     });
+
+    describe('the record the agent runtime keeps', () => {
+        it('settles a task that ended without the agent polling it again', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+
+            // The agent polled the task once and saw it running. It never
+            // polled it again, so nothing in the tool stream says the task
+            // ended: the card runs and the task is counted.
+            aggregator.handle(taskOutputCall());
+            aggregator.handle(taskOutputResult('running', 'halfway there'));
+            expect(aggregator.snapshot().length).toBe(1);
+
+            const forwarded = aggregator.applyRuntimeTaskStates(
+                new Map([['bg_1', { taskId: 'bg_1', status: 'succeeded', endedAt: 1_792_831_484_711 }]])
+            );
+
+            // The task is out of the count and its card is done.
+            expect(aggregator.snapshot()).toEqual([]);
+            expect(forwarded).toHaveLength(1);
+            expect(forwarded[0]).toMatchObject({ type: 'tool_result', id: 'task-call' });
+        });
+
+        it('marks a task that failed as an error on its card', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+
+            const forwarded = aggregator.applyRuntimeTaskStates(
+                new Map([['bg_1', { taskId: 'bg_1', status: 'failed', endedAt: 1_792_831_484_711 }]])
+            );
+
+            expect(aggregator.snapshot()).toEqual([]);
+            expect(forwarded[0]).toMatchObject({ type: 'tool_result', status: 'failed' });
+        });
+
+        it('keeps a task the runtime still runs in the count', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+
+            // HAPI stopped watching the task, but the runtime still has it
+            // running: it belongs in the count.
+            aggregator.flushPromptEnd();
+            aggregator.flushPromptEnd();
+            expect(aggregator.snapshot().length).toBe(0);
+
+            aggregator.applyRuntimeTaskStates(
+                new Map([['bg_1', { taskId: 'bg_1', status: 'running', endedAt: null }]])
+            );
+
+            expect(aggregator.snapshot().length).toBe(1);
+            expect(aggregator.snapshot()[0]?.command).toBe('Research the repo');
+        });
+
+        it('leaves a task the runtime does not know about alone', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+
+            // A record that cannot be read must not make HAPI drop work it
+            // knows: the task keeps running until the agent says otherwise.
+            const forwarded = aggregator.applyRuntimeTaskStates(new Map());
+
+            expect(forwarded).toEqual([]);
+            expect(aggregator.snapshot().length).toBe(1);
+        });
+
+        it('does not complete a card that was handed out already', () => {
+            const aggregator = new BackgroundTaskAggregator();
+            startBackgroundTask(aggregator);
+
+            // A launch that was never polled is released at the end of the
+            // turn: its card is complete, and it must not be completed twice.
+            const released = aggregator.flushPromptEnd();
+            expect(released).toHaveLength(1);
+
+            const forwarded = aggregator.applyRuntimeTaskStates(
+                new Map([['bg_1', { taskId: 'bg_1', status: 'succeeded', endedAt: 1_792_831_484_711 }]])
+            );
+
+            expect(forwarded).toEqual([]);
+            expect(aggregator.snapshot()).toEqual([]);
+        });
+    });
 });
