@@ -923,32 +923,43 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 : effortOptionAfterModel.currentValue ?? null;
             } else if (modelSwitched) {
                 // The new model reasons by toggle instead of by level, so it
-                // publishes no thinking-effort option at all. The effort of
-                // the old model does not exist anymore: it is dropped here,
-                // so the turn does not ask the agent for a level the new
-                // model cannot take.
+                // publishes no thinking-effort option at all. The effort of the
+                // old model does not exist anymore: it is dropped here, so the
+                // hub is not told about an effort the new model does not have.
                 this.currentBackendEffort = null;
-                batch.mode.effort = null;
                 this.opts.onEffortRollback?.(null);
             }
             const requestedEffort = batch.mode.effort === null
                 ? this.defaultBackendEffort
                 : batch.mode.effort;
-            // An agent that publishes no thinking-effort option cannot take
-            // one, so there is nothing to apply.
-            if (effortOptionAfterModel && requestedEffort && requestedEffort !== this.currentBackendEffort) {
-                try {
-                    await this.applyEffort(acpSessionId, requestedEffort);
-                    this.currentBackendEffort = requestedEffort;
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error);
-                    logger.warn('[mcode-remote] Inline effort switch failed', error);
-                    session.sendSessionEvent({
-                        type: 'message',
-                        message: `Failed to switch thinking effort to ${requestedEffort}: ${message}`
-                    });
-                    batch.mode.effort = this.currentBackendEffort;
-                    this.opts.onEffortRollback?.(this.currentBackendEffort);
+            if (requestedEffort && requestedEffort !== this.currentBackendEffort) {
+                if (!effortOptionAfterModel) {
+                    // The model has no thinking-effort levels, so there is
+                    // nothing to apply. A choice the user made is reported,
+                    // the default of the previous model is simply dropped.
+                    if (batch.mode.effort !== null) {
+                        session.sendSessionEvent({
+                            type: 'message',
+                            message: `MiniMax Code's current model has no thinking-effort levels, so the thinking effort cannot be set to ${requestedEffort}.`
+                        });
+                    }
+                    batch.mode.effort = null;
+                    this.currentBackendEffort = null;
+                    this.opts.onEffortRollback?.(null);
+                } else {
+                    try {
+                        await this.applyEffort(acpSessionId, requestedEffort);
+                        this.currentBackendEffort = requestedEffort;
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : String(error);
+                        logger.warn('[mcode-remote] Inline effort switch failed', error);
+                        session.sendSessionEvent({
+                            type: 'message',
+                            message: `Failed to switch thinking effort to ${requestedEffort}: ${message}`
+                        });
+                        batch.mode.effort = this.currentBackendEffort;
+                        this.opts.onEffortRollback?.(this.currentBackendEffort);
+                    }
                 }
             }
 
@@ -2257,6 +2268,14 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         const snapshot = parseMcodeDelegationUpdate(params);
         if (!snapshot) {
             logger.debug('[mcode-remote] ignoring malformed delegation update');
+            return;
+        }
+
+        // The agent publishes the tree of every session it knows about. After
+        // a fork the fork's own (empty) tree arrives next to the one of this
+        // session, and forwarding it would clear the panel the user is
+        // watching. Only the tree rooted at this session is its state.
+        if (snapshot.rootSessionId !== this.acpSessionId) {
             return;
         }
 

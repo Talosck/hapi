@@ -622,6 +622,33 @@ describe('mcodeRemoteLauncher config sync', () => {
         )
     })
 
+    it('tells the user that a model without effort levels cannot take one', async () => {
+        // The agent publishes no thinking-effort option for that model, so
+        // there is no level to set. The user has to hear that, not watch the
+        // choice disappear.
+        let switched = false
+        const backend = createBackend({
+            setModel: vi.fn(async () => { switched = true }),
+            getThoughtLevelConfigOption: vi.fn(() => switched ? undefined : {
+                id: 'thinkingEffort',
+                currentValue: 'max',
+                options: [
+                    { value: 'low', name: 'Low' },
+                    { value: 'max', name: 'Max' }
+                ]
+            })
+        })
+        const session = createSession([
+            { message: 'switch model', mode: { permissionMode: 'default', model: 'm:other', effort: 'low' } }
+        ])
+
+        await mcodeRemoteLauncher(session as never, { model: 'm:good' })
+
+        expect(session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: expect.stringContaining('no thinking-effort levels')
+        }))
+    })
+
     it('restores the previous permission mode when plan entry is rejected', async () => {
         const backend = createBackend({
             setSessionMode: vi.fn(async (_sessionId: string, mode: string) => {
@@ -941,6 +968,50 @@ describe('mcodeRemoteLauncher ACP extensions', () => {
                 depth: 0
             }]
         })
+    })
+
+    it('ignores the delegation tree of another session', async () => {
+        // After a fork the agent publishes the tree of the fork too. That one
+        // is empty, and forwarding it would clear the tree of this session.
+        createExtensionBackend([
+            ['mcode/session/delegation_update', {
+                sessionId: 'mcode-session-1',
+                snapshot: {
+                    rootSessionId: 'mcode-session-1',
+                    members: [
+                        {
+                            sessionId: 'child-1',
+                            parentSessionId: 'mcode-session-1',
+                            agentName: 'explore',
+                            task: 'Explore the API',
+                            status: 'running',
+                            createdAtMs: 5
+                        }
+                    ]
+                }
+            }],
+            ['mcode/session/delegation_update', {
+                sessionId: 'mvs-forked-1',
+                snapshot: {
+                    rootSessionId: 'mvs-forked-1',
+                    members: []
+                }
+            }]
+        ])
+        const session = createSession([{ message: 'go', mode: { permissionMode: 'default', model: null } }])
+
+        await mcodeRemoteLauncher(session as never, {})
+
+        const events = session.sendSessionEvent.mock.calls.map((call) => call[0])
+        // The tree of the fork is not in the list: only the tree of this
+        // session and the empty one the cleanup sends when the session ends.
+        expect(events.filter((event) => event?.type === 'subagent-snapshot')).toEqual([
+            {
+                type: 'subagent-snapshot',
+                members: [expect.objectContaining({ id: 'child-1' })]
+            },
+            { type: 'subagent-snapshot', members: [] }
+        ])
     })
 
     it('ignores a malformed delegation snapshot', async () => {
