@@ -12,7 +12,7 @@ import {
     cliBinaryUpdatedOnDisk,
     isMachineCapabilitySkewed,
 } from '@hapi/protocol/runnerCapabilities'
-import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, McodeAppsResponse, McodeDelegationStopResponse, McodeGoalClearResponse, McodeGoalResponse, MinimaxQuotaResponse, MinimaxQuotaSource, QueuedStateResponse, RewindConversationErrorCode, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesAroundResponse, MessagesResponse, McodeAppsResponse, McodeDelegationStopResponse, McodeGoalClearResponse, McodeGoalResponse, MinimaxQuotaResponse, MinimaxQuotaSource, QueuedStateResponse, RewindConversationErrorCode, SessionPromptsResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
 import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { ImplementCodexPlanResult } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
@@ -429,6 +429,14 @@ export class SyncEngine {
         }
     ): MessagesResponse {
         return this.messageService.getMessagesPage(sessionId, options)
+    }
+
+    getSessionPrompts(sessionId: string): SessionPromptsResponse {
+        return this.messageService.getSessionPrompts(sessionId)
+    }
+
+    getMessagesAround(sessionId: string, messageId: string, limit: number): MessagesAroundResponse | null {
+        return this.messageService.getMessagesAround(sessionId, messageId, limit)
     }
 
     getQueuedState(sessionId: string, localIds: string[]): QueuedStateResponse {

@@ -2,6 +2,7 @@ export const queryKeys = {
     sessions: ['sessions'] as const,
     session: (sessionId: string) => ['session', sessionId] as const,
     messages: (sessionId: string) => ['messages', sessionId] as const,
+    sessionPrompts: (sessionId: string) => ['session-prompts', sessionId] as const,
     machines: ['machines'] as const,
     sqliteStorage: ['sqlite-storage'] as const,
     hubSettings: ['hub-settings'] as const,

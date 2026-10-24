@@ -24,7 +24,7 @@ import { ShareTurnDialog } from '@/components/AssistantChat/ShareTurnDialog'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
-import type { OlderLoadOutcome } from '@/lib/message-window-store'
+import { jumpToMessage, type OlderLoadOutcome } from '@/lib/message-window-store'
 import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
 import { useMachines } from '@/hooks/queries/useMachines'
 import { useMachineLabels } from '@/hooks/useMachineLabels'
@@ -264,6 +264,36 @@ export async function locateOutlineTargetMessage(options: LocateOutlineTargetOpt
     return target
 }
 
+/**
+ * Wait for the transcript to render a message and scroll to it.
+ *
+ * Opening a message swaps the window outside of the React render, so the
+ * anchor only exists after the next paint. The wait is bounded: a message
+ * that never renders must not leave the operator with a spinning outline.
+ */
+export async function scrollToAnchorWhenRendered(
+    anchorId: string,
+    options: { attempts?: number; findTarget?: (anchorId: string) => HTMLElement | null } = {}
+): Promise<boolean> {
+    const attempts = options.attempts ?? 30
+    const findTarget = options.findTarget ?? ((id: string) => document.getElementById(id))
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const target = findTarget(anchorId)
+        if (target) {
+            target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+            return true
+        }
+        await new Promise<void>((resolve) => {
+            if (typeof requestAnimationFrame === 'function') {
+                requestAnimationFrame(() => resolve())
+                return
+            }
+            setTimeout(resolve, 16)
+        })
+    }
+    return false
+}
+
 export function shouldLoadOlderForViewport(params: {
     scrollHeight: number
     clientHeight: number
@@ -396,6 +426,7 @@ export function ConversationOutlinePanel(props: {
     onLoadMore: () => void
     onSelect: (item: ConversationOutlineItem) => void
     onClose: () => void
+    notice?: string | null
 }) {
     const { t, locale } = useTranslation()
     const [searchQuery, setSearchQuery] = useState('')
@@ -405,7 +436,7 @@ export function ConversationOutlinePanel(props: {
             return props.items
         }
         return props.items.filter((item) => (
-            matchesSearchQuery(item.label, normalizedSearchQuery)
+            matchesSearchQuery(item.searchText, normalizedSearchQuery)
         ))
     }, [normalizedSearchQuery, props.items])
 
@@ -482,6 +513,11 @@ export function ConversationOutlinePanel(props: {
             </div>
 
             <div className="app-scroll-y min-h-0 flex-1 p-2">
+                {props.notice ? (
+                    <div className="mb-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-[var(--app-fg)]" role="status">
+                        {props.notice}
+                    </div>
+                ) : null}
                 {props.items.length === 0 ? (
                     <div className="px-2 py-8 text-center text-sm text-[var(--app-hint)]">
                         {t('session.outline.empty')}
@@ -561,6 +597,7 @@ export function HappyThread(props: {
     const { machines } = useMachines(props.api, true)
     const machineLabelsById = useMachineLabels(machines)
     const [shareTurn, setShareTurn] = useState<ShareTurnState>(null)
+    const [outlineNotice, setOutlineNotice] = useState<string | null>(null)
     const shareDialogOpen = shareTurn !== null
     const shareTitle = shareTurn ? getSessionTitle(props.session) : ''
     const shareRelativeTimeTick = useMinuteTick(headerMetadata.lastActive && shareDialogOpen)
@@ -1520,19 +1557,50 @@ export function HappyThread(props: {
     }, [loadOlderFromConsumer])
 
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
+        const anchorId = getConversationMessageAnchorId(item.targetMessageId)
+        const onScreen = document.getElementById(anchorId)
+        if (onScreen) {
+            setOutlineNotice(null)
+            onScreen.scrollIntoView({ block: 'start', behavior: 'smooth' })
+            autoScrollEnabledRef.current = false
+            props.onOutlineItemClick?.(item)
+            props.onOutlineOpenChange(false)
+            return
+        }
+
+        // The transcript keeps a bounded window, so a prompt that is older than
+        // that window is not on screen. Open it: the hub reads the rows around
+        // the message and the window is swapped to that page. Paging the
+        // transcript back to it would cost one request per page of history.
+        setOutlineNotice(null)
+        autoScrollEnabledRef.current = false
+        const outcome = await jumpToMessage(props.api, props.sessionId, item.messageId)
+        if (outcome.kind === 'applied') {
+            if (await scrollToAnchorWhenRendered(anchorId)) {
+                props.onOutlineItemClick?.(item)
+                props.onOutlineOpenChange(false)
+                return
+            }
+            setOutlineNotice(t('session.outline.targetUnreachable'))
+            return
+        }
+
+        // The hub could not serve the page around the message. Fall back to
+        // paging the transcript back to it.
         const target = await locateOutlineTargetMessage({
             targetMessageId: item.targetMessageId,
-            findTarget: (anchorId) => document.getElementById(anchorId),
+            findTarget: (id) => document.getElementById(id),
             hasMoreMessages: () => hasMoreMessagesRef.current,
             loadOlderPreservingScroll: loadOlderForOutline
         })
-        if (target) {
-            target.scrollIntoView({ block: 'start', behavior: 'smooth' })
-            autoScrollEnabledRef.current = false
+        if (!target) {
+            setOutlineNotice(t('session.outline.targetUnreachable'))
+            return
         }
+        target.scrollIntoView({ block: 'start', behavior: 'smooth' })
         props.onOutlineItemClick?.(item)
         props.onOutlineOpenChange(false)
-    }, [loadOlderForOutline, props.onOutlineItemClick, props.onOutlineOpenChange])
+    }, [loadOlderForOutline, props.api, props.sessionId, props.onOutlineItemClick, props.onOutlineOpenChange, t])
 
     useEffect(() => {
         if (
@@ -1826,6 +1894,7 @@ export function HappyThread(props: {
                             }}
                             onSelect={handleOutlineSelect}
                             onClose={() => props.onOutlineOpenChange(false)}
+                            notice={outlineNotice}
                         />
                     </>
                 ) : null}

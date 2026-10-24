@@ -377,6 +377,31 @@ export function getAllMessages(
     return rows.map(toStoredMessage)
 }
 
+/**
+ * The rows of a session with their content still encoded.
+ *
+ * The prompt index needs the user rows of a session, but the role lives
+ * inside the encoded content, so every row has to be decoded to find out.
+ * Handing out the raw rows lets the caller decode one row at a time instead
+ * of holding every decoded message of the session in memory.
+ */
+export function getEncodedMessageRows(
+    db: Database,
+    sessionId: string
+): Array<{ id: string; localId: string | null; createdAt: number; invokedAt: number | null; content: string | Uint8Array }> {
+    const rows = prepareCached(db,
+        'SELECT id, local_id, created_at, invoked_at, content FROM messages WHERE session_id = ? ORDER BY seq ASC'
+    ).all(sessionId) as Array<Pick<DbMessageRow, 'id' | 'local_id' | 'created_at' | 'invoked_at' | 'content'>>
+
+    return rows.map((row) => ({
+        id: row.id,
+        localId: row.local_id,
+        createdAt: row.created_at,
+        invokedAt: row.invoked_at ?? null,
+        content: row.content
+    }))
+}
+
 export function getMessagesAfterSeq(
     db: Database,
     sessionId: string,
@@ -512,6 +537,51 @@ export function getMessagesAfterPosition(
         limit: safeLimit
     }) as DbMessageRow[]
     return rows.map(toStoredMessage)
+}
+
+/** The display position of one message, or null when it does not exist. */
+export function getMessagePositionById(
+    db: Database,
+    sessionId: string,
+    messageId: string
+): MessagePosition | null {
+    const row = prepareCached(db, `
+        SELECT COALESCE(invoked_at, created_at) AS position_at, seq
+        FROM messages
+        WHERE session_id = ? AND id = ?
+    `).get(sessionId, messageId) as { position_at: number; seq: number } | undefined
+    return row ? { at: row.position_at, seq: row.seq } : null
+}
+
+/** The newest `limit` messages at or before a display position, ascending.
+ *
+ *  The position itself is part of the page, so a caller can center a page on
+ *  a message instead of stopping right before it. */
+export function getMessagesAtOrBeforePosition(
+    db: Database,
+    sessionId: string,
+    limit: number,
+    position: MessagePosition
+): StoredMessage[] {
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(200, limit)) : 200
+    const rows = prepareCached(db, `
+        SELECT *, COALESCE(invoked_at, created_at) AS position_at
+        FROM messages
+        WHERE session_id = @sessionId
+          AND (
+            COALESCE(invoked_at, created_at) < @at
+            OR (COALESCE(invoked_at, created_at) = @at AND seq <= @seq)
+          )
+        ORDER BY position_at DESC, seq DESC
+        LIMIT @limit
+    `).all({
+        sessionId,
+        at: position.at,
+        seq: position.seq,
+        limit: safeLimit
+    }) as DbMessageRow[]
+    // Reverse so results are in ascending display order (oldest first)
+    return rows.reverse().map(toStoredMessage)
 }
 
 export function getNewestMessagePosition(db: Database, sessionId: string): MessagePosition | null {

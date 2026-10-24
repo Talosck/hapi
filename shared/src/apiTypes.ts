@@ -140,8 +140,62 @@ export type MessagesResponse = {
     }
 }
 
-export type MachinesResponse = { machines: Machine[] }
+/**
+ * One prompt the operator sent in a session.
+ *
+ * The transcript window is deliberately bounded (the web only keeps a slice of
+ * the conversation in memory), so a table of contents of the conversation
+ * cannot be derived from it. The hub reads the prompt list straight from the
+ * message log instead, which is what makes the outline cover the whole
+ * session instead of the loaded slice.
+ */
+export type SessionPrompt = {
+    /** Hub message id — the anchor the transcript renders for this prompt. */
+    id: string
+    /** Client-side id, used to reconcile an optimistic bubble with its echo. */
+    localId: string | null
+    text: string
+    createdAt: number
+    /** `meta.sentFrom` of the stored row (`cli`, `webapp`, …). */
+    sentFrom: string | null
+}
 
+export type SessionPromptsResponse = {
+    prompts: SessionPrompt[]
+    /** Message epoch of the session; a rewind bumps it. */
+    epoch: number
+}
+
+/**
+ * The page of messages around one message.
+ *
+ * The transcript a client renders is a bounded window, so a message outside
+ * of it cannot be reached by paging. This answers "show me this message":
+ * the hub reads the rows around it from the message log and hands back a
+ * contiguous page that contains it.
+ */
+export type MessagesAroundResponse = {
+    messages: DecryptedMessage[]
+    page: {
+        limit: number
+        epoch: number
+        /** The message the page is centered on. */
+        targetId: string
+        /** Oldest row of the page — the cursor for loading older messages. */
+        nextBeforeSeq: number | null
+        nextBeforeAt: number | null
+        /** Newest row of the page — the cursor for catching up with the tail. */
+        nextAfterSeq: number | null
+        nextAfterAt: number | null
+        /** Newest position of the session at snapshot time. */
+        snapshotHeadSeq: number | null
+        snapshotHeadAt: number | null
+        /** More rows exist before the oldest row of the page. */
+        hasMore: boolean
+    }
+}
+
+export type MachinesResponse = { machines: Machine[] }
 export type SpawnResponse =
     | { type: 'success'; sessionId: string }
     | {

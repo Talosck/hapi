@@ -1812,3 +1812,167 @@ describe('MessageService.sweepImmediateQueuedOnSessionEnd — scheduled rows are
         expect(stillQueued.find((m) => m.localId === 'local-future')?.invokedAt).toBeNull()
     })
 })
+
+// ---------------------------------------------------------------------------
+// getSessionPrompts: the prompt index of the whole session
+// ---------------------------------------------------------------------------
+
+describe('MessageService.getSessionPrompts', () => {
+    function makeService(store: Store): MessageService {
+        return new MessageService(store, makeIo(() => {}), makePublisher() as unknown as EventPublisher)
+    }
+
+    it('returns every prompt of the session, oldest first', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'prompts')
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'first prompt' }, meta: { sentFrom: 'webapp' } },
+            'local-1'
+        )
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'second prompt' }, meta: { sentFrom: 'webapp' } },
+            'local-2'
+        )
+        store.messages.addMessage(session.id, {
+            role: 'agent',
+            content: { type: 'output', data: { type: 'text', text: 'an answer' } }
+        })
+        store.messages.markMessagesInvoked(session.id, ['local-1', 'local-2'], 1_000)
+
+        const service = makeService(store)
+        const result = service.getSessionPrompts(session.id)
+
+        expect(result.prompts.map((prompt) => prompt.text)).toEqual(['first prompt', 'second prompt'])
+        expect(result.prompts.map((prompt) => prompt.localId)).toEqual(['local-1', 'local-2'])
+        expect(result.prompts.map((prompt) => prompt.sentFrom)).toEqual(['webapp', 'webapp'])
+        expect(result.prompts.every((prompt) => prompt.id.length > 0)).toBe(true)
+    })
+
+    it('leaves out prompts the CLI has not consumed yet', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'prompts-queued')
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'delivered prompt' } },
+            'local-1'
+        )
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'queued prompt' } },
+            'local-2'
+        )
+        store.messages.markMessagesInvoked(session.id, ['local-1'], 1_000)
+
+        const service = makeService(store)
+        const result = service.getSessionPrompts(session.id)
+
+        expect(result.prompts.map((prompt) => prompt.text)).toEqual(['delivered prompt'])
+    })
+
+    it('bounds the text of a prompt and reports the message epoch', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'prompts-long')
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'x'.repeat(5_000) } },
+            'local-1'
+        )
+        store.messages.markMessagesInvoked(session.id, ['local-1'], 1_000)
+
+        const service = makeService(store)
+        const result = service.getSessionPrompts(session.id)
+
+        expect(result.prompts[0]?.text.length).toBeLessThan(5_000)
+        expect(result.epoch).toBe(store.messages.getMessageEpoch(session.id))
+    })
+})
+
+// ---------------------------------------------------------------------------
+// getMessagesAround: opening a message that the loaded window does not hold
+// ---------------------------------------------------------------------------
+
+describe('MessageService.getMessagesAround', () => {
+    function makeService(store: Store): MessageService {
+        return new MessageService(store, makeIo(() => {}), makePublisher() as unknown as EventPublisher)
+    }
+
+    function seedMessages(store: Store, sessionId: string, count: number): string[] {
+        const ids: string[] = []
+        for (let index = 0; index < count; index += 1) {
+            const message = store.messages.addMessage(
+                sessionId,
+                { role: 'user', content: { type: 'text', text: `m${index}` } },
+                `local-${index}`,
+                null,
+                1_000 + index
+            )
+            ids.push(message.id)
+        }
+        store.messages.markMessagesInvoked(
+            sessionId,
+            ids.map((_, index) => `local-${index}`),
+            5_000
+        )
+        return ids
+    }
+
+    it('returns a page that contains the message', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'around')
+        const ids = seedMessages(store, session.id, 9)
+
+        const service = makeService(store)
+        const page = service.getMessagesAround(session.id, ids[4]!, 5)
+
+        expect(page?.messages.map((message) => message.id)).toEqual([
+            ids[2],
+            ids[3],
+            ids[4],
+            ids[5],
+            ids[6]
+        ])
+        expect(page?.page.targetId).toBe(ids[4])
+        expect(page?.page.nextBeforeSeq).toBe(3)
+        expect(page?.page.nextAfterSeq).toBe(7)
+    })
+
+    it('reports the rows before the oldest row of the page', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'around-more')
+        const ids = seedMessages(store, session.id, 9)
+
+        const service = makeService(store)
+        const page = service.getMessagesAround(session.id, ids[8]!, 4)
+
+        expect(page?.page.hasMore).toBe(true)
+        // Nothing follows the last message, so the page only holds the rows
+        // before it.
+        expect(page?.messages.map((message) => message.id)).toEqual([
+            ids[7],
+            ids[8]
+        ])
+    })
+
+    it('has nothing older when the message is the first one', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'around-first')
+        const ids = seedMessages(store, session.id, 3)
+
+        const service = makeService(store)
+        const page = service.getMessagesAround(session.id, ids[0]!, 4)
+
+        expect(page?.page.hasMore).toBe(false)
+        expect(page?.messages.map((message) => message.id)).toEqual(ids)
+    })
+
+    it('returns null for a message that does not exist', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'around-missing')
+        seedMessages(store, session.id, 3)
+
+        const service = makeService(store)
+        expect(service.getMessagesAround(session.id, 'missing', 10)).toBeNull()
+    })
+})

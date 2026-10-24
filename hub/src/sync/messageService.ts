@@ -11,11 +11,12 @@ import {
     isRedundantGoalStatusEventContent,
     unwrapRoleWrappedRecordEnvelope
 } from '@hapi/protocol/messages'
-import { isObject } from '@hapi/protocol'
-import type { MessageDeliveryMode, MessagesResponse, QueuedStateResponse } from '@hapi/protocol/apiTypes'
+import { isObject, safeStringify } from '@hapi/protocol'
+import type { MessageDeliveryMode, MessagesAroundResponse, MessagesResponse, QueuedStateResponse, SessionPrompt, SessionPromptsResponse } from '@hapi/protocol/apiTypes'
 import type { Server } from 'socket.io'
 import { randomUUID } from 'node:crypto'
 import type { Store, CancelQueuedMessageResult } from '../store'
+import { decodeMessageContent } from '../store/contentCodec'
 import { EventPublisher } from './eventPublisher'
 
 type StoredMessageForDelivery = ReturnType<Store['messages']['getMessages']>[number]
@@ -87,6 +88,37 @@ function estimateSessionExportBytes(
 function isQueuedUserMessage(message: StoredMessageForDelivery): boolean {
     const record = unwrapRoleWrappedRecordEnvelope(message.content)
     return record?.role === 'user' && message.invokedAt === null
+}
+
+/** A prompt is returned with a bounded text: the outline only renders a short
+ *  label, and the payload has to stay small for a session with thousands of
+ *  prompts. */
+const MAX_SESSION_PROMPT_TEXT_LENGTH = 2000
+
+function truncatePromptText(text: string): string {
+    if (text.length <= MAX_SESSION_PROMPT_TEXT_LENGTH) {
+        return text
+    }
+    return `${text.slice(0, MAX_SESSION_PROMPT_TEXT_LENGTH)}…`
+}
+
+/** Same text the web renders for a user bubble, so an outline label and the
+ *  transcript bubble of one prompt always read the same. */
+function extractPromptText(content: unknown): string {
+    if (typeof content === 'string') {
+        return content
+    }
+    if (isObject(content) && content.type === 'text' && typeof content.text === 'string') {
+        return content.text
+    }
+    return safeStringify(content)
+}
+
+function readPromptSentFrom(meta: unknown): string | null {
+    if (!isObject(meta)) {
+        return null
+    }
+    return typeof meta.sentFrom === 'string' ? meta.sentFrom : null
 }
 
 function isExportVisibleStoredMessage(message: StoredMessageForDelivery): boolean {
@@ -187,9 +219,103 @@ export class MessageService {
             : { status: 'cancelled', localId }
     }
 
+    /**
+     * The page of messages around one message.
+     *
+     * The transcript a client renders is a bounded window, so a message
+     * outside of it cannot be reached by paging back and forth. This reads the
+     * rows around the message from the log and hands back a contiguous page
+     * that contains it, which is what lets a client open a specific message.
+     */
+    getMessagesAround(sessionId: string, messageId: string, limit: number): MessagesAroundResponse | null {
+        const position = this.store.messages.getMessagePositionById(sessionId, messageId)
+        if (!position) {
+            return null
+        }
+
+        const safeLimit = Number.isFinite(limit) ? Math.max(2, Math.min(200, limit)) : 200
+        // The page is centered on the message: half of the rows before it, the
+        // message itself, and the rest after it.
+        const beforeCount = Math.floor((safeLimit - 1) / 2)
+        const afterCount = safeLimit - 1 - beforeCount
+
+        const before = this.store.messages.getMessagesAtOrBeforePosition(
+            sessionId,
+            beforeCount + 1,
+            position
+        )
+        const after = this.store.messages.getMessagesAfterPosition(sessionId, afterCount, position)
+        const stored = [...before, ...after]
+        const messages = toVisibleDecryptedMessages(stored)
+
+        const oldest = before[0] ?? null
+        const newest = after.at(-1) ?? before.at(-1) ?? null
+        const snapshotHead = this.store.messages.getNewestMessagePosition(sessionId)
+
+        const oldestAt = oldest ? oldest.invokedAt ?? oldest.createdAt : null
+        const oldestSeq = oldest?.seq ?? null
+        const hasMore = oldestAt !== null && oldestSeq !== null
+            && this.store.messages.getMessagesByPosition(
+                sessionId,
+                1,
+                { at: oldestAt, seq: oldestSeq }
+            ).length > 0
+
+        return {
+            messages,
+            page: {
+                limit: safeLimit,
+                epoch: this.store.messages.getMessageEpoch(sessionId),
+                targetId: messageId,
+                nextBeforeSeq: oldestSeq,
+                nextBeforeAt: oldestAt,
+                nextAfterSeq: newest?.seq ?? null,
+                nextAfterAt: newest ? newest.invokedAt ?? newest.createdAt : null,
+                snapshotHeadSeq: snapshotHead?.seq ?? null,
+                snapshotHeadAt: snapshotHead?.at ?? null,
+                hasMore
+            }
+        }
+    }
+
     getMessages(sessionId: string, limit: number = 200): DecryptedMessage[] {
         const stored = this.store.messages.getMessages(sessionId, limit)
         return toVisibleDecryptedMessages(stored)
+    }
+
+    /**
+     * Every prompt sent in the session, oldest first.
+     *
+     * The transcript a client renders is a bounded slice of the conversation
+     * (the web keeps only the loaded window), so it cannot answer "what did I
+     * ask in this session?". This reads the message log directly and returns
+     * just the prompts, which keeps the payload small enough to serve the
+     * whole session in one response.
+     */
+    getSessionPrompts(sessionId: string): SessionPromptsResponse {
+        const prompts: SessionPrompt[] = []
+        for (const row of this.store.messages.getEncodedMessageRows(sessionId)) {
+            // A prompt the CLI has not consumed yet is queued work, not part of
+            // the conversation: clients surface it in their queue, not in an outline.
+            if (row.invokedAt === null) {
+                continue
+            }
+            const record = unwrapRoleWrappedRecordEnvelope(decodeMessageContent(row.content))
+            if (!record || record.role !== 'user') {
+                continue
+            }
+            prompts.push({
+                id: row.id,
+                localId: row.localId,
+                text: truncatePromptText(extractPromptText(record.content)),
+                createdAt: row.createdAt,
+                sentFrom: readPromptSentFrom(record.meta)
+            })
+        }
+        return {
+            prompts,
+            epoch: this.store.messages.getMessageEpoch(sessionId)
+        }
     }
 
     getQueuedState(sessionId: string, localIds: string[]): QueuedStateResponse {

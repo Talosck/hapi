@@ -23,7 +23,8 @@ import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { normalizeDecryptedMessage } from '@/chat/normalize'
 import { reduceChatBlocks } from '@/chat/reducer'
 import { reconcileChatBlocks } from '@/chat/reconcile'
-import { buildConversationOutline } from '@/chat/outline'
+import { buildSessionConversationOutline } from '@/chat/outline'
+import { useSessionPrompts } from '@/hooks/queries/useSessionPrompts'
 import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@/chat/toolGroups'
 import { useUnseenBlockCount } from '@/hooks/useUnseenBlockCount'
 import { useCodexExplorationCollapse } from '@/hooks/useCodexExplorationCollapse'
@@ -642,6 +643,12 @@ type SessionChatProps = {
     messagesVersion: number
     historyVersion: number
     tailRevision: number
+    /**
+     * Message epoch of the loaded window. It changes when the hub rewrote the
+     * history (rewind / fork), which invalidates the prompt index the outline
+     * is built from.
+     */
+    messagesEpoch?: number | null
     onBack: () => void
     onRefresh: () => void | Promise<void>
     onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
@@ -1730,9 +1737,23 @@ function SessionChatInner(props: SessionChatProps) {
     // tool_result pair is one card.
     const unseenCount = useUnseenBlockCount(props.viewMode, visibleBlocks)
 
+    /**
+     * The outline is the table of contents of the whole conversation, not of
+     * the loaded slice of it: the prompt index covers every prompt of the
+     * session, and the loaded blocks add the ones the hub has not echoed yet.
+     */
+    const { prompts: sessionPrompts, refresh: refreshSessionPrompts } = useSessionPrompts(
+        props.api,
+        props.session.id,
+        props.messagesEpoch ?? null
+    )
+
     const outlineItems = useMemo(
-        () => buildConversationOutline(reconciled.blocks),
-        [reconciled.blocks]
+        () => buildSessionConversationOutline({
+            prompts: sessionPrompts,
+            blocks: reconciled.blocks
+        }),
+        [sessionPrompts, reconciled.blocks]
     )
 
     // Permission mode change handler
@@ -1913,8 +1934,15 @@ function SessionChatInner(props: SessionChatProps) {
     }, [navigate, props.session.id])
 
     const handleToggleOutline = useCallback(() => {
-        setOutlineOpen((open) => !open)
-    }, [])
+        const nextOpen = !outlineOpen
+        setOutlineOpen(nextOpen)
+        if (nextOpen) {
+            // Opening the outline is the moment the operator wants the whole
+            // conversation: re-read the prompt index so prompts sent since the
+            // last read are part of it.
+            refreshSessionPrompts()
+        }
+    }, [outlineOpen, refreshSessionPrompts])
 
     const handleViewTerminal = useCallback(() => {
         navigate({

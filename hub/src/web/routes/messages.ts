@@ -43,6 +43,48 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }))
     })
 
+    app.get('/sessions/:id/messages/around/:messageId', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const limitParam = c.req.query('limit')
+        const limit = limitParam ? Number.parseInt(limitParam, 10) : 200
+        if (!Number.isFinite(limit) || limit < 2 || limit > 200) {
+            return c.json({ error: 'Invalid query' }, 400)
+        }
+
+        const page = engine.getMessagesAround(
+            sessionResult.sessionId,
+            c.req.param('messageId'),
+            limit
+        )
+        if (!page) {
+            return c.json({ error: 'Message not found' }, 404)
+        }
+        return c.json(page)
+    })
+
+    app.get('/sessions/:id/prompts', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        return c.json(engine.getSessionPrompts(sessionResult.sessionId))
+    })
+
     app.delete('/sessions/:id/messages/:messageId', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {

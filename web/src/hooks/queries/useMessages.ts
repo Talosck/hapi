@@ -28,6 +28,7 @@ export const EMPTY_STATE: MessageWindowState = {
     messagesVersion: 0,
     historyVersion: 0,
     tailRevision: 0,
+    pinnedMessageId: null,
 }
 
 export function useMessages(api: ApiClient | null, sessionId: string | null): {
@@ -40,6 +41,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
     messagesVersion: number
     historyVersion: number
     tailRevision: number
+    epoch: number | null
     loadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
     cancelLoadMore: () => void
     refetch: () => Promise<void>
@@ -103,6 +105,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         messagesVersion: state.messagesVersion,
         historyVersion: state.historyVersion,
         tailRevision: state.tailRevision,
+        epoch: state.epoch,
         loadMore,
         cancelLoadMore,
         refetch,

@@ -235,11 +235,12 @@ export default {
   'session.outline.close': '关闭大纲',
   'session.outline.title': '大纲',
   'session.outline.loadOlder': '加载更早',
-  'session.outline.empty': '已加载消息中暂无大纲项',
+  'session.outline.empty': '本会话暂无提问',
   'session.outline.searchPlaceholder': '搜索大纲',
   'session.outline.searchLabel': '搜索大纲条目',
   'session.outline.searchResults': '{matched}/{total} 个条目',
   'session.outline.noSearchResults': '没有匹配的大纲条目',
+  'session.outline.targetUnreachable': '无法打开该提问，可能对话在此期间已发生变化。',
 
   // Session actions
   'session.action.rename': '重命名',

@@ -17,6 +17,8 @@ import {
     getFirstMessages,
     getDeliverableMessagesAfter,
     getMessagesByPosition,
+    getMessagePositionById,
+    getMessagesAtOrBeforePosition,
     getMessagesAfterPosition,
     getNewestMessagePosition,
     getMessageEpoch,
@@ -40,6 +42,7 @@ import {
     copyMessageToSession as copyStoredMessageToSession,
     copyMessagesToSession as copyStoredMessagesToSession,
     getAllMessages,
+    getEncodedMessageRows,
     getMessagesAfterSeq,
     getMessageSeqById,
     truncateMessagesFromLocalId,
@@ -91,6 +94,10 @@ export class MessageStore {
         return getAllMessages(this.db, sessionId)
     }
 
+    getEncodedMessageRows(sessionId: string): Array<{ id: string; localId: string | null; createdAt: number; invokedAt: number | null; content: string | Uint8Array }> {
+        return getEncodedMessageRows(this.db, sessionId)
+    }
+
     getMessagesAfterSeq(sessionId: string, afterSeq: number): StoredMessage[] {
         return getMessagesAfterSeq(this.db, sessionId, afterSeq)
     }
@@ -113,6 +120,18 @@ export class MessageStore {
 
     getMessagesByPosition(sessionId: string, limit: number, before?: { at: number; seq: number }): StoredMessage[] {
         return getMessagesByPosition(this.db, sessionId, limit, before)
+    }
+
+    getMessagePositionById(sessionId: string, messageId: string): { at: number; seq: number } | null {
+        return getMessagePositionById(this.db, sessionId, messageId)
+    }
+
+    getMessagesAtOrBeforePosition(
+        sessionId: string,
+        limit: number,
+        position: { at: number; seq: number }
+    ): StoredMessage[] {
+        return getMessagesAtOrBeforePosition(this.db, sessionId, limit, position)
     }
 
     getMessagesAfterPosition(

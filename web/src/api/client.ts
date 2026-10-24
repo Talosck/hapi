@@ -13,6 +13,7 @@ import type {
     CopilotAgentMode,
     FileSearchResponse,
     MachinesResponse,
+    MessagesAroundResponse,
     MessagesResponse,
     PermissionMode,
     PiImportSessionsResponse,
@@ -28,7 +29,8 @@ import type {
     HubHealthResponse,
     SessionResponse,
     SessionTitleSuggestionResponse,
-    SessionsResponse
+    SessionsResponse,
+    SessionPromptsResponse
 } from '@/types/api'
 import type {
     AgyModelsResponse,
@@ -636,6 +638,40 @@ export class ApiClient {
         const qs = params.toString()
         const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`
         return await this.request<MessagesResponse>(url)
+    }
+
+    /**
+     * The page of messages around one message.
+     *
+     * The transcript the web renders is a bounded window, so a message outside
+     * of it cannot be reached by paging. This is how the web opens a specific
+     * message: the hub reads the rows around it from the message log.
+     */
+    async getMessagesAround(
+        sessionId: string,
+        messageId: string,
+        options: { limit?: number } = {}
+    ): Promise<MessagesAroundResponse> {
+        const params = new URLSearchParams()
+        if (options.limit !== undefined && options.limit !== null) {
+            params.set('limit', `${options.limit}`)
+        }
+        const qs = params.toString()
+        const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages/around/${encodeURIComponent(messageId)}${qs ? `?${qs}` : ''}`
+        return await this.request<MessagesAroundResponse>(url)
+    }
+
+    /**
+     * Every prompt sent in the session, oldest first.
+     *
+     * The transcript the web renders is a bounded window, so it cannot answer
+     * "what did I ask in this session?". The hub reads the prompt list from
+     * the message log, which is what lets the outline cover the whole session.
+     */
+    async getSessionPrompts(sessionId: string): Promise<SessionPromptsResponse> {
+        return await this.request<SessionPromptsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/prompts`
+        )
     }
 
     async getGitStatus(sessionId: string): Promise<GitCommandResponse> {

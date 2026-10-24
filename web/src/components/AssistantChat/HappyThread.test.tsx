@@ -14,6 +14,7 @@ import {
     locateOutlineTargetMessage,
     prependMissingUserSnapshot,
     restoreScrollAnchor,
+    scrollToAnchorWhenRendered,
     shouldLoadOlderForViewport,
     shouldCancelInitialScrollSettling,
     shouldRenderScrollToBottomButton,
@@ -28,16 +29,20 @@ const outlineItems: ConversationOutlineItem[] = [
     {
         id: 'outline:user-text:m1',
         targetMessageId: 'user-text:m1',
+        messageId: 'm1',
         kind: 'user',
         label: 'Implement the panel',
-        createdAt: 1000
+        createdAt: 1000,
+        searchText: 'Implement the panel'
     },
     {
         id: 'outline:user-text:m2',
         targetMessageId: 'user-text:m2',
+        messageId: 'm2',
         kind: 'user',
         label: 'Second user prompt',
-        createdAt: 2000
+        createdAt: 2000,
+        searchText: 'Second user prompt'
     }
 ]
 
@@ -227,9 +232,11 @@ describe('ConversationOutlinePanel', () => {
                     {
                         id: 'outline:user-text:m3',
                         targetMessageId: 'user-text:m3',
+                        messageId: 'm3',
                         kind: 'user',
                         label: 'Istanbul deployment',
-                        createdAt: 3000
+                        createdAt: 3000,
+                        searchText: 'Istanbul deployment'
                     }
                 ]
             })
@@ -251,7 +258,7 @@ describe('ConversationOutlinePanel', () => {
         })
 
         expect(screen.getByText('No matching outline items')).toBeInTheDocument()
-        expect(screen.queryByText('No outline items in loaded messages')).not.toBeInTheDocument()
+        expect(screen.queryByText('No prompts in this session yet')).not.toBeInTheDocument()
     })
 
     it('keeps an in-panel close action available', () => {
@@ -268,7 +275,13 @@ describe('ConversationOutlinePanel', () => {
     it('renders an empty state', () => {
         renderPanel({ items: [] })
 
-        expect(screen.getByText('No outline items in loaded messages')).toBeInTheDocument()
+        expect(screen.getByText('No prompts in this session yet')).toBeInTheDocument()
+    })
+
+    it('shows a notice when a prompt cannot be reached', () => {
+        renderPanel({ notice: 'This prompt is older than the loaded transcript.' })
+
+        expect(screen.getByText('This prompt is older than the loaded transcript.')).toBeInTheDocument()
     })
 })
 
@@ -545,5 +558,31 @@ describe('share turn snapshots', () => {
         const fallback = { html: '', text: 'prompt', role: 'user' as const }
 
         expect(prependMissingUserSnapshot([user], fallback)).toEqual([user])
+    })
+})
+
+describe('scrollToAnchorWhenRendered', () => {
+    it('scrolls to the anchor once the transcript rendered it', async () => {
+        const scrollIntoView = vi.fn()
+        let rendered = false
+        const findTarget = vi.fn(() => (
+            rendered ? { scrollIntoView } as unknown as HTMLElement : null
+        ))
+
+        const pending = scrollToAnchorWhenRendered('anchor', { attempts: 10, findTarget })
+        setTimeout(() => {
+            rendered = true
+        }, 10)
+
+        await expect(pending).resolves.toBe(true)
+        expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'smooth' })
+    })
+
+    it('gives up when the anchor is never rendered', async () => {
+        const findTarget = vi.fn(() => null)
+
+        await expect(scrollToAnchorWhenRendered('anchor', { attempts: 2, findTarget }))
+            .resolves.toBe(false)
+        expect(findTarget).toHaveBeenCalledTimes(2)
     })
 })

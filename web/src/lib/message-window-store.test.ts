@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
-import type { DecryptedMessage, MessagesResponse } from '@/types/api'
+import type { DecryptedMessage, MessagesAroundResponse, MessagesResponse } from '@/types/api'
 import {
     HISTORY_WINDOW_SIZE,
     INITIAL_PAGE_SIZE,
@@ -13,6 +13,7 @@ import {
     getQueuedReconcileCandidateLocalIds,
     ingestIncomingMessages,
     invalidateMessageWindow,
+    jumpToMessage,
     markMessagesConsumed,
     markMessagesIndeterminate,
     markMessagesRequeued,
@@ -1801,5 +1802,148 @@ describe('reasoning snapshot compaction', () => {
         const state = getMessageWindowState(id)
         expect(state.oldestSeq).toBe(2)
         expect(state.newestSeq).toBe(3)
+    })
+})
+
+describe('opening a message outside the window', () => {
+    function aroundResponse(
+        messages: DecryptedMessage[],
+        options: {
+            epoch?: number
+            hasMore?: boolean
+            nextBeforeAt?: number | null
+            nextBeforeSeq?: number | null
+            nextAfterAt?: number | null
+            nextAfterSeq?: number | null
+            targetId?: string
+        } = {}
+    ): MessagesAroundResponse {
+        return {
+            messages,
+            page: {
+                limit: 200,
+                epoch: options.epoch ?? 0,
+                targetId: options.targetId ?? messages[0]?.id ?? '',
+                nextBeforeSeq: options.nextBeforeSeq ?? null,
+                nextBeforeAt: options.nextBeforeAt ?? null,
+                nextAfterSeq: options.nextAfterSeq ?? null,
+                nextAfterAt: options.nextAfterAt ?? null,
+                snapshotHeadSeq: null,
+                snapshotHeadAt: null,
+                hasMore: options.hasMore ?? false
+            }
+        }
+    }
+
+    function createJumpApi(getMessagesAround: ApiClient['getMessagesAround']): ApiClient {
+        return {
+            getMessages: vi.fn(async () => beforeResponse([], { nextBeforeAt: null, nextBeforeSeq: null })),
+            getMessagesAround
+        } as unknown as ApiClient
+    }
+
+    it('swaps the window to the page around the message', async () => {
+        const id = sessionId('jump-window')
+        const around = [
+            makeAgentMessage({ id: 'old-1', seq: 10, at: 10 }),
+            makeUserMessage({ id: 'target', seq: 11, invokedAt: 11, createdAt: 11 }),
+            makeAgentMessage({ id: 'old-2', seq: 12, at: 12 })
+        ]
+        const api = createJumpApi(vi.fn(async () => aroundResponse(around, {
+            epoch: 2,
+            hasMore: true,
+            nextBeforeAt: 10,
+            nextBeforeSeq: 10,
+            nextAfterAt: 12,
+            nextAfterSeq: 12,
+            targetId: 'target'
+        })))
+
+        const outcome = await jumpToMessage(api, id, 'target')
+
+        expect(outcome.kind).toBe('applied')
+        expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual([
+            'old-1',
+            'target',
+            'old-2'
+        ])
+        expect(getMessageWindowState(id).viewMode).toBe('history')
+        expect(getMessageWindowState(id).hasMore).toBe(true)
+        expect(getMessageWindowState(id).epoch).toBe(2)
+    })
+
+    it('keeps the tail from replacing the window it opened', async () => {
+        const id = sessionId('jump-pinned')
+        const around = [makeUserMessage({ id: 'target', seq: 11, invokedAt: 11, createdAt: 11 })]
+        const getMessages = vi.fn(async () => beforeResponse([], { nextBeforeAt: null, nextBeforeSeq: null }))
+        const api = {
+            getMessages,
+            getMessagesAround: vi.fn(async () => aroundResponse(around, {
+                epoch: 2,
+                nextBeforeAt: 11,
+                nextBeforeSeq: 11,
+                nextAfterAt: 11,
+                nextAfterSeq: 11
+            }))
+        } as unknown as ApiClient
+
+        await jumpToMessage(api, id, 'target')
+        const before = getMessageWindowState(id).messages.length
+
+        await syncTailMessages(api, id)
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'newest', seq: 99, at: 99 })])
+
+        expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['target'])
+        expect(getMessageWindowState(id).messages).toHaveLength(before)
+        expect(getMessages).not.toHaveBeenCalled()
+    })
+
+    it('releases the window when the operator scrolls back to the tail', async () => {
+        const id = sessionId('jump-release')
+        const around = [makeUserMessage({ id: 'target', seq: 11, invokedAt: 11, createdAt: 11 })]
+        const api = createJumpApi(vi.fn(async () => aroundResponse(around, {
+            epoch: 2,
+            nextBeforeAt: 11,
+            nextBeforeSeq: 11,
+            nextAfterAt: 11,
+            nextAfterSeq: 11
+        })))
+
+        await jumpToMessage(api, id, 'target')
+        setMessageViewMode(id, 'tail')
+
+        const state = getMessageWindowState(id)
+        expect(state.viewMode).toBe('tail')
+        expect(state.pinnedMessageId).toBeNull()
+    })
+
+    it('falls back to the tail when the history was rewritten', async () => {
+        const id = sessionId('jump-epoch')
+        const getMessages = vi.fn(async () => beforeResponse([], {
+            epoch: 2,
+            nextBeforeAt: null,
+            nextBeforeSeq: null
+        }))
+        const api = {
+            getMessages,
+            getMessagesAround: vi.fn(async () => aroundResponse([], { epoch: 7 }))
+        } as unknown as ApiClient
+
+        await syncTailMessages(api, id)
+        expect(getMessageWindowState(id).epoch).toBe(2)
+
+        const outcome = await jumpToMessage(api, id, 'target')
+
+        expect(outcome).toEqual({ kind: 'stopped', reason: 'epoch-reset' })
+        expect(getMessages).toHaveBeenCalledTimes(2)
+    })
+
+    it('reports a message that does not exist', async () => {
+        const id = sessionId('jump-missing')
+        const api = createJumpApi(vi.fn(async () => aroundResponse([])))
+
+        const outcome = await jumpToMessage(api, id, 'target')
+
+        expect(outcome).toEqual({ kind: 'stopped', reason: 'not-found' })
     })
 })

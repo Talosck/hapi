@@ -235,11 +235,12 @@ export default {
   'session.outline.close': 'Close outline',
   'session.outline.title': 'Outline',
   'session.outline.loadOlder': 'Load earlier',
-  'session.outline.empty': 'No outline items in loaded messages',
+  'session.outline.empty': 'No prompts in this session yet',
   'session.outline.searchPlaceholder': 'Search outline',
   'session.outline.searchLabel': 'Search outline items',
   'session.outline.searchResults': '{matched} of {total} items',
   'session.outline.noSearchResults': 'No matching outline items',
+  'session.outline.targetUnreachable': 'This prompt could not be opened. The conversation may have changed in the meantime.',
 
   // Session actions
   'session.action.rename': 'Rename',

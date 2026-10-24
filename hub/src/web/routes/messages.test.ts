@@ -12,6 +12,8 @@ import type { WebAppEnv } from '../middleware/auth'
 import { createMessagesRoutes } from './messages'
 
 type GetMessagesPage = SyncEngine['getMessagesPage']
+type GetSessionPrompts = SyncEngine['getSessionPrompts']
+type GetMessagesAround = SyncEngine['getMessagesAround']
 
 // TS note: engine is cast to unknown→SyncEngine so test helpers don't need to
 // satisfy the full SyncEngine shape (only the subset the route under test uses).
@@ -24,6 +26,8 @@ function createApp(opts: {
     active?: boolean
     sendMessage?: (sessionId: string, payload: unknown) => Promise<void>
     getMessagesPage?: GetMessagesPage
+    getSessionPrompts?: GetSessionPrompts
+    getMessagesAround?: GetMessagesAround
     getQueuedState?: (sessionId: string, localIds: string[]) => {
         queuedLocalIds: string[]
         indeterminateLocalIds: string[]
@@ -63,6 +67,11 @@ function createApp(opts: {
         }
     }))
 
+    const getSessionPrompts = opts.getSessionPrompts ?? (() => ({
+        prompts: [],
+        epoch: 0
+    }))
+
     const engine = {
         resolveSessionAccess: () => ({
             ok: true,
@@ -74,6 +83,8 @@ function createApp(opts: {
         cancelQueuedMessage: async () => ({ status: 'cancelled' }),
         steerQueuedMessage: opts.steerQueuedMessage ?? (async () => ({ status: 'failed', error: 'Steer failed', localId: null })),
         getMessagesPage,
+        getSessionPrompts,
+        getMessagesAround: opts.getMessagesAround ?? (() => null),
     } as unknown as SyncEngine
 
     const app = new Hono<WebAppEnv>()
@@ -196,10 +207,113 @@ describe('GET /api/sessions/:id/messages', () => {
     })
 })
 
+describe('GET /api/sessions/:id/messages/around/:messageId', () => {
+    it('returns the page around the message', async () => {
+        const calls: Array<{ sessionId: string; messageId: string; limit: number }> = []
+        const { app } = createApp({
+            getMessagesAround: (sessionId: string, messageId: string, limit: number) => {
+                calls.push({ sessionId, messageId, limit })
+                return {
+                    messages: [],
+                    page: {
+                        limit,
+                        epoch: 4,
+                        targetId: messageId,
+                        nextBeforeSeq: 3,
+                        nextBeforeAt: 3_000,
+                        nextAfterSeq: 7,
+                        nextAfterAt: 7_000,
+                        snapshotHeadSeq: 9,
+                        snapshotHeadAt: 9_000,
+                        hasMore: true
+                    }
+                }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/messages/around/message-5?limit=120')
+
+        expect(response.status).toBe(200)
+        expect(calls).toEqual([{ sessionId: 'session-1', messageId: 'message-5', limit: 120 }])
+        expect(await response.json()).toMatchObject({
+            page: {
+                targetId: 'message-5',
+                epoch: 4,
+                hasMore: true
+            }
+        })
+    })
+
+    it('answers 404 for a message that does not exist', async () => {
+        const { app } = createApp({ getMessagesAround: () => null })
+
+        const response = await app.request('/api/sessions/session-1/messages/around/missing')
+
+        expect(response.status).toBe(404)
+        expect(await response.json()).toMatchObject({ error: 'Message not found' })
+    })
+
+    it('rejects a limit outside the supported range', async () => {
+        const { app } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/messages/around/message-5?limit=1')
+
+        expect(response.status).toBe(400)
+    })
+})
+
+describe('GET /api/sessions/:id/prompts', () => {
+    it('returns the prompt index of the session', async () => {
+        const calls: string[] = []
+        const { app } = createApp({
+            getSessionPrompts: (sessionId) => {
+                calls.push(sessionId)
+                return {
+                    prompts: [
+                        {
+                            id: 'row-1',
+                            localId: 'local-1',
+                            text: 'first prompt',
+                            createdAt: 1_000,
+                            sentFrom: 'webapp'
+                        }
+                    ],
+                    epoch: 7
+                }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/prompts')
+
+        expect(response.status).toBe(200)
+        expect(calls).toEqual(['session-1'])
+        expect(await response.json()).toEqual({
+            prompts: [
+                {
+                    id: 'row-1',
+                    localId: 'local-1',
+                    text: 'first prompt',
+                    createdAt: 1_000,
+                    sentFrom: 'webapp'
+                }
+            ],
+            epoch: 7
+        })
+    })
+
+    it('serves an empty index for a session without prompts', async () => {
+        const { app } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/prompts')
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ prompts: [], epoch: 0 })
+    })
+})
+
 // ---------------------------------------------------------------------------
 // #2 server-side scheduledAt upper bound
 // ---------------------------------------------------------------------------
-
 describe('POST /api/sessions/:id/messages — #2 scheduledAt upper bound', () => {
     it('rejects scheduledAt more than 7 days in the future with 400 and clear message', async () => {
         const { app } = createApp({})

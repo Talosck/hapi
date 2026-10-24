@@ -36,6 +36,14 @@ export type MessageWindowState = {
     messagesVersion: number
     historyVersion: number
     tailRevision: number
+    /**
+     * The message the window was opened on, while the window is pinned to it.
+     *
+     * While it is set, the window is a deliberate view of one part of the
+     * conversation: the tail must not replace it, because that would pull the
+     * operator away from the message they asked for.
+     */
+    pinnedMessageId: string | null
 }
 
 export const VISIBLE_WINDOW_SIZE = 400
@@ -60,6 +68,8 @@ type InternalState = MessageWindowState & {
     preferLatestOnActivation: boolean
     syncGeneration: number
     olderGeneration: number
+    /** Invalidates a jump whose page is still in flight. */
+    jumpGeneration: number
 }
 
 type PersistedMessageWindowState = {
@@ -247,7 +257,9 @@ function createState(sessionId: string): InternalState {
         requiresLatestReset: false,
         preferLatestOnActivation: false,
         syncGeneration: 0,
-        olderGeneration: 0
+        olderGeneration: 0,
+        pinnedMessageId: null,
+        jumpGeneration: 0
     }
 }
 
@@ -405,6 +417,8 @@ function buildState(
         | 'preferLatestOnActivation'
         | 'syncGeneration'
         | 'olderGeneration'
+        | 'pinnedMessageId'
+        | 'jumpGeneration'
         | 'historyVersion'
         | 'tailRevision'
     >>
@@ -686,6 +700,13 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
     const generation = beginTailSync(sessionId)
     try {
         const initial = getState(sessionId)
+        if (initial.pinnedMessageId !== null) {
+            // The window was opened on a specific message. Replacing it with
+            // the tail would pull the operator away from what they asked for,
+            // so the tail waits until they scroll back to it.
+            finishTailSync(sessionId, generation, null)
+            return
+        }
         const initialCursor = getNewestCursor(initial)
         const preferLatestOnActivation = initial.preferLatestOnActivation
         const canIncrement = initialCursor !== null
@@ -848,6 +869,9 @@ function enterTailMode(previous: InternalState): InternalState {
         messages: kept,
         hasMore: previous.hasMore || dropped.length > 0,
         viewMode: 'tail',
+        // Back at the tail: the window is no longer pinned to a message, so
+        // the tail catch-up may run again.
+        pinnedMessageId: null,
         epoch: forceLatest ? null : previous.epoch,
         oldestPositionAt: oldest?.at ?? null,
         oldestPositionSeq: oldest?.seq ?? null,
@@ -1048,6 +1072,103 @@ export async function fetchOlderMessages(
     }
 }
 
+export type JumpOutcome =
+    | { kind: 'applied'; messagesVersion: number; historyVersion: number }
+    | { kind: 'stopped'; reason: 'busy' | 'invalidated' | 'epoch-reset' | 'not-found' }
+    | { kind: 'failed'; error: Error }
+
+/**
+ * Open one message that the loaded window does not hold.
+ *
+ * The window is a bounded slice of the conversation, so a message older than
+ * it cannot be reached by paging back and forth. The hub reads the rows around
+ * the message from the log, and the window is swapped to that page: the
+ * operator lands on the message instead of on the tail.
+ *
+ * The window stays pinned to the message until the operator scrolls back to
+ * the tail — otherwise the tail catch-up would pull the view away while they
+ * are still reading.
+ */
+export async function jumpToMessage(
+    api: ApiClient,
+    sessionId: string,
+    messageId: string,
+    options: { limit?: number } = {}
+): Promise<JumpOutcome> {
+    const initial = getState(sessionId)
+    if (initial.isSyncingTail || initial.isLoadingMore) {
+        return { kind: 'stopped', reason: 'busy' }
+    }
+    const generation = initial.jumpGeneration + 1
+    updateState(sessionId, (previous) => buildState(previous, {
+        jumpGeneration: generation
+    }))
+
+    try {
+        const response = await api.getMessagesAround(sessionId, messageId, {
+            limit: options.limit ?? PAGE_SIZE
+        })
+        if (getState(sessionId).jumpGeneration !== generation) {
+            return { kind: 'stopped', reason: 'invalidated' }
+        }
+
+        const current = getState(sessionId)
+        if (current.epoch !== null && response.page.epoch !== current.epoch) {
+            // The history was rewritten while the page was in flight: the
+            // message the caller asked for may be gone. Fall back to the tail.
+            updateState(sessionId, (previous) => buildState(previous, {
+                epoch: null,
+                newestPositionAt: null,
+                newestPositionSeq: null,
+                requiresLatestReset: true,
+                pinnedMessageId: null
+            }))
+            await syncTailMessages(api, sessionId, { ensureAfterCurrent: true })
+            return { kind: 'stopped', reason: 'epoch-reset' }
+        }
+
+        const retained = response.messages.filter(shouldRetainWindowMessage)
+        if (retained.length === 0) {
+            return { kind: 'stopped', reason: 'not-found' }
+        }
+
+        // A send that is still waiting for its echo has to stay visible.
+        const preserved = current.messages.filter((message) => optimisticMessage(message))
+        const kept = mergeMessages(preserved, retained)
+        const historyVersion = current.historyVersion + 1
+        const next = buildState(current, {
+            messages: kept,
+            hasMore: response.page.hasMore,
+            epoch: response.page.epoch,
+            oldestPositionAt: response.page.nextBeforeAt,
+            oldestPositionSeq: response.page.nextBeforeSeq,
+            newestPositionAt: response.page.nextAfterAt,
+            newestPositionSeq: response.page.nextAfterSeq,
+            viewMode: 'history',
+            requiresLatestReset: false,
+            isLoadingMore: false,
+            warning: null,
+            pinnedMessageId: messageId,
+            historyVersion,
+            tailRevision: current.tailRevision + 1,
+            olderGeneration: current.olderGeneration + 1
+        })
+        setState(sessionId, next, true)
+        return { kind: 'applied', messagesVersion: next.messagesVersion, historyVersion }
+    } catch (error) {
+        if (getState(sessionId).jumpGeneration !== generation) {
+            return { kind: 'stopped', reason: 'invalidated' }
+        }
+        const jumpError = error instanceof Error
+            ? error
+            : new Error('Failed to open the message')
+        updateState(sessionId, (previous) => buildState(previous, {
+            warning: jumpError.message
+        }))
+        return { kind: 'failed', error: jumpError }
+    }
+}
+
 export function cancelOlderMessageLoad(sessionId: string): void {
     updateState(sessionId, (previous) => {
         if (!previous.isLoadingMore) {
@@ -1076,6 +1197,11 @@ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): vo
 export function ingestIncomingMessages(sessionId: string, incoming: DecryptedMessage[]): void {
     if (incoming.length === 0) return
     updateState(sessionId, (previous) => {
+        if (previous.pinnedMessageId !== null) {
+            // The window was opened on a specific message: new messages belong
+            // to the tail, not to the part of the conversation on screen.
+            return previous
+        }
         let merged = mergeIntoWindow(previous, incoming, {
             advanceTailRevision: true
         })
@@ -1143,6 +1269,9 @@ function markMessageWindowForLatestReset(sessionId: string, messages: DecryptedM
         isSyncingTail: true,
         isLoadingMore: false,
         warning: null,
+        // The window is being replaced by the authoritative tail, so it is no
+        // longer a view of one specific message.
+        pinnedMessageId: null,
         syncGeneration: previous.syncGeneration + 1,
         olderGeneration: previous.olderGeneration + 1
     }), true)
@@ -1200,6 +1329,7 @@ export function seedMessageWindowFromSession(fromSessionId: string, toSessionId:
         oldestPositionAt: source.oldestPositionAt,
         oldestPositionSeq: source.oldestPositionSeq,
         requiresLatestReset: true,
+        pinnedMessageId: null,
         syncGeneration: target.syncGeneration + 1,
         olderGeneration: target.olderGeneration + 1
     })

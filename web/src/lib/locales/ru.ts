@@ -235,11 +235,12 @@ export default {
   'session.outline.close': 'Закрыть план',
   'session.outline.title': 'План',
   'session.outline.loadOlder': 'Загрузить более ранние',
-  'session.outline.empty': 'В загруженных сообщениях нет элементов плана',
+  'session.outline.empty': 'В этом диалоге пока нет запросов',
   'session.outline.searchPlaceholder': 'Поиск по плану',
   'session.outline.searchLabel': 'Поиск элементов плана',
   'session.outline.searchResults': '{matched} из {total} элементов',
   'session.outline.noSearchResults': 'Нет подходящих элементов плана',
+  'session.outline.targetUnreachable': 'Не удалось открыть этот запрос. Возможно, диалог успел измениться.',
 
   // Действия с сессией
   'session.action.rename': 'Переименовать',
