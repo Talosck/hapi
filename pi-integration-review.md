@@ -955,4 +955,201 @@ wrapper 以为 Pi 崩了，又回到那条崩溃路径），最后再把 `proces
 | typecheck | cli 全过 |
 | fixtures | `bun run gen:fixtures` 重新生成，**零漂移** |
 
+---
+
+## 十四、e2e 扩到整个 Pi 集成面，又挖出一个 effort 陈旧的 bug（2026-10-24）
+
+第十三轮那个 e2e 只串了五条链路，而这条分支上的 Pi 改动（`08f4011b7`、`fced281a1`、
+`a5ec5c34e`）动了 `conversationHistory` / `loop` / `runPi` / `session` / `sessionTree` /
+`specialCommands` / `steerDispatcher` / `extensionUiHandler` / `piEventConverter`
+一整圈。**覆盖面不够，真机行为还是没被钉住。** 这轮把它扩到十二条。
+
+### 14.1 扩出来的十七条链路（十二条用例）
+
+| 组 | 链路 | 地面真相 |
+|---|---|---|
+| 启动 | **启动窗口里到达的提示词** —— Pi 还没回第一次 `get_state`，提示词就被 wrapper 收下了 | 那条提示词真的跑出了回答，轮次也在 hub 那边记了真实 token |
+| 聊天 | 普通 prompt | transcript 里有同一个回答 |
+| 聊天 | `/bash` | 卡片里是真实输出 |
+| 聊天 | `/name` | `metadata.name` + `piUserNamedSession` |
+| 聊天 | `/tree` | 真的画出了会话树 |
+| 聊天 | `/session` | 真实 token / 成本 / 上下文占用 |
+| 聊天 | **`/compact` 被 agent 拒绝** | 拒绝变成用户看得见的消息，而且**会话没有卡死**（这条路上超时会把运行时租约毒化） |
+| 聊天 | **跑一轮中的 steer** —— 消息递进**正在跑的那一轮** | 标记出现在 Pi 自己的 transcript 里 |
+| 聊天 | **被中止的 steer** | 标记在整份 transcript 里根本不出现 |
+| 配置 | 模型目录 | 每个 id 都有 provider 和 modelId |
+| 配置 | **切 thinking effort** | Pi 自己的会话文件里记了 `thinking_level_change` |
+| 配置 | **换模型** | Pi 自己的会话文件里记了 `model_change` |
+| 会话 | fork | Pi 真写出了第二个会话文件 |
+| 会话 | rewind | Pi 从那条消息 fork 出了新分支，会话还能接着用 |
+| 扩展 | **agent 自己起标题** | `hapi_change_title` 出现在 transcript 里，标题到了 `metadata.name` |
+| 扩展 | 终端专属命令 | `/export` 被拒，没有变成 prompt |
+| 目录 | 斜杠命令 + 技能清单 | HAPI 内建的 `compact`/`session`/`model`/`bash`/`tree`/`name`/`help` 都在 |
+
+跑一轮约 56 秒。
+
+### 14.2 挖出来的 bug：Pi 换模型会自己重置档位，而 HAPI 还拿着旧值
+
+这是「换模型」那条链路逼出来的。**先看 Pi 自己的会话文件**——三条记录连在一起：
+
+```
+thinking_level_change → "low"          ← HAPI 切到 low
+model_change          → MiniMax-M2.7   ← HAPI 换模型
+thinking_level_change → "high"         ← Pi 自己把档位重置成 high 了
+```
+
+**Pi 换模型的时候会自己挑新模型的默认档位。** 而 HAPI 的
+`handleResponse` 的 `case 'set_model'` 只更新了模型，没碰 `currentThinkingLevel`；
+`set-session-config` 那边也是把「我要的」直接写进去。于是 keepalive 告诉 hub 的
+档位是 **`low`**，而 agent 实际跑在 **`high`**——**hub 上显示的是一个假的档位**。
+
+这是 mcode 那个坑（同一个会话里刚修过的那个）的**同款**：HAPI 记的是「我要求了什么」，
+不是「agent 实际用了什么」。
+
+顺着这条线又挖出**第二处**，同一个根因：Pi 的 `set_thinking_level` **不拒绝**它模型
+没有的档位，而是**夹紧**到最接近的一档，而且**照样回 `success: true`**：
+
+```
+set_thinking_level "max"   →  success: true
+实际档位                     →  "high"        ← M2.7 没有 max 这一档
+```
+
+（Pi 的 `clampThinkingLevel` 源码在
+`dist/core/agent-session.js` 的 `_clampThinkingLevel`，它按
+`getSupportedThinkingLevels(model)` 往上找最接近的一档。）
+所以 HAPI 让 Pi 切 `max`、Pi 夹成 `high`、HAPI 却记着 `max`——**又是假的**。
+
+### 14.3 改法：问 Pi 它最后用了哪一档
+
+Pi 的 `set_model` 响应里只有模型对象、没有档位（`cycle_model` 才有），
+`set_thinking_level` 的响应里什么都没有。所以**只能再问一次 Pi**：
+
+```ts
+async function syncThinkingLevelFromPi(
+    session: PiSession,
+    transport: PiTransport,
+    expected: PiThinkingLevel | null | undefined,
+    onChanged: (level: string) => string,
+): Promise<void> {
+    const data = await sendPiRpcAndWait(session, transport, { type: 'get_state' }) as { thinkingLevel?: string } | undefined;
+    const level = data?.thinkingLevel;
+    if (typeof level !== 'string' || level.length === 0) return;
+    session.currentThinkingLevel = level as PiThinkingLevel;
+    if (expected !== undefined && expected !== level) {
+        session.sendSessionEvent({ type: 'message', message: onChanged(level) });
+    }
+}
+```
+
+四条路都过它：**启动时的 effort**、**RPC 换模型**、**RPC 换 effort**、**`/model` 斜杠命令**。
+
+分寸跟 mcode 那轮一样：**用户挑的档位落不了地必须明确告知**，不静默吞：
+
+- 换模型 → `MiniMax Code picked the thinking effort "high" for the new model.`
+- 档位被夹 → `MiniMax Code cannot run the thinking effort "max" on this model, so it runs with "high".`
+
+`effort: null`（「不管理档位」，HAPI 给 Pi 发 `'off'`）这个语义**在换 effort 那条路上不动**——
+用户挑的就是「不要档位」，Pi 也就照办，没什么要回读的。但**换模型那条路上它要算作一次差异**：
+Pi 换模型时自己挑新模型的默认档位，**哪怕用户之前把思考关掉了**，
+所以用户得听一句「Pi 给新模型挑了 high」，hub 也才拿得到真实档位而不是一个已经过期的 `null`。
+
+### 14.4 e2e 怎么钉住它：断言「hub 被告知的档位 == Pi 记的档位」
+
+光断言「模型换了」是抓不住这个 bug 的。真正的性质是
+**hub 最后被告知的 effort 必须等于 Pi 自己会话文件里最后一条 `thinking_level_change`**：
+
+```ts
+await vi.waitFor(async () => {
+    const level = await piRecordedThinkingLevel();          // 读 Pi 自己的会话文件
+    expect(level).toBeTruthy();
+    const told = session.keepAliveRuntimes.filter(Boolean);  // hub 被告知过的每一次
+    expect(told[told.length - 1]?.effort).toBe(level);
+}, 60_000);
+```
+
+这条断言是**确定性**的：把修复摘掉，e2e 当场变红——
+`AssertionError: expected 'low' to be 'max'`（hub 被告知 `low`，Pi 记的是 `max`）；
+装回去 12/12 全绿。
+
+> 这里踩了一个跟 mcode 那轮**一模一样**的坑：第一版断言是「最后一条 keepalive 的
+> effort 非空」，而 keepalive 每 2 秒一次，**轮询撞上就过**——摘掉修复重跑居然还是绿的。
+> 改成「等于 Pi 记的档位」这个**性质**之后才真的红。
+
+### 14.5 这套 e2e 本身踩到的坑
+
+**一、Pi 的 RPC 没有 `initialize` 命令。** 探针一开始照着 ACP 的样子发 `initialize`，
+Pi 直接回 `Unknown command: initialize`。Pi 是自己建会话的（`session/new` 也没有），
+wrapper 的注释里写着「Pi creates a fresh session (or resumes --session) before RPC mode
+starts. Sending new_session here races get_state and discards a resumed session.」
+
+**二、Pi 的 RPC 响应带 id，但按 command 配对的探针会错位。** 探针一开始按 id 配对，
+Pi 对 `set_thinking_level` 回的 `success: true` 里**没有 data**，按 id 配对就永远等不到。
+HAPI 自己的 `PiRpcResolver` 是**按 id** 配对的（`pending.get(numericId)`），所以没问题；
+写探针的时候要跟 HAPI 一样按 id 配。
+
+**三、提示词可能在 wrapper 注册消息 handler 之前就到了。** e2e 的第一版测试
+一上来就 `session.user?.(...)`，而 `session.user` 在 `runPi` 跑到那一步之前是 `undefined`
+——`?.()` 于是**静默把这条提示词丢了**，测试等了 180 秒超时。
+这是**测试自己的问题**（生产里 hub 不会在 session 注册前发消息），但它逼出一条
+e2e 之前根本没覆盖的链路：**启动窗口里到达的提示词**。
+（Pi 的启动大约 5 秒，wrapper 注册 handler 只需要几毫秒，所以这个窗口是稳定的。）
+
+**四、模块级改 `process.exit` 会毒化后面复用的 worker。**
+mcode 那个 e2e 文件原来在**模块级**把 `process.exit` 换成空实现（为了躲开 Vitest 那个
+会抛异常的桩——不换的话 runner 的崩溃处理会自己咬自己，第一版 e2e 写过 309 MB 日志）。
+但**套件被跳过时 `afterAll` 根本不跑**，于是那个覆盖就留在 worker 里了。
+Vitest 的 worker 是跨文件复用的，所以后面拿到这个 worker 的文件里，
+`process.exit` 是个空实现——**任何依赖「进程退出」的路径都会变成死循环**
+（比如 launcher 在 `onReady` 之前抛错，runner 的崩溃处理要 `process.exit`），
+表现就是一条 5 秒超时的测试，而且**每次挂的还不一样**：
+`claudeRemoteLauncher.launchFailure.test.ts` 和 `mcodeRemoteLauncher.test.ts` 里的
+fork 那两条轮流挂，单独跑又都绿。
+现在的做法是：**覆盖照旧要在 runner 被调用之前就位**（mcode 的 runner 依赖这一点），
+但**套件被跳过时立刻把它还原**——跳过时压根不留痕迹，跑起来时也只在这个套件的
+生命周期内有效。Pi 这个 e2e 文件则把自己的覆盖搬进了 `beforeAll`（`afterAll` 还原），
+所以它不管跑不跑都不会留下痕迹。
+
+**五、孤儿进程会让「别的文件挂」看起来像代码 bug。**
+上一条那个空转的 worker 跑完没死干净，留在了机器上：5 个 vitest worker，父进程早就没了
+（被 init 收养），每个还在满 CPU 空转，机器负载 18。
+症状是**别的文件挂**——`claudeRemoteLauncher.launchFailure.test.ts` 的三条 5 秒超时，
+而且**每次挂的还不一样**（另一轮是 `mcodeRemoteLauncher.test.ts` 的 fork 那条）。
+最迷惑的是：**把本次改动 stash 掉它照样挂**，看起来像既有问题。
+真凶是负载，不是代码：清掉这 5 个孤儿之后，**cli 全套 3523 条一次全绿**，
+web 套件也从 830 秒降到 262 秒。
+教训：**跑测试前先 `ps` 一下有没有自己留下的孤儿**——
+`ps -eo pid,ppid,etime,pcpu,args` 里父进程是 `systemd --user`（= init）、
+etime 以小时计、pcpu 却很高的 vitest worker，就是它们。
+
+### 14.6 还没进 e2e 的部分
+
+| 东西 | 为什么进不来 |
+|---|---|
+| **扩展 UI 的 select/confirm/input/editor** | 要有一个**真的会弹对话框**的 Pi 扩展。这台机器上只有 `pi-web-access` 的 `/search` 会弹 `select`，而那依赖本机存过的搜索结果——不可移植 |
+| `/compact` **成功那条路** | Pi 拒绝压缩太小的会话（`Nothing to compact (session too small)`），所以 e2e 盖的是**拒绝那条路**；成功那条要一个真的够大的会话，得先跑十几轮对话 |
+| `queue_update` / `set_steering_mode` / `set_follow_up_mode` / `set_auto_compaction` / `set_auto_retry` / `abort_retry` / `export_html` / `get_messages` / `cycle_model` / `cycle_thinking_level` | HAPI 根本没用这些命令（要么要 web 侧加设置入口，要么价值一般），第九节就列过 |
+| 本机以外的 Pi 版本 | 整套 e2e 只对 1.4.0 成立；夹紧、`get_state` 形状这些是 Pi 的实现细节，升级 Pi 都要重跑 |
+
+### 14.7 这轮的验证
+
+| 项 | 结果 |
+|---|---|
+| 真机 e2e | **12 passed**，约 56 秒（`HAPI_RUN_PI_E2E=1`） |
+| Pi 单元套件 | 318 → **321** 条全过（新增 3 条回归：换模型后的档位、档位被夹、思考关着换模型） |
+| cli 全套 | **3523 passed / 39 skipped**，零失败 |
+| web / hub / shared 全套 | 全过 |
+| typecheck | cli / web / hub / relay 全过 |
+| fixtures | `bun run gen:fixtures` 重新生成，**零漂移** |
+| 回归有效性 | 把 effort 修复摘掉，e2e **当场变红**（`expected 'low' to be 'max'`）；装回去 12/12 绿 |
+
+> 跑 cli 全套的时候撞到过三条 5 秒超时，全在
+> `src/claude/claudeRemoteLauncher.launchFailure.test.ts` 里
+> （「restores the dequeued message into the queue when claudeRemote throws before onReady」
+> 等）。它们**不是代码问题**：那台机器上还留着早前几轮 e2e 跑出来的 **5 个孤儿 vitest worker**
+> （父进程早就死了，被 init 收养），每个都在满 CPU 空转，机器负载 18。
+> 把这 5 个孤儿清掉之后，**全套 3523 条一次全绿**，那三条超时自己就没了
+> （web 套件也是同一个原因：从 830 秒降到 262 秒）。
+> 教训：**跑测试前先看看机器上有没有自己留下的孤儿进程**——
+> 它们的症状（别的文件挂、5 秒超时、每次挂的还不一样）跟真的代码 bug 长得一模一样。
+
 
