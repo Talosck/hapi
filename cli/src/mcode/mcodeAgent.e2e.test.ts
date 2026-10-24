@@ -45,6 +45,12 @@ const state = vi.hoisted(() => ({
     lifecycle: null as { cleanupAndExit: () => Promise<void> } | null,
 }));
 
+type KeepAliveRuntime = {
+    permissionMode?: string;
+    model?: string | null;
+    effort?: string | null;
+};
+
 type AgentMessage = {
     type?: string;
     name?: string;
@@ -66,7 +72,7 @@ class RecordingSession {
     /** Every chat message the launcher sent to the hub. */
     readonly agentMessages: AgentMessage[] = [];
     /** Every session event (the ⚠️ lines and the status messages). */
-    readonly sessionEvents: Array<{ type?: string; message?: string; reason?: string }> = [];
+    readonly sessionEvents: Array<{ type?: string; message?: string; reason?: string; members?: unknown[] }> = [];
     /** The summaries the agent's own title produced. */
     readonly summaries: Array<{ summary?: string }> = [];
     readonly consumed: string[] = [];
@@ -76,6 +82,8 @@ class RecordingSession {
     readonly indeterminate: string[] = [];
     /** Set when the launcher reported the session as dead (the agent went away). */
     dead = false;
+    /** The last keepalive the runner sent - it carries the mode the session runs with. */
+    lastKeepAlive: { thinking?: boolean; mode?: string; runtime?: KeepAliveRuntime } | null = null;
     /**
      * How many tool calls the agent started. A tool call only appears while a
      * turn is running, so it is the signal that the agent is busy.
@@ -117,7 +125,7 @@ class RecordingSession {
         writeLog('hub', [`agentMessage ${JSON.stringify(body).slice(0, 300)}`]);
     }
     sendSessionEvent(body: unknown): void {
-        this.sessionEvents.push(body as { type?: string; message?: string; reason?: string });
+        this.sessionEvents.push(body as { type?: string; message?: string; reason?: string; members?: unknown[] });
         writeLog('hub', [`sessionEvent ${JSON.stringify(body).slice(0, 300)}`]);
     }
     sendClaudeSessionMessage(body: unknown): void {
@@ -130,7 +138,9 @@ class RecordingSession {
     /** A turn whose outcome cannot be proven is held for the user to resolve. */
     emitMessagesIndeterminate(ids: string[]): void { this.indeterminate.push(...ids); }
     emitSteerIndeterminate(): void {}
-    keepAlive(): void {}
+    keepAlive(thinking?: boolean, mode?: string, runtime?: KeepAliveRuntime): void {
+        this.lastKeepAlive = { thinking, mode, runtime };
+    }
     emitSessionReady(): void {}
     async setSteerDeliveryState(): Promise<boolean> { return true; }
     syncNativeQueuedMessage(): void {}
@@ -484,53 +494,330 @@ describe.skipIf(process.env.HAPI_RUN_MCODE_E2E !== '1')('MiniMax Code end to end
         }, 120_000);
     }, 180_000);
 
-    it('switches the model of the running session and the agent really uses it', async () => {
-        const listModels = session.rpc.get('listMcodeModels');
-        expect(listModels).toBeDefined();
-        const catalog = await listModels!({}) as {
-            availableModels?: Array<{ modelId: string; name?: string }>;
-            currentModelId?: string | null;
-        };
-        writeLog('info', [`model catalog ${JSON.stringify(catalog)}`]);
-        const current = catalog.currentModelId ?? null;
-        const currentModel = modelNameOf(current);
+    describe('the configuration surface', () => {
+        it('publishes the model catalog of the running agent', async () => {
+            const listModels = session.rpc.get('listMcodeModels');
+            expect(listModels).toBeDefined();
+            const catalog = await listModels!({}) as {
+                success?: boolean;
+                availableModels?: Array<{ modelId: string; name?: string }>;
+                currentModelId?: string | null;
+                effortOptions?: Array<{ value: string; name?: string }>;
+                currentEffort?: string | null;
+            };
+            expect(catalog.success).toBe(true);
+            const models = catalog.availableModels ?? [];
+            expect(models.length).toBeGreaterThan(0);
+            // Every model the agent offers has to be an id HAPI can decode,
+            // because the web shows the id the agent gave.
+            for (const model of models) {
+                expect(acpModelIdToCliModelId(model.modelId), `undecodable model id ${model.modelId}`).toBeTruthy();
+            }
+            expect(catalog.currentModelId).toBeTruthy();
+            expect(models.some((model) => model.modelId === catalog.currentModelId)).toBe(true);
+            // The effort levels come from the agent too, not from HAPI.
+            expect((catalog.effortOptions ?? []).length).toBeGreaterThan(0);
+        });
 
-        // A model of another family, so the agent's own call record can tell
-        // that the switch really happened.
-        const candidates = (catalog.availableModels ?? [])
-            .map((model) => ({ wire: model.modelId, name: modelNameOf(model.modelId) }))
-            .filter((candidate) => candidate.name && candidate.name !== currentModel);
-        if (candidates.length === 0) {
-            writeLog('info', ['the agent offers no other model family - the switch is not exercised']);
-            return;
-        }
-        const target = candidates[0]!;
+        it('publishes the slash commands the agent offers', async () => {
+            const listCommands = session.rpc.get('listSlashCommands');
+            expect(listCommands).toBeDefined();
+            const result = await listCommands!({}) as {
+                success?: boolean;
+                commands?: Array<{ name: string; description?: string; source?: string }>;
+            };
+            expect(result.success).toBe(true);
+            const names = (result.commands ?? []).map((command) => command.name);
+            // The agent publishes its own commands over ACP; the ones below are
+            // the ones MiniMax Code really offers.
+            expect(names).toContain('help');
+            expect(names).toContain('model');
+        });
 
-        const setConfig = session.rpc.get('set-session-config');
-        expect(setConfig).toBeDefined();
-        await setConfig!({ model: target.wire });
+        it('switches the thinking effort of the running session', async () => {
+            const setConfig = session.rpc.get('set-session-config');
+            expect(setConfig).toBeDefined();
+            const accepted = await setConfig!({ effort: 'low' }) as { applied?: { effort?: string | null } };
+            expect(accepted.applied?.effort).toBe('low');
 
-        // The ground truth: the agent's own call record names the new model.
-        session.user?.({
-            role: 'user',
-            content: { type: 'text', text: 'Reply with exactly: MCODE_E2E_MODEL_OK' },
-        }, 'e2e-prompt-5');
-        await vi.waitFor(() => {
-            const answer = session.agentMessages.find((message) => JSON.stringify(message).includes('MCODE_E2E_MODEL_OK'));
-            expect(answer).toBeDefined();
+            // The effort is applied when the next turn starts.
+            session.user?.({
+                role: 'user',
+                content: { type: 'text', text: 'Reply with exactly: MCODE_E2E_EFFORT_OK' },
+            }, 'e2e-prompt-6');
+            await vi.waitFor(() => {
+                const answer = session.agentMessages.find((message) => JSON.stringify(message).includes('MCODE_E2E_EFFORT_OK'));
+                expect(answer).toBeDefined();
+            }, 180_000);
+
+            // The ground truth: the agent publishes the effort it runs with.
+            const listModels = session.rpc.get('listMcodeModels');
+            const catalog = await listModels!({}) as { currentEffort?: string | null };
+            expect(catalog.currentEffort).toBe('low');
+            // And the hub is told what the session runs with.
+            await vi.waitFor(() => {
+                expect(session.lastKeepAlive?.runtime?.effort).toBe('low');
+            }, 30_000);
+        }, 300_000);
+
+        it('switches the permission mode of the running session', async () => {
+            const setConfig = session.rpc.get('set-session-config');
+            expect(setConfig).toBeDefined();
+            const accepted = await setConfig!({ permissionMode: 'auto' }) as { applied?: { permissionMode?: string } };
+            expect(accepted.applied?.permissionMode).toBe('auto');
+
+            // The mode is applied when the next turn starts.
+            session.user?.({
+                role: 'user',
+                content: { type: 'text', text: 'Reply with exactly: MCODE_E2E_MODE_OK' },
+            }, 'e2e-prompt-7');
+            await vi.waitFor(() => {
+                const answer = session.agentMessages.find((message) => JSON.stringify(message).includes('MCODE_E2E_MODE_OK'));
+                expect(answer).toBeDefined();
+            }, 180_000);
+
+            // The hub must advertise the mode the agent really runs with.
+            await vi.waitFor(() => {
+                expect(session.lastKeepAlive?.runtime?.permissionMode).toBe('auto');
+            }, 30_000);
+            // The agent must not have refused the mode.
+            const refusal = session.sessionEvents.find((event) => {
+                return typeof event.message === 'string' && event.message.includes('Failed to switch permission mode');
+            });
+            expect(refusal).toBeUndefined();
+        }, 300_000);
+
+        it('switches the model of the running session and the agent really uses it', async () => {
+            const listModels = session.rpc.get('listMcodeModels');
+            expect(listModels).toBeDefined();
+            const catalog = await listModels!({}) as {
+                availableModels?: Array<{ modelId: string; name?: string }>;
+                currentModelId?: string | null;
+            };
+            writeLog('info', [`model catalog ${JSON.stringify(catalog)}`]);
+            const current = catalog.currentModelId ?? null;
+            const currentModel = modelNameOf(current);
+
+            // A model of another family, so the agent's own call record can
+            // tell that the switch really happened.
+            const candidates = (catalog.availableModels ?? [])
+                .map((model) => ({ wire: model.modelId, name: modelNameOf(model.modelId) }))
+                .filter((candidate) => candidate.name && candidate.name !== currentModel);
+            if (candidates.length === 0) {
+                writeLog('info', ['the agent offers no other model family - the switch is not exercised']);
+                return;
+            }
+            const target = candidates[0]!;
+
+            const setConfig = session.rpc.get('set-session-config');
+            expect(setConfig).toBeDefined();
+            await setConfig!({ model: target.wire });
+
+            // The ground truth: the agent's own call record names the new model.
+            session.user?.({
+                role: 'user',
+                content: { type: 'text', text: 'Reply with exactly: MCODE_E2E_MODEL_OK' },
+            }, 'e2e-prompt-5');
+            await vi.waitFor(() => {
+                const answer = session.agentMessages.find((message) => JSON.stringify(message).includes('MCODE_E2E_MODEL_OK'));
+                expect(answer).toBeDefined();
+            }, 180_000);
+
+            const nativeSessionId = session.metadata.mcodeSessionId as string;
+            await vi.waitFor(async () => {
+                const call = await readLastModelCall(nativeSessionId);
+                expect(call.model).toBe(target.name);
+            }, 60_000);
+
+            // A model that reasons by toggle has no thinking-effort levels, so
+            // the effort of the old model must not be carried over as a
+            // failure.
+            const effortFailure = session.sessionEvents.find((event) => {
+                return typeof event.message === 'string' && event.message.includes('Failed to switch thinking effort');
+            });
+            expect(effortFailure, 'the effort of the old model was carried over to a model without effort levels').toBeUndefined();
+        }, 300_000);
+    });
+
+    describe('the session surface', () => {
+        it('forks the conversation', async () => {
+            // The agent can only be forked between turns.
+            await vi.waitFor(() => {
+                expect(session.lastKeepAlive?.thinking).not.toBe(true);
+            }, 60_000);
+            const fork = session.rpc.get('fork-conversation');
+            expect(fork).toBeDefined();
+            const result = await fork!({}) as { nativeSessionId?: string; error?: string };
+            expect(result.nativeSessionId, result.error).toBeTruthy();
+            expect(result.nativeSessionId).not.toBe(session.metadata.mcodeSessionId);
+        }, 120_000);
+    });
+
+    describe('the extension surface', () => {
+        it('drives the goal of the session', async () => {
+            const createGoal = session.rpc.get('mcode-create-goal');
+            expect(createGoal).toBeDefined();
+            const created = await createGoal!({
+                objective: 'E2E_GOAL_OBJECTIVE',
+                tokenBudget: 5000,
+            }) as { success?: boolean; error?: string; goal?: { objective?: string; tokenBudget?: number } };
+            expect(created.success, created.error).toBe(true);
+            expect(created.goal?.objective).toContain('E2E_GOAL_OBJECTIVE');
+
+            // The goal reached the hub.
+            await vi.waitFor(() => {
+                const goal = session.sessionEvents.find((event) => event.type === 'thread-goal-updated');
+                expect(goal).toBeDefined();
+            }, 30_000);
+
+            const patchGoal = session.rpc.get('mcode-patch-goal');
+            expect(patchGoal).toBeDefined();
+            const patched = await patchGoal!({ status: 'paused' }) as { success?: boolean; error?: string };
+            expect(patched.success, patched.error).toBe(true);
+
+            const clearGoal = session.rpc.get('mcode-clear-goal');
+            expect(clearGoal).toBeDefined();
+            const cleared = await clearGoal!({}) as { success?: boolean; cleared?: boolean; error?: string };
+            expect(cleared.success, cleared.error).toBe(true);
+            expect(cleared.cleared).toBe(true);
+            await vi.waitFor(() => {
+                const notice = session.sessionEvents.find((event) => event.type === 'thread-goal-cleared');
+                expect(notice).toBeDefined();
+            }, 30_000);
         }, 180_000);
 
-        const nativeSessionId = session.metadata.mcodeSessionId as string;
-        await vi.waitFor(async () => {
-            const call = await readLastModelCall(nativeSessionId);
-            expect(call.model).toBe(target.name);
-        }, 60_000);
+        it('reports the delegation tree of the session', async () => {
+            // The agent publishes its delegated sessions, and the launcher
+            // turns that into a snapshot for the web.
+            await vi.waitFor(() => {
+                const snapshot = session.sessionEvents.find((event) => event.type === 'subagent-snapshot');
+                expect(snapshot).toBeDefined();
+            }, 60_000);
 
-        // A model that reasons by toggle has no thinking-effort levels, so
-        // the effort of the old model must not be carried over as a failure.
-        const effortFailure = session.sessionEvents.find((event) => {
-            return typeof event.message === 'string' && event.message.includes('Failed to switch thinking effort');
-        });
-        expect(effortFailure, 'the effort of the old model was carried over to a model without effort levels').toBeUndefined();
-    }, 300_000);
+            // Stopping the delegation of a session without subagents still
+            // answers, and the receipt says that nothing was running.
+            const stopDelegation = session.rpc.get('mcode-stop-delegation');
+            expect(stopDelegation).toBeDefined();
+            const stopped = await stopDelegation!({}) as { success?: boolean; error?: string };
+            expect(stopped.success, stopped.error).toBe(true);
+        }, 180_000);
+
+        it('shows the subagents the agent really spawned', async () => {
+            // Only the agent can decide to delegate, so the prompt asks for it.
+            session.user?.({
+                role: 'user',
+                content: { type: 'text', text: 'Use the task tool to delegate this to a child agent: the child should reply with exactly DELEGATE_CHILD_OK and do nothing else. Then tell me what the child replied.' },
+            }, 'e2e-prompt-10');
+
+            // The tree the agent publishes has to reach the hub with its
+            // members in it - an empty tree proves nothing. And once it has
+            // members it must not go back to empty: after a fork the agent
+            // also publishes the fork's own (empty) tree, and that one must
+            // not clear the panel the user is watching.
+            //
+            // The assertion has to wait for the turn to be over. The agent
+            // publishes one tree per state change, so a tree that is read
+            // halfway through still looks fine.
+            await vi.waitFor(() => {
+                const answer = session.agentMessages.find((message) => JSON.stringify(message).includes('DELEGATE_CHILD_OK'));
+                expect(answer).toBeDefined();
+            }, 300_000);
+            await vi.waitFor(() => {
+                expect(session.lastKeepAlive?.thinking).not.toBe(true);
+            }, 120_000);
+
+            const snapshots = session.sessionEvents.filter((event) => event.type === 'subagent-snapshot');
+            const withMembers = snapshots.filter((event) => (event.members?.length ?? 0) > 0);
+            expect(withMembers.length).toBeGreaterThan(0);
+            const lastWithMembers = snapshots.lastIndexOf(withMembers[withMembers.length - 1]!);
+            const after = snapshots.slice(lastWithMembers);
+            expect(after.every((event) => (event.members?.length ?? 0) > 0)).toBe(true);
+        }, 600_000);
+
+        it('steers a queued message into the running turn', async () => {
+            // The steer only works while a turn is running, so the turn has to
+            // be started first - the same way a user steers into a long run.
+            session.resetToolCalls();
+            session.user?.({
+                role: 'user',
+                content: { type: 'text', text: 'Run the shell command `sleep 20` and then reply with exactly: STEER_TARGET_DONE' },
+            }, 'e2e-prompt-8');
+            await vi.waitFor(() => {
+                expect(session.toolCalls).toBeGreaterThan(0);
+            }, 180_000);
+            await vi.waitFor(() => {
+                expect(session.state.steeringActive).toBe(true);
+            }, 30_000);
+
+            // The second message waits in the queue.
+            const steerMarker = 'E2E_STEER_PAYLOAD';
+            session.user?.({
+                role: 'user',
+                content: { type: 'text', text: steerMarker },
+            }, 'e2e-steer-1');
+
+            const steer = session.rpc.get('steer-queued-message');
+            expect(steer).toBeDefined();
+            const result = await steer!({ localId: 'e2e-steer-1' }) as { steered?: boolean; error?: string };
+            expect(result.steered, result.error).toBe(true);
+
+            // The ground truth: the message went into the running turn, so it
+            // lands in the agent's own transcript.
+            const nativeSessionId = session.metadata.mcodeSessionId as string;
+            await vi.waitFor(async () => {
+                const entries = await readTranscript(nativeSessionId);
+                const text = entries.map((entry) => transcriptText(entry)).join('\n');
+                expect(text).toContain(steerMarker);
+            }, 120_000);
+        }, 300_000);
+    });
+
+    describe('the questionnaire surface', () => {
+        it('carries the questionnaire of the agent to the hub and resumes it with the answer', async () => {
+            // The agent raises the questionnaire on its own: HAPI only carries it.
+            session.user?.({
+                role: 'user',
+                content: { type: 'text', text: 'Use the ask_user tool to ask me exactly one question: what is the e2e answer token? Wait for my answer, then reply with exactly: ASK_USER_DONE' },
+            }, 'e2e-prompt-9');
+
+            // The questionnaire reached the hub as a pending request.
+            let requestId = '';
+            await vi.waitFor(() => {
+                const entry = Object.entries(session.state.requests ?? {}).find(([, request]) => request.tool === 'ask_user_question');
+                expect(entry).toBeDefined();
+                requestId = entry![0];
+            }, 240_000);
+
+            const request = session.state.requests?.[requestId];
+            const questions = (request?.arguments as { questions?: Array<{ question?: string; options?: Array<{ label?: string }> }> } | undefined)?.questions ?? [];
+            expect(questions.length).toBeGreaterThan(0);
+            expect(questions[0]?.question).toBeTruthy();
+
+            // The user answers it the way the web does: over the permission RPC.
+            const permission = session.rpc.get('permission');
+            expect(permission).toBeDefined();
+            await permission!({
+                id: requestId,
+                approved: true,
+                decision: 'approved',
+                answers: { '0': ['E2E_ASK_USER_ANSWER'] },
+            });
+
+            // The request leaves the pending map and is recorded as answered.
+            await vi.waitFor(() => {
+                expect(session.state.requests?.[requestId]).toBeUndefined();
+                expect(session.state.completedRequests?.[requestId]?.status).toBe('approved');
+            }, 30_000);
+
+            // The ground truth: the answer became a turn the agent really ran.
+            // mcode ends the questionnaire turn itself, so this only works if
+            // HAPI handed the answer back as the next user message.
+            const nativeSessionId = session.metadata.mcodeSessionId as string;
+            await vi.waitFor(async () => {
+                const entries = await readTranscript(nativeSessionId);
+                const text = entries.map((entry) => transcriptText(entry)).join('\n');
+                expect(text).toContain('E2E_ASK_USER_ANSWER');
+            }, 180_000);
+        }, 600_000);
+    });
 });
