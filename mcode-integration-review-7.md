@@ -308,6 +308,41 @@ delegation 那条测试第一版断言的是「有没有一棵带成员的树」
 居然还是绿的**。教训是两条：断言得是**性质**而不是**快照**（「一旦有成员就不能再变回空」），
 而且得等**这一轮真的跑完**再看（agent 每变一次状态发一棵树，读到一半看起来是正常的）。
 
+**七、套件被跳过时，模块级的 `process.exit` 覆盖会留在 worker 里。**
+上面第一条说「测试文件在模块级把 `process.exit` 换成空实现」——那是必须的，
+mcode 的 runner 依赖它在 runner 被调用之前就位。但 `describe.skipIf` 意味着
+`HAPI_RUN_MCODE_E2E !== '1'` 时**套件的 `afterAll` 根本不跑**，于是那个覆盖就留在了
+Vitest 的 worker 里。worker 是跨文件复用的，所以后面拿到同一个 worker 的文件里
+`process.exit` 是个空实现——**任何依赖「进程真的退出」的路径都会变成第一条那个死循环**
+（比如 launcher 在 `onReady` 之前抛错，runner 的崩溃处理要 `process.exit`）。
+表现是一条 5 秒超时，而且**每次挂的还不一样**：
+`claudeRemoteLauncher.launchFailure.test.ts` 的 launch-failure 那条和
+`mcodeRemoteLauncher.test.ts` 的 fork 那条轮流挂，单独跑又都绿——非常难查。
+现在的做法是：**覆盖照旧放在模块级，但套件被跳过时立刻还原**。
+
+**八、effort 的断言不能假设本机 agent 的模型有档位。**
+effort 那条测试第一版断言的是 `catalog.currentEffort === 'low'`。可 agent 只给
+**有档位的模型**发布档位，模型如果是「按开关思考」的那种就**一个档位都不发布**。
+这台机器上 agent 的默认模型是 `custom_provider:billion-context/MiniMax-M3.1-Flash`
+（订阅 provider `minimax` 掉了，`~/.minimax/config.yaml` 的 `defaultModel` 变成了这个），
+它不发布 `thinkingEffort` ——于是 HAPI 选的档位**落不了地**，而这不是代码 bug，是环境状态。
+断言得写成**两种世界都成立**的样子：模型有档位就断言 `currentEffort` 是用户选的那档、
+并且 hub 那边也被告知了；模型没有档位就断言**用户被明确告知了**这档落不了地
+（`cannot be set to low`）。断言的是**行为**，不是环境。模型目录那条同理：
+从「档位列表非空」改成「发布的每一项都是非空字符串」，这样有档位没档位都对。
+
+**九、孤儿进程会让「别的文件挂」看起来像代码 bug。**
+上面第七条那个空转的 worker 跑完没死干净，就留在机器上了：5 个 vitest worker，
+父进程早就没了（被 init 收养），每个还在满 CPU 空转，机器负载 18。
+症状是**别的文件挂**——`claudeRemoteLauncher.launchFailure.test.ts` 的三条 5 秒超时，
+而且**每次挂的还不一样**（另一轮是 `mcodeRemoteLauncher.test.ts` 的 fork 那条）。
+最迷惑的是：**把本次改动 stash 掉它照样挂**，看起来像既有问题。
+真凶是负载，不是代码：清掉这 5 个孤儿之后，**cli 全套 3523 条一次全绿**，
+web 套件也从 830 秒降到 262 秒。
+教训：**跑测试前先 `ps` 一下有没有自己留下的孤儿**——
+`ps -eo pid,ppid,etime,pcpu,args` 里父进程是 `systemd --user`（= init）、
+etime 以小时计、pcpu 却很高的 vitest worker，就是它们。
+
 ---
 
 ## 四、还没进 e2e 的部分
@@ -352,15 +387,21 @@ delegation 那条测试第一版断言的是「有没有一棵带成员的树」
 | 真机 e2e | **16 passed**，约 165 秒（`HAPI_RUN_MCODE_E2E=1`） |
 | launcher 单元测试文件 | 84 → **87** 条全过（新增 3 条回归：2 条 effort + 1 条 delegation 树） |
 | mcode 单元套件 | 381 → **384** 条全过（e2e 文件的 16 条默认跳过） |
-| cli 全套 | **3520 passed / 28 skipped**，零失败；另一次跑出 3 条与 mcode 无关的既有偶发失败，见下 |
+| cli 全套 | **3523 passed / 39 skipped**，零失败 |
 | web / hub / shared 全套 | 全过 |
 | typecheck | cli / web / hub / relay 全过 |
 | fixtures | `bun run gen:fixtures` 重新生成，**零漂移** |
 | 回归有效性 | 把 delegation 的修复摘掉，e2e **当场变红**（`expected false to be true`）；装回去 16/16 绿 |
 
-> 跑 cli 全套的时候撞到过三条**跟 mcode 无关**的偶发失败：
-> `src/agy/headless/agyHeadlessDriver.test.ts` 的「cancels an ID-bearing retry during the backoff」、
-> `src/codex/utils/codexTranscriptLocator.test.ts` 的「refuses fallback when fresh activity is ambiguous」、
-> `src/claude/claudeRemoteLauncher.launchFailure.test.ts` 的 launch-failure 恢复那条。
-> 前两条单独重跑是过的，第三条**把本次改动 stash 掉也一样挂**（5 秒超时）——
-> 都是既有的偶发/环境问题，不在本次范围内，记在这里备查。
+> 跑 cli 全套的时候撞到过三条 5 秒超时，全在
+> `src/claude/claudeRemoteLauncher.launchFailure.test.ts` 里。
+> **它们不是代码问题**：机器上还留着早前几轮 e2e 跑出来的 **5 个孤儿 vitest worker**
+> （父进程早死了，被 init 收养），每个都在满 CPU 空转，机器负载 18。
+> 清掉这 5 个孤儿之后，**全套 3523 条一次全绿**，那三条超时自己就没了
+> （web 套件也是同一个原因：从 830 秒降到 262 秒）。
+> 教训：**跑测试前先看机器上有没有自己留下的孤儿进程**——
+> 它们的症状（别的文件挂、5 秒超时、每次挂的还不一样）跟真的代码 bug 长得一模一样。
+>
+> 顺带一提：上面第七条那个 `process.exit` 泄漏修掉之后，全套里**原本轮流挂**的
+> `src/mcode/mcodeRemoteLauncher.test.ts` 的 fork 那条**不再挂了**——它本来就不是自己的问题，
+> 是被同一个 worker 里残留的空 `process.exit` 咬的。
