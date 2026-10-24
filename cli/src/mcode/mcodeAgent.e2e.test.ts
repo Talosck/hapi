@@ -226,9 +226,18 @@ import { acpModelIdToCliModelId } from './utils/modelId';
  * handler would re-enter itself forever when it tries to exit: every rejected
  * promise lands in the handler again, and the worker never finishes the run.
  * The runner must not end the worker here - Vitest ends the run itself.
+ *
+ * The override has to be in place before the runner is called, but a skipped
+ * suite never runs its hooks — so it is undone right away in that case.
+ * Otherwise the override would stay in the worker for the next test file
+ * that picks it up, and every path that relies on the process exiting would
+ * turn into an endless loop.
  */
 const originalProcessExit = process.exit;
 process.exit = (() => undefined) as unknown as typeof process.exit;
+if (process.env.HAPI_RUN_MCODE_E2E !== '1') {
+    process.exit = originalProcessExit;
+}
 
 /** The agent process, found by the working directory it was started in. */
 function findAgentChild(cwd: string): number | undefined {
@@ -366,7 +375,7 @@ describe.skipIf(process.env.HAPI_RUN_MCODE_E2E !== '1')('MiniMax Code end to end
                 try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
             }
         } finally {
-            process.exit = originalProcessExit;
+            if (originalProcessExit) process.exit = originalProcessExit;
         }
         await rm(home, { recursive: true, force: true });
         await rm(workingDirectory, { recursive: true, force: true });
@@ -515,8 +524,11 @@ describe.skipIf(process.env.HAPI_RUN_MCODE_E2E !== '1')('MiniMax Code end to end
             }
             expect(catalog.currentModelId).toBeTruthy();
             expect(models.some((model) => model.modelId === catalog.currentModelId)).toBe(true);
-            // The effort levels come from the agent too, not from HAPI.
-            expect((catalog.effortOptions ?? []).length).toBeGreaterThan(0);
+            // The effort levels come from the agent too, not from HAPI: the
+            // agent publishes them for the model it runs with, and a model
+            // that reasons by toggle publishes none at all.
+            const levels = (catalog.effortOptions ?? []).map((option) => option.value);
+            expect(levels.every((value) => typeof value === 'string' && value.length > 0)).toBe(true);
         });
 
         it('publishes the slash commands the agent offers', async () => {
@@ -550,9 +562,21 @@ describe.skipIf(process.env.HAPI_RUN_MCODE_E2E !== '1')('MiniMax Code end to end
                 expect(answer).toBeDefined();
             }, 180_000);
 
-            // The ground truth: the agent publishes the effort it runs with.
+            // The agent publishes the effort it runs with — but only for a
+            // model that has effort levels. MiniMax Code publishes none for a
+            // model that reasons by toggle, and then the level the user
+            // picked cannot be applied and has to be reported as such.
             const listModels = session.rpc.get('listMcodeModels');
-            const catalog = await listModels!({}) as { currentEffort?: string | null };
+            const catalog = await listModels!({}) as { currentEffort?: string | null; effortOptions?: unknown[] };
+            if ((catalog.effortOptions ?? []).length === 0) {
+                await vi.waitFor(() => {
+                    const refusal = session.sessionEvents.find((event) => {
+                        return typeof event.message === 'string' && event.message.includes('cannot be set to low');
+                    });
+                    expect(refusal).toBeDefined();
+                }, 30_000);
+                return;
+            }
             expect(catalog.currentEffort).toBe('low');
             // And the hub is told what the session runs with.
             await vi.waitFor(() => {
