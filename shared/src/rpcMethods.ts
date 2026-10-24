@@ -49,6 +49,19 @@ export const RPC_METHODS = {
     ListMcodeModels: 'listMcodeModels',
     /** List the apps connected to the machine's MiniMax Code installation. */
     ListMcodeApps: 'listMcodeApps',
+    /**
+     * Read the usage window of a MiniMax account.
+     *
+     * Its own method: the window belongs to the account, not to the catalog
+     * of connected apps, so a client that wants the usage does not have to
+     * wait for a probe of the apps - and a failed probe does not take the
+     * usage with it.
+     *
+     * The request names the credential the window is read with: the account
+     * of the MiniMax Code install, or the account of the Pi install. A Pi
+     * session reads its own account, so it needs nothing of MiniMax Code.
+     */
+    ListMinimaxQuota: 'listMinimaxQuota',
     /** Create MiniMax Code's autonomous goal for the session. */
     McodeCreateGoal: 'mcode-create-goal',
     /** Patch the goal's objective, status or token budget. */

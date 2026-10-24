@@ -112,6 +112,83 @@ describe('mcode apps route', () => {
     })
 })
 
+describe('minimax quota route', () => {
+    function createMachineApp(engine: Partial<SyncEngine>) {
+        const machine = createMachine()
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+        app.route('/api', createMachinesRoutes(() => ({
+            getMachine: () => machine,
+            ...engine
+        }) as SyncEngine))
+        return app
+    }
+
+    it('reads the usage window of the machine', async () => {
+        const calls: { machineId: string; source: string }[] = []
+        const app = createMachineApp({
+            listMinimaxQuota: (async (machineId: string, source: string) => {
+                calls.push({ machineId, source })
+                return {
+                    success: true,
+                    quota: { remainingPercent: 42, resetAtMs: 1792720800000, unlimited: false }
+                }
+            }) as SyncEngine['listMinimaxQuota']
+        })
+
+        const res = await app.request('/api/machines/machine-1/minimax-quota')
+
+        expect(res.status).toBe(200)
+        const body = await res.json() as { success: boolean; quota: { remainingPercent: number } }
+        expect(body.success).toBe(true)
+        expect(body.quota.remainingPercent).toBe(42)
+        expect(calls).toEqual([{ machineId: 'machine-1', source: 'mcode' }])
+    })
+
+    it('reads the account of the Pi install when the client asks for it', async () => {
+        // A Pi session reads the account of Pi and needs nothing of MiniMax
+        // Code, so the source of the credential is part of the question.
+        const calls: string[] = []
+        const app = createMachineApp({
+            listMinimaxQuota: (async (_machineId: string, source: string) => {
+                calls.push(source)
+                return {
+                    success: true,
+                    quota: { remainingPercent: 42, resetAtMs: 1792720800000, unlimited: false }
+                }
+            }) as SyncEngine['listMinimaxQuota']
+        })
+
+        const res = await app.request('/api/machines/machine-1/minimax-quota?source=pi')
+
+        expect(res.status).toBe(200)
+        expect(calls).toEqual(['pi'])
+    })
+
+    it('answers without a window when the account has none', async () => {
+        const app = createMachineApp({
+            listMinimaxQuota: (async () => ({ success: true, quota: null })) as SyncEngine['listMinimaxQuota']
+        })
+
+        const res = await app.request('/api/machines/machine-1/minimax-quota')
+
+        expect(res.status).toBe(200)
+        const body = await res.json() as { success: boolean; quota: unknown }
+        expect(body.success).toBe(true)
+        expect(body.quota).toBeNull()
+    })
+
+    it('returns 404 for an unknown machine', async () => {
+        const app = createMachineApp({
+            getMachine: (() => undefined) as SyncEngine['getMachine']
+        })
+
+        const res = await app.request('/api/machines/nope/minimax-quota')
+
+        expect(res.status).toBe(404)
+    })
+})
+
 describe('machines routes', () => {
     it('blocks spawn and availability inspection when the runner needs an upgrade', async () => {
         const machine = createMachine({

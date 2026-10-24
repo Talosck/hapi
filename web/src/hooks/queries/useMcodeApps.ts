@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useRef } from 'react'
 import type { ApiClient } from '@/api/client'
-import type { McodeConnectorApp, McodeConnectorAuth, McodeQuotaWindow } from '@/types/api'
+import type { McodeConnectorApp, McodeConnectorAuth } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 
 /**
@@ -53,6 +53,9 @@ const APPS_FORCE_REFRESH_GRACE_MS = 15_000
  * through the `mcode-tools` CLI. This query is the only way the web learns
  * what the agent can actually reach, which is otherwise invisible.
  *
+ * The usage of the account is not part of this answer - it is read by
+ * `useMcodeQuota`, so a probe that fails does not take the usage with it.
+ *
  * A session is asked first when there is one: the agent that runs a session
  * names its own broker, so the answer is about that agent. The machine scope
  * is the fallback for the screens where no session exists yet.
@@ -65,7 +68,6 @@ export function useMcodeApps(args: {
 }): {
     apps: McodeConnectorApp[]
     auth: McodeConnectorAuth | null
-    quota: McodeQuotaWindow | null
     isLoading: boolean
     /** Whether the agent is still starting, so there is no answer yet. */
     pending: boolean
@@ -129,7 +131,6 @@ export function useMcodeApps(args: {
     return {
         apps: query.data?.apps ?? [],
         auth: query.data?.auth ?? null,
-        quota: query.data?.quota ?? null,
         isLoading: query.isLoading,
         pending,
         error: pending

@@ -992,28 +992,10 @@ export type McodeConnectorAuth = {
     expiresAt: number | null
 }
 
-/**
- * One window of the account's usage quota.
- *
- * The coding models share a five hour window, and that is the one the panel
- * shows - the weekly and the video windows are not interesting enough to put
- * in front of the user.
- */
-export type McodeQuotaWindow = {
-    /** How much of the window is left, in percent. `null` when the account does not say. */
-    remainingPercent: number | null
-    /** When the window resets, in epoch milliseconds. */
-    resetAtMs: number | null
-    /** Whether the window has no limit at all. */
-    unlimited: boolean
-}
-
 export type McodeAppsResponse = {
     success: boolean
     apps?: McodeConnectorApp[]
     auth?: McodeConnectorAuth
-    /** The usage the account has left. Missing when it could not be read. */
-    quota?: McodeQuotaWindow | null
     /**
      * Whether the answer is not ready yet.
      *
@@ -1023,6 +1005,60 @@ export type McodeAppsResponse = {
      */
     pending?: boolean
     error?: string
+}
+
+/**
+ * One window of a MiniMax account's usage.
+ *
+ * The window belongs to the account, not to an agent: MiniMax Code and Pi
+ * spend the same kind of account, and each of them reaches it with the
+ * credential it owns.
+ */
+export type MinimaxQuotaWindow = {
+    /** How much of the window is left, in percent. `null` when the account does not say. */
+    remainingPercent: number | null
+    /** When the window resets, in epoch milliseconds. */
+    resetAtMs: number | null
+    /** Whether the window has no limit at all. */
+    unlimited: boolean
+}
+
+/**
+ * Which credential of the machine the window is read with.
+ *
+ * `mcode` is the account of the MiniMax Code install, `pi` the account of the
+ * Pi install. A Pi session reads its own account, so it needs nothing of
+ * MiniMax Code - not its binary, not its install, not its credential.
+ */
+export type MinimaxQuotaSource = 'mcode' | 'pi'
+
+/**
+ * The usage the MiniMax account has left.
+ *
+ * Its own answer, apart from the catalog of connected apps: the window
+ * belongs to the account, so a client that watches the usage does not have to
+ * pay for a probe of the apps - and a probe that fails does not take the
+ * usage with it.
+ */
+export type MinimaxQuotaResponse = {
+    success: boolean
+    /**
+     * The window the account has left.
+     *
+     * Missing when the account has no window at all, and when the window
+     * could not be read. A client shows nothing for a missing window - the
+     * account is not spending a window.
+     */
+    quota?: MinimaxQuotaWindow | null
+    error?: string
+}
+
+/**
+ * What a client asks for when it reads the usage window.
+ */
+export type MinimaxQuotaRequest = {
+    /** Which credential of the machine the window is read with. */
+    source: MinimaxQuotaSource
 }
 
 /**

@@ -8,6 +8,7 @@ import {
 } from '@hapi/protocol'
 import { Hono } from 'hono'
 import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
+import type { MinimaxQuotaSource } from '@hapi/protocol/apiTypes'
 import type { SyncEngine } from '../../sync/syncEngine'
 import { RpcTargetMissingError } from '../../sync/rpcGateway'
 import type { WebAppEnv } from '../middleware/auth'
@@ -413,6 +414,40 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list the MiniMax Code apps'
+            }, 500)
+        }
+    })
+
+    /**
+     * The usage window of a MiniMax account of the machine.
+     *
+     * The window belongs to the account, so the machine answers it: the same
+     * answer for every session of the machine, and it does not depend on the
+     * catalog of connected apps.
+     *
+     * The source names the credential the window is read with: the account of
+     * the MiniMax Code install, or the account of the Pi install. A client
+     * that watches the window of a Pi session asks for `pi`, and needs
+     * nothing of MiniMax Code.
+     */
+    app.get('/machines/:id/minimax-quota', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not connected' }, 503)
+        }
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) return machine
+
+        const requested = c.req.query('source')
+        const source: MinimaxQuotaSource = requested === 'pi' ? 'pi' : 'mcode'
+        try {
+            return c.json(await engine.listMinimaxQuota(machineId, source))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to read the MiniMax usage window'
             }, 500)
         }
     })

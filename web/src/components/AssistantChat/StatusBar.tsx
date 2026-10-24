@@ -7,10 +7,9 @@ import {
 import type { PermissionModeTone } from '@hapi/protocol'
 import * as Popover from '@radix-ui/react-popover'
 import { useEffect, useMemo, useState } from 'react'
-import type { AgentState, CodexCollaborationMode, McodeQuotaWindow, PermissionMode } from '@/types/api'
+import type { AgentState, CodexCollaborationMode, MinimaxQuotaWindow, PermissionMode } from '@/types/api'
 import type { ConversationStatus } from '@/realtime/types'
 import { getContextBudgetTokens } from '@/chat/modelConfig'
-import { formatDuration } from '@/chat/presentation'
 import { permissionModeLabelForAgent } from '@/lib/permissionModeLabels'
 import {
     formatReasoningLabel,
@@ -50,6 +49,15 @@ const PERMISSION_TONE_CLASSES: Record<PermissionModeTone, string> = {
 
 const CONTEXT_WARNING_THRESHOLD_PERCENT = 70
 const CONTEXT_DANGER_THRESHOLD_PERCENT = 90
+
+/**
+ * The share of the account's five hour window that still counts as room.
+ *
+ * Below it the window is on its way out, so the label warns and the time to
+ * the reset joins it.
+ */
+const QUOTA_WARNING_PERCENT = 40
+const QUOTA_DANGER_PERCENT = 20
 
 function getConnectionStatus(
     active: boolean,
@@ -213,11 +221,33 @@ export function shouldShowCodexFastBadge(
  *
  * Short on purpose: it sits next to the context usage, which is short too.
  * The agent words it the same way.
+ *
+ * A window that is running low is the moment the time to the reset matters:
+ * the share says how much is left, the countdown says when there is more. A
+ * window with room to spare keeps the short label.
  */
-export function formatQuotaLabel(quota: McodeQuotaWindow): string {
+export function formatQuotaLabel(quota: MinimaxQuotaWindow, now: number = Date.now()): string {
     if (quota.unlimited) return '5h ∞'
     if (quota.remainingPercent === null) return '5h —'
-    return `5h ${quota.remainingPercent}%`
+    const label = `5h ${quota.remainingPercent}%`
+    if (quota.remainingPercent > QUOTA_WARNING_PERCENT) return label
+    const left = quota.resetAtMs === null ? null : quota.resetAtMs - now
+    if (left === null || left <= 0) return label
+    return `${label} · ${formatQuotaCountdown(left)}`
+}
+
+/**
+ * The time left until the window resets.
+ *
+ * The agent counts the same way: minutes below an hour, then hours and
+ * minutes, then days and hours. The seconds are left out on purpose - the
+ * countdown is read at a glance, and a ticking second is noise there.
+ */
+export function formatQuotaCountdown(ms: number): string {
+    const minutes = Math.ceil(ms / 60_000)
+    if (minutes < 60) return `${minutes}m`
+    if (minutes < 1440) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+    return `${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h`
 }
 
 /**
@@ -228,8 +258,8 @@ export function formatQuotaLabel(quota: McodeQuotaWindow): string {
  */
 export function getQuotaWarning(remainingPercent: number | null): { color: string } {
     if (remainingPercent === null) return { color: 'text-[var(--app-hint)]' }
-    if (remainingPercent <= 20) return { color: 'text-red-500' }
-    if (remainingPercent <= 40) return { color: 'text-amber-500' }
+    if (remainingPercent <= QUOTA_DANGER_PERCENT) return { color: 'text-red-500' }
+    if (remainingPercent <= QUOTA_WARNING_PERCENT) return { color: 'text-amber-500' }
     return { color: 'text-[var(--app-hint)]' }
 }
 
@@ -242,15 +272,10 @@ export function getQuotaWarning(remainingPercent: number | null): { color: strin
  * The chip itself stays English (`5h 42%`), but the popover speaks the
  * reader's language, the same way the context popover does.
  */
-function QuotaDetails(props: { quota: McodeQuotaWindow }) {
+function QuotaDetails(props: { quota: MinimaxQuotaWindow; now: number }) {
     const { t } = useTranslation()
-    const [now, setNow] = useState(() => Date.now())
-    useEffect(() => {
-        const timer = window.setInterval(() => setNow(Date.now()), 30_000)
-        return () => window.clearInterval(timer)
-    }, [])
 
-    const left = props.quota.resetAtMs === null ? null : props.quota.resetAtMs - now
+    const left = props.quota.resetAtMs === null ? null : props.quota.resetAtMs - props.now
 
     return (
         <div className="flex max-w-[min(22rem,calc(100vw-1rem))] flex-col gap-1 text-xs leading-tight text-[var(--app-fg)]">
@@ -265,7 +290,7 @@ function QuotaDetails(props: { quota: McodeQuotaWindow }) {
                 <span className="break-words">
                     {left <= 0
                         ? t('misc.quotaResetPending')
-                        : t('misc.quotaResetsIn', { duration: formatDuration(left) })}
+                        : t('misc.quotaResetsIn', { duration: formatQuotaCountdown(left) })}
                 </span>
             ) : null}
         </div>
@@ -302,7 +327,7 @@ export function StatusBar(props: {
      * Shown next to the context usage: both are "how much room is left", and
      * the agent shows its own the same way.
      */
-    quota?: McodeQuotaWindow | null
+    quota?: MinimaxQuotaWindow | null
 }) {
     const { t } = useTranslation()
     const { preferences: headerMetadata } = useSessionHeaderMetadata()
@@ -310,6 +335,23 @@ export function StatusBar(props: {
         () => getConnectionStatus(props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount ?? 0, t),
         [props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount, t]
     )
+
+    /**
+     * The clock the countdowns are read against.
+     *
+     * The window resets at a moment, so the time left to it moves on its own.
+     * The clock only ticks while there is a reset to count down to.
+     */
+    const [now, setNow] = useState(() => Date.now())
+    const quotaResetAtMs = props.quota?.resetAtMs ?? null
+    useEffect(() => {
+        if (quotaResetAtMs === null) return
+        // The window usually arrives long after the bar was mounted, so the
+        // clock is read again as soon as there is a reset to count down to.
+        setNow(Date.now())
+        const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+        return () => window.clearInterval(timer)
+    }, [quotaResetAtMs])
 
     const contextHeuristicModel = props.contextModel ?? props.model
     // The window the session is measured against. The agent reports it once a
@@ -403,8 +445,28 @@ export function StatusBar(props: {
         ? formatCompactReasoningLabel(reasoningEffort)
         : null
     const codexFastMode = shouldShowCodexFastBadge(props.agentFlavor, props.serviceTier)
-    const quotaLabel = props.quota ? formatQuotaLabel(props.quota) : null
+    const quotaLabel = props.quota ? formatQuotaLabel(props.quota, now) : null
     const quotaColor = props.quota ? getQuotaWarning(props.quota.remainingPercent).color : null
+    /**
+     * The window in a sentence, for the pointer that hovers the chip.
+     *
+     * The chip itself stays short - it shares the row with the context usage
+     * - so the numbers that do not fit in it are one hover away.
+     */
+    const quotaDescription = useMemo(() => {
+        if (!props.quota) return null
+        const share = props.quota.unlimited
+            ? t('misc.quotaUnlimited')
+            : props.quota.remainingPercent !== null
+                ? t('misc.quotaRemaining', { percent: props.quota.remainingPercent })
+                : t('misc.quotaUnknown')
+        if (props.quota.resetAtMs === null) return share
+        const left = props.quota.resetAtMs - now
+        const reset = left <= 0
+            ? t('misc.quotaResetPending')
+            : t('misc.quotaResetsIn', { duration: formatQuotaCountdown(left) })
+        return `${share} · ${reset}`
+    }, [props.quota, now, t])
 
     return (
         <div className="flex min-w-0 items-baseline justify-between gap-2 px-2 pb-1">
@@ -497,6 +559,7 @@ export function StatusBar(props: {
                             <button
                                 type="button"
                                 aria-label={t('misc.quotaDetails')}
+                                title={quotaDescription ?? undefined}
                                 className={`min-w-0 cursor-pointer whitespace-nowrap rounded-sm bg-transparent p-0 text-[10px] leading-4 outline-none focus-visible:ring-1 focus-visible:ring-[var(--app-link)] ${quotaColor}`}
                             >
                                 {quotaLabel}
@@ -510,7 +573,7 @@ export function StatusBar(props: {
                                 collisionPadding={8}
                                 className="z-50 rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 shadow-lg"
                             >
-                                <QuotaDetails quota={props.quota} />
+                                <QuotaDetails quota={props.quota} now={now} />
                             </Popover.Content>
                         </Popover.Portal>
                     </Popover.Root>

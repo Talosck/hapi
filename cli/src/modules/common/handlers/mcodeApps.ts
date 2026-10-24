@@ -4,7 +4,6 @@ import type { McodeAppsResponse, McodeAppsRequest } from '@hapi/protocol/apiType
 import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager'
 import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand'
 import { listMcodeConnectorApps } from '@/mcode/utils/mcodeConnectorTools'
-import { listMcodeTokenPlanQuota } from '@/mcode/utils/mcodeTokenPlanQuota'
 import { getErrorMessage, rpcError } from '../rpcResponses'
 
 /**
@@ -13,6 +12,11 @@ import { getErrorMessage, rpcError } from '../rpcResponses'
  *
  * The connector tools are not part of the ACP surface, so this is the only
  * way an external client learns which apps the agent can reach.
+ *
+ * The usage of the account is not part of this answer: it is read by its own
+ * handler, so a client that watches the usage does not have to wait for the
+ * probe of the apps - and a probe that fails does not take the usage with
+ * it.
  */
 export function registerMcodeAppHandlers(rpcHandlerManager: RpcHandlerManager): void {
     rpcHandlerManager.registerHandler<McodeAppsRequest, McodeAppsResponse>(
@@ -26,11 +30,6 @@ export function registerMcodeAppHandlers(rpcHandlerManager: RpcHandlerManager): 
                     // catalog of the last few minutes.
                     forceRefresh: payload?.forceRefresh === true
                 })
-                // The usage of the account is read on its own: a host that
-                // cannot hand out a lease must not cost the user the list of
-                // the apps. A usage that could not be read is simply missing
-                // - the reason is in the log.
-                const usage = await listMcodeTokenPlanQuota()
                 if (catalog.error) {
                     // A pending answer is not a failure: the agent of the
                     // session is still starting, and the client asks again.
@@ -42,7 +41,7 @@ export function registerMcodeAppHandlers(rpcHandlerManager: RpcHandlerManager): 
                         error: catalog.error
                     }
                 }
-                return { success: true, auth: catalog.auth, apps: catalog.apps, quota: usage.quota }
+                return { success: true, auth: catalog.auth, apps: catalog.apps }
             } catch (error) {
                 logger.debug('Failed to list the MiniMax Code apps:', error)
                 return rpcError(getErrorMessage(error, 'Failed to list the MiniMax Code apps'))

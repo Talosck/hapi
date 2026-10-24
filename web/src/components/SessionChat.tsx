@@ -118,6 +118,7 @@ import { useCopilotModels } from '@/hooks/queries/useCopilotModels'
 import { useKimiModelsForSession } from '@/hooks/queries/useKimiModelsForSession'
 import { useMcodeModelsForSession } from '@/hooks/queries/useMcodeModelsForSession'
 import { useMcodeApps } from '@/hooks/queries/useMcodeApps'
+import { useMinimaxQuota } from '@/hooks/queries/useMinimaxQuota'
 import { buildKimiSessionModelOptions } from '@/components/NewSession/grokModels'
 import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
 import { usePiModels } from '@/hooks/queries/usePiModels'
@@ -189,11 +190,12 @@ export async function invalidateModelOptions(
 /**
  * Whether a session spends the MiniMax account.
  *
- * The five hour window belongs to the account, not to the agent: MiniMax Code
- * only ever talks to MiniMax, and a Pi session spends the very same account
- * when it runs on a MiniMax model. Pi can talk to many providers, and only
- * the MiniMax ones share the coding plan - so a Pi session on another
- * provider must not show the account's usage.
+ * The five hour window belongs to the account of the installation - the one
+ * MiniMax Code is logged into - and not to an agent. A session that runs on a
+ * MiniMax model spends a MiniMax account, so the window of the install is
+ * the one worth showing. Pi can talk to many providers, and only the
+ * MiniMax ones are worth it - so a Pi session on another provider must not
+ * show the window.
  */
 export function spendsMiniMaxAccount(
     flavor: string | null | undefined,
@@ -1559,15 +1561,13 @@ function SessionChatInner(props: SessionChatProps) {
         // The session scope is the exact one for a MiniMax Code session: the
         // agent that runs it names its own broker, so the list is about that
         // agent and not about whichever MiniMax Code host the machine happens
-        // to run. A session that is not a MiniMax Code one has no agent of
-        // its own, so it keeps the machine scope - that is where the account
-        // usage below comes from.
+        // to run.
         sessionId: agentFlavor === 'mcode' ? props.session.id : null,
-        // The usage of the MiniMax account is machine level: a Pi session
-        // that runs on a MiniMax model spends the same account as MiniMax
-        // Code does. The apps below stay MiniMax Code's own, so a Pi session
-        // on another provider has nothing to ask for.
-        enabled: spendsMiniMaxAccount(agentFlavor, piSelectedModel?.provider, props.session.model)
+        // The connected apps are MiniMax Code's own, so only a MiniMax Code
+        // session has any of them to show. The usage of the account is a
+        // different question - it is machine level, and it is read by its own
+        // query below.
+        enabled: agentFlavor === 'mcode'
     })
 
     // Only an MiniMax Code session has apps to report, and only a machine
@@ -1596,20 +1596,16 @@ function SessionChatInner(props: SessionChatProps) {
      * Shown where the account is actually spent: every MiniMax Code session,
      * and a Pi session that runs on a MiniMax model. It rides along with the
      * context usage in the status bar.
+     *
+     * The read is its own: the window belongs to the account, so it does not
+     * wait for the catalog of connected apps - and a probe that fails does
+     * not take the usage with it.
      */
-    const miniMaxUsageState = useMemo(() => {
-        if (!spendsMiniMaxAccount(agentFlavor, piSelectedModel?.provider, props.session.model)) return null
-        if (mcodeApps.isLoading) return null
-        return {
-            quota: mcodeApps.quota
-        }
-    }, [
-        agentFlavor,
-        piSelectedModel?.provider,
-        props.session.model,
-        mcodeApps.isLoading,
-        mcodeApps.quota
-    ])
+    const minimaxQuota = useMinimaxQuota({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: spendsMiniMaxAccount(agentFlavor, piSelectedModel?.provider, props.session.model)
+    })
 
     const sessionStatus = useMemo(
         () => buildSessionStatusData({
@@ -2360,7 +2356,7 @@ function SessionChatInner(props: SessionChatProps) {
                         contextCacheRead={reduced.latestUsage?.cacheRead}
                         contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}
                         contextModel={reduced.latestUsage?.model ?? props.session.model}
-                        quota={miniMaxUsageState?.quota ?? null}
+                        quota={minimaxQuota.quota}
                         controlledByUser={controlledByUser}
                         onCollaborationModeChange={
                             codexCollaborationModeSupported && props.session.active && !controlledByUser

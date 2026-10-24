@@ -31,7 +31,7 @@ import {
 } from '@/components/AssistantChat/RichComposerInput'
 import { useFue } from '@/lib/use-fue'
 import { FueCallout, FueDot } from '@/components/Fue'
-import type { AgentState, CodexCollaborationMode, McodeQuotaWindow, PermissionMode, PiModelSummary } from '@/types/api'
+import type { AgentState, CodexCollaborationMode, MinimaxQuotaWindow, PermissionMode, PiModelSummary } from '@/types/api'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import type { ConversationStatus } from '@/realtime/types'
 import { useActiveWord } from '@/hooks/useActiveWord'
@@ -310,7 +310,7 @@ export function HappyComposer(props: {
     /** Model for the context-window heuristic; see StatusBar.contextModel. */
     contextModel?: string | null
     /** What is left of the account's five hour window; see StatusBar.quota. */
-    quota?: McodeQuotaWindow | null
+    quota?: MinimaxQuotaWindow | null
     controlledByUser?: boolean
     concurrentClients?: boolean
     agentFlavor?: string | null

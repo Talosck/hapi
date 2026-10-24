@@ -26,6 +26,8 @@ import type {
     KimiModelsResponse,
     McodeModelsResponse,
     McodeAppsResponse,
+    MinimaxQuotaResponse,
+    MinimaxQuotaSource,
     McodeGoalClearResponse,
     McodeGoalResponse,
     McodeDelegationStopResponse,
@@ -580,6 +582,27 @@ export class RpcGateway {
             { forceRefresh: options?.forceRefresh === true },
             MODEL_LIST_RPC_TIMEOUT_MS
         ) as McodeAppsResponse
+    }
+
+    /**
+     * Reads the usage window of a MiniMax account.
+     *
+     * The machine scope is the right one: the window belongs to the account
+     * of the installation, so every session of the machine reads the same
+     * answer - and the answer is still there when the agent of a session is
+     * gone.
+     *
+     * The source names the credential the window is read with: the account of
+     * the MiniMax Code install, or the account of the Pi install. A Pi
+     * session reads the latter and needs nothing of MiniMax Code.
+     */
+    async listMinimaxQuota(machineId: string, source: MinimaxQuotaSource): Promise<MinimaxQuotaResponse> {
+        return await this.machineRpc(
+            machineId,
+            RPC_METHODS.ListMinimaxQuota,
+            { source },
+            MODEL_LIST_RPC_TIMEOUT_MS
+        ) as MinimaxQuotaResponse
     }
 
     /**

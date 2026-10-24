@@ -3,6 +3,7 @@ import {
     formatCompactContextUsageLabel,
     formatContextUsageLabel,
     formatContextWindowLabel,
+    formatQuotaCountdown,
     formatQuotaLabel,
     getContextWarning,
     getContextUsageDetails,
@@ -24,6 +25,54 @@ describe('quota label', () => {
     it('has a placeholder for a window the account does not report', () => {
         expect(formatQuotaLabel({ remainingPercent: null, resetAtMs: null, unlimited: false }))
             .toBe('5h —')
+    })
+
+    it('keeps the short label while the window has room to spare', () => {
+        // The chip shares the row with the context usage, so a window that is
+        // not running low stays a number and nothing more.
+        const now = 1792710000000
+        expect(formatQuotaLabel(
+            { remainingPercent: 98, resetAtMs: now + 3 * 3_600_000, unlimited: false },
+            now
+        )).toBe('5h 98%')
+    })
+
+    it('counts down to the reset while the window runs low', () => {
+        // A window that is running out is the moment the time to the reset
+        // matters: the share says how much is left, the countdown says when
+        // there is more.
+        const now = 1792710000000
+        expect(formatQuotaLabel(
+            { remainingPercent: 12, resetAtMs: now + 26 * 60_000, unlimited: false },
+            now
+        )).toBe('5h 12% · 26m')
+    })
+
+    it('has no countdown when the window does not say when it resets', () => {
+        const now = 1792710000000
+        expect(formatQuotaLabel(
+            { remainingPercent: 12, resetAtMs: null, unlimited: false },
+            now
+        )).toBe('5h 12%')
+    })
+
+    it('has no countdown once the reset has passed', () => {
+        const now = 1792710000000
+        expect(formatQuotaLabel(
+            { remainingPercent: 12, resetAtMs: now - 1, unlimited: false },
+            now
+        )).toBe('5h 12%')
+    })
+})
+
+describe('quota countdown', () => {
+    it('counts in minutes below an hour, then in hours and days', () => {
+        // The agent counts the same way, and leaves the seconds out: the
+        // countdown is read at a glance.
+        expect(formatQuotaCountdown(30_000)).toBe('1m')
+        expect(formatQuotaCountdown(26 * 60_000)).toBe('26m')
+        expect(formatQuotaCountdown(3 * 3_600_000 + 12 * 60_000)).toBe('3h 12m')
+        expect(formatQuotaCountdown(2 * 86_400_000 + 3 * 3_600_000)).toBe('2d 3h')
     })
 })
 

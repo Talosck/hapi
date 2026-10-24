@@ -45,6 +45,8 @@ import type {
     KimiModelsResponse,
     McodeModelsResponse,
     McodeAppsResponse,
+    MinimaxQuotaResponse,
+    MinimaxQuotaSource,
     McodeGoalResponse,
     McodeGoalClearResponse,
     McodeDelegationStopResponse,
@@ -1216,6 +1218,30 @@ export class ApiClient {
         const query = options?.forceRefresh ? '?forceRefresh=1' : ''
         return await this.request<McodeAppsResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/mcode-apps${query}`
+        )
+    }
+
+    /**
+     * The usage window of a MiniMax account of the machine.
+     *
+     * The source names the credential the window is read with: the account of
+     * the MiniMax Code install, or the account of the Pi install.
+     */
+    async getMachineMinimaxQuota(machineId: string, source: MinimaxQuotaSource = 'mcode'): Promise<MinimaxQuotaResponse> {
+        return await this.request<MinimaxQuotaResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/minimax-quota?source=${encodeURIComponent(source)}`
+        )
+    }
+
+    /**
+     * The usage window of the MiniMax account the session spends.
+     *
+     * The session decides which account is read: a Pi session reads the
+     * account of the Pi install and needs nothing of MiniMax Code.
+     */
+    async getSessionMinimaxQuota(sessionId: string): Promise<MinimaxQuotaResponse> {
+        return await this.request<MinimaxQuotaResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/minimax-quota`
         )
     }
 

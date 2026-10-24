@@ -30,7 +30,7 @@ import {
 } from '@hapi/protocol'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { ZodError } from 'zod'
-import type { SlashCommand } from '@hapi/protocol/apiTypes'
+import type { SlashCommand, MinimaxQuotaSource } from '@hapi/protocol/apiTypes'
 import { Hono, type Context } from 'hono'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
@@ -1615,6 +1615,38 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list the MiniMax Code apps'
+            }, 500)
+        }
+    })
+
+    /**
+     * The usage window of the MiniMax account the session spends.
+     *
+     * The window belongs to the account, so the machine answers it - the same
+     * answer for every session of the machine, and one that is still there
+     * when the agent of a session is gone.
+     *
+     * The credential the window is read with follows the session: a Pi
+     * session reads the account of the Pi install and needs nothing of
+     * MiniMax Code, a MiniMax Code session reads the account of its own
+     * install.
+     */
+    app.get('/sessions/:id/minimax-quota', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) return sessionResult
+        const machineId = sessionResult.session.metadata?.machineId
+        if (!machineId) {
+            return c.json({ success: false, error: 'The machine of this session is unknown' }, 409)
+        }
+        const source: MinimaxQuotaSource = sessionResult.session.metadata?.flavor === 'pi' ? 'pi' : 'mcode'
+        try {
+            return c.json(await engine.listMinimaxQuota(machineId, source))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to read the MiniMax usage window'
             }, 500)
         }
     })

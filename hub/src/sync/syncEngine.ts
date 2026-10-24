@@ -12,7 +12,7 @@ import {
     cliBinaryUpdatedOnDisk,
     isMachineCapabilitySkewed,
 } from '@hapi/protocol/runnerCapabilities'
-import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, McodeAppsResponse, McodeDelegationStopResponse, McodeGoalClearResponse, McodeGoalResponse, QueuedStateResponse, RewindConversationErrorCode, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, McodeAppsResponse, McodeDelegationStopResponse, McodeGoalClearResponse, McodeGoalResponse, MinimaxQuotaResponse, MinimaxQuotaSource, QueuedStateResponse, RewindConversationErrorCode, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
 import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { ImplementCodexPlanResult } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
@@ -4423,6 +4423,20 @@ export class SyncEngine {
 
     async listMcodeModelsForSession(sessionId: string): Promise<RpcListMcodeModelsResponse> {
         return await this.rpcGateway.listMcodeModelsForSession(sessionId)
+    }
+
+    /**
+     * Reads the usage window of a MiniMax account.
+     *
+     * The machine scope is the right one: the window belongs to the account
+     * of the installation, so it is the same answer for every session of the
+     * machine - and it is still there when the agent of a session is gone.
+     *
+     * The source names the credential the window is read with: the account of
+     * the MiniMax Code install, or the account of the Pi install.
+     */
+    async listMinimaxQuota(machineId: string, source: MinimaxQuotaSource): Promise<MinimaxQuotaResponse> {
+        return await this.rpcGateway.listMinimaxQuota(machineId, source)
     }
 
     /** Creates MiniMax Code's autonomous goal for the session. */

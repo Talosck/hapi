@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
     _resetMcodeTokenPlanQuotaCacheForTests,
-    listMcodeTokenPlanQuota,
-    parseFiveHourQuota
+    listMcodeTokenPlanQuota
 } from './mcodeTokenPlanQuota'
+import { parseFiveHourQuota } from '@/minimax/planQuota'
 
 const BROKER = { endpoint: '/tmp/mcode-auth-lease-v1.sock', capabilityFile: '/tmp/mcode-auth-lease-v1.cap' }
 
@@ -109,7 +109,76 @@ describe('listMcodeTokenPlanQuota', () => {
     })
 
     it('says so when no host is running on the machine', async () => {
-        const result = await listMcodeTokenPlanQuota({ brokers: [] })
+        const result = await listMcodeTokenPlanQuota({ brokers: [], storedCredentials: [] })
+
+        expect(result.quota).toBeNull()
+        expect(result.error).toContain('No MiniMax Code host')
+    })
+
+    it('reads the window of the install when no host is running', async () => {
+        // The install keeps the credential of the account it is logged into,
+        // so the window is there on a machine where nothing of MiniMax Code
+        // runs - a Pi session on a machine without a host still shows it.
+        const asked: { token: string; base: string }[] = []
+        const result = await listMcodeTokenPlanQuota({
+            brokers: [],
+            storedCredentials: [{ region: 'cn', accessToken: 'stored-token', expiresAtMs: 1792724400000 }],
+            fetchQuota: async (token, base) => {
+                asked.push({ token, base })
+                return PAYLOAD
+            }
+        })
+
+        expect(asked).toEqual([{ token: 'stored-token', base: 'https://www.minimaxi.com' }])
+        expect(result.quota).toEqual({
+            remainingPercent: 98,
+            resetAtMs: 1792720800000,
+            unlimited: false
+        })
+        // The credential of the account is spent on one request and dropped:
+        // it may not end up in a result that travels to the hub and into the
+        // browser.
+        expect(JSON.stringify(result)).not.toContain('stored-token')
+    })
+
+    it('asks the region of the account it reads', async () => {
+        const bases: string[] = []
+        await listMcodeTokenPlanQuota({
+            brokers: [],
+            storedCredentials: [{ region: 'en', accessToken: 'stored-token', expiresAtMs: 1792724400000 }],
+            fetchQuota: async (_token, base) => {
+                bases.push(base)
+                return PAYLOAD
+            }
+        })
+
+        expect(bases).toEqual(['https://platform.minimax.io'])
+    })
+
+    it('prefers the running host over the credential of the install', async () => {
+        // The host knows the account that is in use right now, and it keeps
+        // the token fresh - so it is asked first.
+        const asked: string[] = []
+        await listMcodeTokenPlanQuota({
+            brokers: [BROKER],
+            region: 'cn',
+            requestLease: async () => 'lease-token',
+            storedCredentials: [{ region: 'cn', accessToken: 'stored-token', expiresAtMs: 1792724400000 }],
+            fetchQuota: async (token) => {
+                asked.push(token)
+                return PAYLOAD
+            }
+        })
+
+        expect(asked).toEqual(['lease-token'])
+    })
+
+    it('has no window when the account of the install has no valid token', async () => {
+        const result = await listMcodeTokenPlanQuota({
+            brokers: [],
+            storedCredentials: [],
+            fetchQuota: async () => PAYLOAD
+        })
 
         expect(result.quota).toBeNull()
         expect(result.error).toContain('No MiniMax Code host')

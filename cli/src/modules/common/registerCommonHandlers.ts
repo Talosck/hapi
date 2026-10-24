@@ -11,6 +11,7 @@ import { registerCopilotModelHandlers } from './handlers/copilotModels'
 import { registerKimiModelHandlers } from './handlers/kimiModels'
 import { registerMcodeModelHandlers } from './handlers/mcodeModels'
 import { registerMcodeAppHandlers } from './handlers/mcodeApps'
+import { registerMinimaxQuotaHandler } from './handlers/minimaxQuota'
 import { registerDirectoryHandlers } from './handlers/directories'
 import { registerDifftasticHandlers } from './handlers/difftastic'
 import { registerFileHandlers } from './handlers/files'
@@ -33,6 +34,7 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
     registerKimiModelHandlers(rpcHandlerManager)
     registerMcodeModelHandlers(rpcHandlerManager)
     registerMcodeAppHandlers(rpcHandlerManager)
+    registerMinimaxQuotaHandler(rpcHandlerManager)
     registerFileHandlers(rpcHandlerManager, workingDirectory)
     registerDirectoryHandlers(rpcHandlerManager, workingDirectory)
     registerRipgrepHandlers(rpcHandlerManager, workingDirectory)

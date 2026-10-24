@@ -79,6 +79,7 @@ function createApp(session: Session, opts?: {
     stopMcodeDelegation?: SyncEngine['stopMcodeDelegation']
     listMcodeApps?: SyncEngine['listMcodeApps']
     listMcodeAppsForSession?: SyncEngine['listMcodeAppsForSession']
+    listMinimaxQuota?: SyncEngine['listMinimaxQuota']
 }) {
     const applySessionConfigCalls: Array<[string, Record<string, unknown>]> = []
     const applySessionConfig = async (sessionId: string, config: Record<string, unknown>) => {
@@ -200,6 +201,10 @@ function createApp(session: Session, opts?: {
             success: true,
             apps: [],
             auth: { status: 'authenticated', authMode: 'shared-broker', scope: null, expiresAt: null }
+        })),
+        listMinimaxQuota: opts?.listMinimaxQuota ?? (async () => ({
+            success: true,
+            quota: { remainingPercent: 42, resetAtMs: 1792720800000, unlimited: false }
         }))
     } as Partial<SyncEngine>
     const app = new Hono<WebAppEnv>()
@@ -317,6 +322,64 @@ describe('mcode connected apps route', () => {
         expect(res.status).toBe(200)
         expect(machineCalls).toEqual([['machine-1', { forceRefresh: false }]])
         expect(sessionCalls).toEqual([])
+    })
+})
+
+describe('minimax quota route', () => {
+    it('reads the account of the MiniMax Code install for a MiniMax Code session', async () => {
+        const calls: { machineId: string; source: string }[] = []
+        const session = createSession({
+            metadata: { path: '/tmp', host: 'test', flavor: 'mcode', machineId: 'machine-1' }
+        })
+        const { app } = createApp(session, {
+            listMinimaxQuota: (async (machineId: string, source: string) => {
+                calls.push({ machineId, source })
+                return {
+                    success: true,
+                    quota: { remainingPercent: 42, resetAtMs: 1792720800000, unlimited: false }
+                }
+            }) as SyncEngine['listMinimaxQuota']
+        })
+
+        const res = await app.request('/api/sessions/session-1/minimax-quota')
+
+        expect(res.status).toBe(200)
+        const body = await res.json() as { success: boolean; quota: { remainingPercent: number } }
+        expect(body.success).toBe(true)
+        expect(body.quota.remainingPercent).toBe(42)
+        expect(calls).toEqual([{ machineId: 'machine-1', source: 'mcode' }])
+    })
+
+    it('reads the account of the Pi install for a Pi session', async () => {
+        // A Pi session reads the account of Pi: nothing of MiniMax Code is
+        // involved, not its binary, not its install, not its credential.
+        const calls: string[] = []
+        const session = createSession({
+            metadata: { path: '/tmp', host: 'test', flavor: 'pi', machineId: 'machine-1' }
+        })
+        const { app } = createApp(session, {
+            listMinimaxQuota: (async (_machineId: string, source: string) => {
+                calls.push(source)
+                return {
+                    success: true,
+                    quota: { remainingPercent: 42, resetAtMs: 1792720800000, unlimited: false }
+                }
+            }) as SyncEngine['listMinimaxQuota']
+        })
+
+        const res = await app.request('/api/sessions/session-1/minimax-quota')
+
+        expect(res.status).toBe(200)
+        expect(calls).toEqual(['pi'])
+    })
+
+    it('answers for a session whose machine is unknown', async () => {
+        const session = createSession({ metadata: { path: '/tmp', host: 'test', flavor: 'mcode' } })
+        const { app } = createApp(session)
+
+        const res = await app.request('/api/sessions/session-1/minimax-quota')
+
+        expect(res.status).toBe(409)
     })
 })
 
