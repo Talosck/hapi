@@ -12,8 +12,10 @@
 ## 一句话结论
 
 **补一个真机 e2e：`mcode acp` 是真进程、真的模型调用、真的会话文件，只有 hub 换成录影机替身。**
-它当场验出两条只有真机才看得见的东西——一条是 **agent 自己的模型目录里躺着一个它切不进去的模型**，
-一条是 **切到"按开关思考"的模型之后，HAPI 手里那份 effort 变成了陈旧值**。第二条已修。
+它当场验出三条只有真机才看得见的东西——一条是 **agent 自己的模型目录里躺着一个它切不进去的模型**，
+一条是 **切到"按开关思考"的模型之后，HAPI 手里那份 effort 变成了陈旧值**，
+还有一条是 **fork 之后 agent 会把 fork 的 delegation 树也发过来，把 web 上的子代理面板清空了**。
+后两条已修，第三条是上游缺陷、HAPI 如实转述。
 
 ---
 
@@ -48,7 +50,9 @@ HAPI_RUN_MCODE_E2E=1 bun run test:cli -- --run src/mcode/mcodeAgent.e2e.test.ts
 
 ### 1.2 它覆盖的链路
 
-一条测试串起六段，跑一轮约 70 秒：
+一条测试串起十七段（十六条测试），跑一轮约 165 秒。分六组：
+
+**聊天面**
 
 1. **会话起来** —— launcher 报上来的原生 session id 是真 agent 给的
 2. **prompt → 真回答** —— 而且 agent 自己的 transcript 里也有同一个回答
@@ -56,7 +60,39 @@ HAPI_RUN_MCODE_E2E=1 bun run test:cli -- --run src/mcode/mcodeAgent.e2e.test.ts
 4. **中止 → 轮次真停** —— 被中止的那个工具调用**永远没有结果**，会话还活着，下一轮照常回答
 5. **标题** —— agent 自己起的名字到了 hub
 6. **用量** —— 真实 token 数
-7. **换模型** —— 切过去之后，agent 自己的调用记录里写的就是新模型
+
+**配置面**
+
+7. **模型目录** —— agent 给了哪些模型、当前是哪个、effort 有哪些档位；每一个 id HAPI 都要能解码
+8. **斜杠命令目录** —— agent 自己发布的那几个（`help`、`model`……）
+9. **effort 切换** —— 切完 agent 发布的 effort 真的变了，hub 也被告知了
+10. **权限模式切换** —— agent 真的按新模式跑，hub 不会继续 advertise 旧模式
+11. **换模型** —— 切过去之后，agent 自己的调用记录里写的就是新模型
+
+**会话面**
+
+12. **fork 会话** —— agent 的 `session/fork` 真能 fork 出一个新的原生会话
+
+**扩展面（ACP 扩展方法）**
+
+13. **goal** —— 建、改状态、清空，走 `mcode/session/goal/*`
+14. **delegation 树** —— agent 发布的子代理快照到了 hub，`mcode/session/delegation/stop` 也答得上来
+15. **steer** —— 把排在队列里的消息塞进**正在跑的那一轮**（`mcode/session/steer`），
+    地面真相是：那条消息出现在 agent 自己的 transcript 里
+
+**子代理面**
+
+16. **agent 真派了子代理** —— 让 agent 自己去用 `task` 工具，它真拉起一个子会话，
+    树上真有成员（id、父会话、agent 名、状态），而且树**一旦有成员就不会再变回空**
+
+**问卷面**
+
+17. **agent 反问用户** —— agent 自己用 `ask_user` 提问，hub 收到一个待答请求；
+    用户答了之后，答案变成**下一轮**用户消息，agent 接着跑完
+
+其中 **steer**、**fork**、**子代理** 和 **问卷** 这四条是整套 e2e 里最值钱的：
+它们要的是「agent 真的在跑那一轮」「agent 真的 fork 得出来」「agent 真的会自己派子代理」
+「agent 真的会自己停下来问人」，mock 后端永远给不出这个。
 
 ---
 
@@ -131,19 +167,97 @@ if (effortOptionAfterModel) {
 } else if (modelSwitched) {
     // 新模型按开关思考，根本不发布 thinking-effort 选项。
     // 旧模型的 effort 已经不存在了：在这里丢掉，
-    // 这一轮就不会去要一个新模型给不了的档位。
+    // hub 就不会继续 advertise 一个新模型给不了的档位。
     this.currentBackendEffort = null;
-    batch.mode.effort = null;
     this.opts.onEffortRollback?.(null);
 }
-// agent 没发布 effort 选项的时候，没有档位可以 apply。
-if (effortOptionAfterModel && requestedEffort && requestedEffort !== this.currentBackendEffort) {
+const requestedEffort = batch.mode.effort === null ? this.defaultBackendEffort : batch.mode.effort;
+if (requestedEffort && requestedEffort !== this.currentBackendEffort) {
+    if (!effortOptionAfterModel) {
+        // 这个模型没有档位，没有东西可设。
+        // 用户自己挑的那个要告诉他落不了地；旧模型的默认值直接丢掉。
+        if (batch.mode.effort !== null) {
+            session.sendSessionEvent({ type: 'message', message: `MiniMax Code's current model has no thinking-effort levels, so the thinking effort cannot be set to ${requestedEffort}.` });
+        }
+        batch.mode.effort = null;
+        this.currentBackendEffort = null;
+        this.opts.onEffortRollback?.(null);
+    } else {
+        // 原来的路径
+    }
+}
 ```
 
-回归测试在 `cli/src/mcode/mcodeRemoteLauncher.test.ts`：
-「drops the thinking effort when the new model has no effort levels」。
+这里有个第二轮 e2e 才暴露的分寸：**用户自己挑的 effort 不能被静默吞掉**。
+第一版修复把「模型没有档位」这件事一律当跳过处理，结果用户在 toggle 型模型上
+挑 effort，界面显示切了、agent 那边什么都没有。改法是分成两种：
 
-### 2.3 顺带确认的几件事（前几篇的结论在真机上成立）
+- **旧模型的默认档位** —— 直接丢掉（它属于上一个模型，不该被搬过来）
+- **用户这一轮明确挑的档位** —— 明确告诉他落不了地，而不是假装切了
+
+回归测试在 `cli/src/mcode/mcodeRemoteLauncher.test.ts`：
+「drops the thinking effort when the new model has no effort levels」、
+「tells the user that a model without effort levels cannot take one」。
+
+### 2.3 fork 之后，agent 会把 fork 的 delegation 树也发过来（**已修**）
+
+这条是加「agent 真派子代理」那条测试时才撞上的，而且**撞得很隐蔽**：测试是过的
+（「有一棵树带成员」成立），但日志里树的形状不对。
+
+e2e 的日志长这样，一棵树和一棵空树**成对出现**：
+
+```
+sessionEvent {"type":"subagent-snapshot","members":[{"id":"mvs_2dfd…","parentId":"mvs_12ff…","title":"Echo test reply","detail":"mavis","status":"completed",…}]}
+sessionEvent {"type":"subagent-snapshot","members":[]}
+sessionEvent {"type":"subagent-snapshot","members":[{"id":"mvs_2dfd…",…}]}
+sessionEvent {"type":"subagent-snapshot","members":[]}
+```
+
+web 那边取的是**最后一条** `subagent-snapshot`，所以用户看到的子代理面板会被反复清空。
+
+拿真 `mcode acp` 单独探了一遍才看清是谁发的那棵空树。**不开 fork** 的时候，
+agent 只发自己那棵树；**开了 fork** 之后，它给**两个**会话各发一棵：
+
+```
+[DELEGATION] root=mvs_19a87516dbb6415e9d0038aad9dbd015 members=[{id:mvs_dd83…, status:completed}]   ← 本会话
+[DELEGATION] root=mvs_930f6ec62b1c49469496da7993b59db8 members=[]                                  ← fork 出来的那棵
+[DELEGATION] root=mvs_19a87516dbb6415e9d0038aad9dbd015 members=[{id:mvs_dd83…, status:running}]
+[DELEGATION] root=mvs_930f6ec62b1c49469496da7993b59db8 members=[]                                  ← 还是它
+```
+
+注意 `rootSessionId` 这个字段**本来就在**（`McodeDelegationSnapshot.rootSessionId`），
+HAPI 只是没用它——`handleDelegationUpdate` 收到什么树就转什么树。
+
+**改法**（`cli/src/mcode/mcodeRemoteLauncher.ts`）：只转**根是本会话**的那棵树。
+
+```ts
+// The agent publishes the tree of every session it knows about. After
+// a fork the fork's own (empty) tree arrives next to the one of this
+// session, and forwarding it would clear the panel the user is
+// watching. Only the tree rooted at this session is its state.
+if (snapshot.rootSessionId !== this.acpSessionId) {
+    return;
+}
+```
+
+回归测试：「ignores the delegation tree of another session」。
+
+e2e 那条断言也跟着改了。第一版只问「有没有一棵带成员的树」——那是**运气**：
+轮询正好撞上带成员那一条就过了，摘掉修复重跑一遍居然还是绿的。改成
+**一旦有成员，就不能再变回空**：
+
+```ts
+const withMembers = snapshots.filter((event) => (event.members?.length ?? 0) > 0);
+expect(withMembers.length).toBeGreaterThan(0);
+const lastWithMembers = snapshots.lastIndexOf(withMembers[withMembers.length - 1]!);
+expect(snapshots.slice(lastWithMembers).every((event) => (event.members?.length ?? 0) > 0)).toBe(true);
+```
+
+而且断言得等**这一轮跑完**再看：agent 每变一次状态发一棵树，读到一半看起来是正常的。
+
+摘掉修复跑一次是红的（`expected false to be true`），装回去是绿的。
+
+### 2.4 顺带确认的几件事（前几篇的结论在真机上成立）
 
 | 事情 | 真机结果 |
 |---|---|
@@ -151,6 +265,9 @@ if (effortOptionAfterModel && requestedEffort && requestedEffort !== this.curren
 | `session/cancel` | 干净地回 `{"stopReason":"cancelled"}`，被中止的工具调用**永远没有结果** |
 | 两层拒绝 | ACP 层 `-32602` "A prompt is already active for this session."；runtime 层 `-32603` "Session already has an active Turn" —— 跟第二轮记的一致，分类器只认后者，前者落进 unknown（可重试） |
 | agent 自己的标题 | 在**它派生标题的那一轮结束之后**才发过来，HAPI 收到的是 `summary` 事件 |
+| agent 的工具清单 | `llm-call.json` 里写着：`bash`、`task`（派子代理）、`ask_user`（反问）、`task_output`、`update_goal`/`get_goal`、`website_deploy`…… HAPI 接的每条链路背后都真有 agent 的一个工具 |
+| `ask_user` 怎么问 | agent 走 ACP 的 `elicitation/create`；HAPI 把它归一成 `ask_user_question` 请求发给 hub，用户答完走的是**权限那条通道**（`permission` RPC），答案再作为下一轮用户消息回灌 |
+| 子代理是什么 | agent 用 `task` 拉起来的是 **`mavis`** 子会话，树上带 id、父会话、agent 名（`detail`）、`running`/`completed` 状态和起止时间 |
 
 ---
 
@@ -177,15 +294,73 @@ TypeError → 从 catch 块里抛出去 → launcher 挂掉 → cleanup → agen
 `llm-call.json` 里是 `MiniMax-M3.1-Flash`，不是 `m:minimax:MiniMax-M3.1-Flash:v:thinking`；
 要比对就得先把 wire id 解成 `provider/model#variant`（`acpModelIdToCliModelId`）再取模型名那一段。
 
+**五、Vitest 跑在 Node 上，`bun:sqlite` 用不了。**
+`bun run test` 跑 vitest 时走的是 Node，不是 Bun，于是
+`cli/src/mcode/utils/mcodeRuntimeIndex.ts` 里那句 `await import('bun:sqlite')`
+在 e2e 里永远是 `ERR_MODULE_NOT_FOUND`，日志上一行「Runtime index unavailable」。
+生产不受影响（CLI 本来就跑在 Bun 上，`bun:sqlite` 能开，agent 那个
+`~/.minimax/v2/sqlite/runtime-state.sqlite` 也确实读得到）——但这意味着
+**runtime index 那条路这套 e2e 覆盖不了**，只能另想办法。
+
+**六、e2e 的断言不能靠「轮询撞上了」。**
+delegation 那条测试第一版断言的是「有没有一棵带成员的树」，而 agent 的树是一来一回
+（一棵带成员、一棵空树）发的，轮询正好撞上带成员那一条就过了——**摘掉修复重跑一遍
+居然还是绿的**。教训是两条：断言得是**性质**而不是**快照**（「一旦有成员就不能再变回空」），
+而且得等**这一轮真的跑完**再看（agent 每变一次状态发一棵树，读到一半看起来是正常的）。
+
 ---
 
-## 四、这轮的验证
+## 四、还没进 e2e 的部分
+
+这套 e2e 换掉的是 **hub**，agent 那头是真的。所以没进来的东西分三类：
+**要真 hub 的**、**要 agent 自发行为的**、**根本不在 ACP 面上、得另做替身的**。
+
+### 4.1 要真 hub 的
+
+| 东西 | 为什么进不来 |
+|---|---|
+| `ListMcodeApps`（`cli/src/modules/common/handlers/mcodeApps.ts`） | handler 在 hub 侧，读的是**本机的 connector broker**，不是 agent 的 ACP 面 |
+| 5 小时配额（`cli/src/mcode/utils/mcodeTokenPlanQuota.ts`） | 配额是**宿主账号**的额度，走 broker 的租约协议（4 字节长度前缀的帧、60 秒租约），要一个真的 broker 才答得上来 |
+| 会话树 / 恢复 / 重连（`mcodeSessionDirs.ts`、`mcodeRuntimeIndex.ts`、`mcodeSessionTranscript.ts`、`commands/resume.ts`） | 都跨进程：e2e 每条用例起一个全新 agent 进程，没有「上一轮留下什么」；runtime index 还因为上面那条坑读不到 |
+| `ListMcodeModelsForCwd`（`cli/src/modules/common/handlers/mcodeModels.ts`） | 会另外 spawn 一个 mcode 探针进程，是 hub 侧的事 |
+
+### 4.2 要 agent 自发行为的
+
+这些不能靠 HAPI 触发，只能**请** agent 这么做——所以每一条都得靠提示词，而提示词不是契约：
+
+| 东西 | 怎么才能真的发生 |
+|---|---|
+| 工具审批（`permissionHandler.ts`） | agent 得撞上一个真需要审批的工具。e2e 里用的 `bash` 在 `auto` 模式下直接过 |
+| 后台任务计数（`backgroundTaskAggregator.ts`） | agent 得自己用 `run_in_background` 拉起后台任务、再用 `task_output` 轮询——这是它的选择 |
+| deliverables（`mcodeDeliverables.ts`） | agent 得在会话末尾真的产出交付物 |
+| runtime 层拒绝（`-32603` "Session already has an active Turn"） | 要 agent 手上持有**不是 HAPI 发起的那一轮**（原生队列、后台任务、第二个客户端）。HAPI 自己走 `queue/enqueue`，所以这条拒绝在 e2e 里造不出来 |
+
+### 4.3 不在 ACP 面上、得另做替身的
+
+| 东西 | 面 |
+|---|---|
+| connector 工具（`mcodeConnectorTools.ts`） | MiniMax Code 的 connector broker（unix socket），不是 ACP |
+| 认证状态（`mcodeAuthState.ts`） | 读 agent 的登录状态 |
+| local 模式 TUI（`mcodeLocal.ts` / `mcodeLocalLauncher.ts`） | local 模式不走 hub，launcher 是另一套；这套 e2e 只覆盖 remote 那套 |
+
+---
+
+## 五、这轮的验证
 
 | 项 | 结果 |
 |---|---|
-| 真机 e2e | **6 passed**，约 67 秒（`HAPI_RUN_MCODE_E2E=1`） |
-| launcher 单元测试文件 | 84 → **85** 条全过（新增 1 条回归测试） |
-| mcode 单元套件 | 381 → **382** 条全过（e2e 文件的 6 条默认跳过） |
-| cli / web / hub / shared 全套 | cli 3518 passed / 18 skipped、web 3559 passed、hub 1438 pass、shared 377 pass，全过 |
+| 真机 e2e | **16 passed**，约 165 秒（`HAPI_RUN_MCODE_E2E=1`） |
+| launcher 单元测试文件 | 84 → **87** 条全过（新增 3 条回归：2 条 effort + 1 条 delegation 树） |
+| mcode 单元套件 | 381 → **384** 条全过（e2e 文件的 16 条默认跳过） |
+| cli 全套 | **3520 passed / 28 skipped**，零失败；另一次跑出 3 条与 mcode 无关的既有偶发失败，见下 |
+| web / hub / shared 全套 | 全过 |
 | typecheck | cli / web / hub / relay 全过 |
 | fixtures | `bun run gen:fixtures` 重新生成，**零漂移** |
+| 回归有效性 | 把 delegation 的修复摘掉，e2e **当场变红**（`expected false to be true`）；装回去 16/16 绿 |
+
+> 跑 cli 全套的时候撞到过三条**跟 mcode 无关**的偶发失败：
+> `src/agy/headless/agyHeadlessDriver.test.ts` 的「cancels an ID-bearing retry during the backoff」、
+> `src/codex/utils/codexTranscriptLocator.test.ts` 的「refuses fallback when fresh activity is ambiguous」、
+> `src/claude/claudeRemoteLauncher.launchFailure.test.ts` 的 launch-failure 恢复那条。
+> 前两条单独重跑是过的，第三条**把本次改动 stash 掉也一样挂**（5 秒超时）——
+> 都是既有的偶发/环境问题，不在本次范围内，记在这里备查。
