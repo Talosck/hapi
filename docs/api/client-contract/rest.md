@@ -235,6 +235,22 @@ path outside of the working directory is refused by the CLI. A file only
 becomes visible when the upload is finished, so an aborted upload leaves
 nothing behind. `overwrite: true` replaces a file with the same name.
 
+### Workspace files (RPC-wrapped)
+
+Source: `hub/src/web/routes/workspaceFiles.ts`. The hub relays the request to
+the CLI of the session, which owns the path: it refuses everything outside of
+the working directory, including a path that only escapes through a symlinked
+directory.
+
+| Method & path | Request | Response |
+|---|---|---|
+| `POST /api/sessions/:id/workspace/delete` | `{path}` — relative to the session working directory | `{success, path?, directory?, error?}` — `directory: true` when a directory was removed with its content |
+
+The session must be active (409 `{error: 'Session is inactive', code:
+'session_inactive'}` otherwise). A missing file is reported as
+`{success: false, error: 'File not found'}`, and the working directory itself
+is never deleted.
+
 ### Generated images
 
 Source: `hub/src/web/routes/git.ts` (same file).

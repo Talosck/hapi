@@ -3,7 +3,7 @@ import { safeCopyToClipboard } from '@/lib/clipboard'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useAnchoredMenu, type AnchoredMenuPoint } from '@/hooks/useAnchoredMenu'
 import { useTranslation } from '@/lib/use-translation'
-import { CopyIcon, PlusCircleIcon } from '@/components/icons'
+import { CopyIcon, PlusCircleIcon, TrashIcon } from '@/components/icons'
 
 type FileActionMenuProps = {
     isOpen: boolean
@@ -14,6 +14,12 @@ type FileActionMenuProps = {
     absolutePath: string
     anchorPoint: AnchoredMenuPoint
     onAddToComposer: () => void
+    /**
+     * Offered when the entry may be deleted. The menu stays without the
+     * entry when this is missing, so a caller that cannot delete never shows
+     * a delete button.
+     */
+    onDelete?: () => void
     menuId?: string
 }
 
@@ -27,6 +33,7 @@ export function FileActionMenu(props: FileActionMenuProps) {
         absolutePath,
         anchorPoint,
         onAddToComposer,
+        onDelete,
         menuId,
     } = props
     const { menuRef, menuStyle } = useAnchoredMenu({ isOpen, onClose, anchorPoint, align: 'start' })
@@ -47,6 +54,11 @@ export function FileActionMenu(props: FileActionMenuProps) {
     const handleAddToComposer = () => {
         onClose()
         onAddToComposer()
+    }
+
+    const handleDelete = () => {
+        onClose()
+        onDelete?.()
     }
 
     if (!isOpen) return null
@@ -103,6 +115,21 @@ export function FileActionMenu(props: FileActionMenuProps) {
                     <PlusCircleIcon className="h-[18px] w-[18px] text-[var(--app-hint)]" />
                     {t('file.menu.addToComposer')}
                 </button>
+
+                {onDelete ? (
+                    <>
+                        <div className="my-1 border-t border-[var(--app-divider)]" />
+                        <button
+                            type="button"
+                            role="menuitem"
+                            className={`${itemClassName} text-red-600 dark:text-red-400`}
+                            onClick={handleDelete}
+                        >
+                            <TrashIcon className="h-[18px] w-[18px]" />
+                            {t('file.menu.delete')}
+                        </button>
+                    </>
+                ) : null}
             </div>
         </div>
     )

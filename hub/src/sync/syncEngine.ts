@@ -66,7 +66,8 @@ import {
     type RpcWorkspaceUploadStartResponse,
     type RpcWorkspaceUploadChunkResponse,
     type RpcWorkspaceUploadFinishResponse,
-    type RpcWorkspaceUploadAbortResponse
+    type RpcWorkspaceUploadAbortResponse,
+    type RpcWorkspaceDeleteResponse
 } from './rpcGateway'
 import { SessionCache } from './sessionCache'
 import { ingestNotifySummaryFromMessage } from './workGraphNotifyIngest'
@@ -4334,6 +4335,10 @@ export class SyncEngine {
 
     async abortWorkspaceUpload(sessionId: string, uploadId: string): Promise<RpcWorkspaceUploadAbortResponse> {
         return await this.rpcGateway.abortWorkspaceUpload(sessionId, uploadId)
+    }
+
+    async deleteWorkspaceFile(sessionId: string, path: string): Promise<RpcWorkspaceDeleteResponse> {
+        return await this.rpcGateway.deleteWorkspaceFile(sessionId, path)
     }
 
     async runRipgrep(sessionId: string, args: string[], cwd?: string, fileSearch?: FileSearchOptions): Promise<RpcCommandResponse> {

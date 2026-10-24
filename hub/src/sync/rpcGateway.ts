@@ -45,6 +45,7 @@ import type {
     SlashCommandsResponse,
     StatFilesResponse,
     UploadFileResponse,
+    WorkspaceDeleteResponse,
     WorkspaceUploadAbortResponse,
     WorkspaceUploadChunkResponse,
     WorkspaceUploadFinishResponse,
@@ -60,6 +61,11 @@ const MODEL_LIST_RPC_TIMEOUT_MS = 120_000
  * slow uplink needs more than the default timeout to deliver one chunk.
  */
 const WORKSPACE_UPLOAD_RPC_TIMEOUT_MS = 120_000
+/**
+ * Deleting a directory removes everything inside it, so a big tree takes
+ * longer than the default timeout allows.
+ */
+const WORKSPACE_DELETE_RPC_TIMEOUT_MS = 120_000
 
 /**
  * tiann/hapi#916: thrown by {@link RpcGateway.rpcCall} when the target CLI is
@@ -117,6 +123,7 @@ export type RpcWorkspaceUploadStartResponse = WorkspaceUploadStartResponse
 export type RpcWorkspaceUploadChunkResponse = WorkspaceUploadChunkResponse
 export type RpcWorkspaceUploadFinishResponse = WorkspaceUploadFinishResponse
 export type RpcWorkspaceUploadAbortResponse = WorkspaceUploadAbortResponse
+export type RpcWorkspaceDeleteResponse = WorkspaceDeleteResponse
 export type RpcDirectoryEntry = DirectoryEntry
 export type RpcListDirectoryResponse = ListDirectoryResponse
 export type RpcStatFilesResponse = StatFilesResponse
@@ -458,6 +465,10 @@ export class RpcGateway {
 
     async abortWorkspaceUpload(sessionId: string, uploadId: string): Promise<RpcWorkspaceUploadAbortResponse> {
         return await this.sessionRpc(sessionId, RPC_METHODS.AbortWorkspaceUpload, { uploadId }) as RpcWorkspaceUploadAbortResponse
+    }
+
+    async deleteWorkspaceFile(sessionId: string, path: string): Promise<RpcWorkspaceDeleteResponse> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.DeleteWorkspaceFile, { path }, WORKSPACE_DELETE_RPC_TIMEOUT_MS) as RpcWorkspaceDeleteResponse
     }
 
     async runRipgrep(sessionId: string, args: string[], cwd?: string, fileSearch?: FileSearchOptions): Promise<RpcCommandResponse> {

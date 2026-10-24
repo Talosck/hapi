@@ -533,6 +533,15 @@ export default {
   'files.upload.error.tooLarge': '文件太大，无法上传。',
   'files.upload.cancelled.title': '上传已取消',
   'files.upload.cancelled.body': '上传已被取消。',
+  'files.delete.confirm.title': '要删除这个条目吗？',
+  'files.delete.confirm.fileBody': '{path} 将从该会话的工作目录中删除，且无法恢复。',
+  'files.delete.confirm.directoryBody': '{path} 及其中的全部内容都将从该会话的工作目录中删除，且无法恢复。',
+  'files.delete.confirm.confirm': '删除',
+  'files.delete.confirm.confirming': '删除中…',
+  'files.delete.success.title': '已删除',
+  'files.delete.success.body': '已删除 {path}。',
+  'files.delete.error.title': '删除失败',
+  'files.delete.error.default': '删除该条目失败。',
   'files.sort.title': '文件排序',
   'files.sort.by': '排序依据',
   'files.sort.name': '名称',
@@ -550,6 +559,7 @@ export default {
   'file.menu.copyPath': '复制路径',
   'file.menu.copyAbsolutePath': '复制绝对路径',
   'file.menu.addToComposer': '添加到对话框',
+  'file.menu.delete': '删除',
 
   // File page
   'file.page.fallbackName': '文件',

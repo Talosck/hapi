@@ -2,7 +2,7 @@ import { logger } from '@/ui/logger'
 import { randomUUID } from 'node:crypto'
 import { chmod, mkdir, open, readdir, realpath, rename, rm, stat } from 'fs/promises'
 import { rmSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'path'
+import { basename, dirname, join, resolve } from 'path'
 import type {
     WorkspaceUploadAbortResponse,
     WorkspaceUploadChunkResponse,
@@ -14,6 +14,7 @@ import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager'
 import { validatePath } from '../pathSecurity'
 import { getErrorMessage, rpcError } from '../rpcResponses'
+import { isInsideDirectory, looksAbsolute, normalizeRelativePath } from './workspacePaths'
 
 interface StartWorkspaceUploadRequest {
     path: string
@@ -95,24 +96,7 @@ function unregisterExitCleanup(cleanup: () => void): void {
     sessionCleanupFns.delete(cleanup)
 }
 
-/** Windows drive letters (`C:\...`) are absolute on Windows but not on POSIX. */
-function looksAbsolute(path: string): boolean {
-    return isAbsolute(path) || /^[A-Za-z]:[\\/]/.test(path)
-}
-
-/**
- * Normalize a client-supplied relative path.
- *
- * The client speaks POSIX separators, but a Windows client may send backslashes.
- * Trailing separators are dropped so the path always names a file.
- */
-function normalizeRelativePath(path: string): string {
-    return path
-        .replaceAll('\\', '/')
-        .replace(/^\.\//, '')
-        .replace(/\/+$/, '')
-}
-
+/** True when the error means "there is nothing at that path". */
 function isMissingFileError(error: unknown): boolean {
     return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT'
 }
@@ -121,14 +105,6 @@ function isMissingFileError(error: unknown): boolean {
 function isReplaceRefusedError(error: unknown): boolean {
     const code = (error as NodeJS.ErrnoException | null)?.code
     return code === 'EEXIST' || code === 'EPERM' || code === 'EACCES'
-}
-
-/** True when `target` is the directory itself or inside of it. */
-function isInsideDirectory(directory: string, target: string): boolean {
-    const normalizedDirectory = process.platform === 'win32' ? directory.toLowerCase() : directory
-    const normalizedTarget = process.platform === 'win32' ? target.toLowerCase() : target
-    const prefix = normalizedDirectory.endsWith(sep) ? normalizedDirectory : `${normalizedDirectory}${sep}`
-    return normalizedTarget === normalizedDirectory || normalizedTarget.startsWith(prefix)
 }
 
 /**

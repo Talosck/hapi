@@ -66,6 +66,7 @@ import type {
     UpdateHubSettingsRequest,
     UsageSummaryResponse,
     UploadFileResponse,
+    WorkspaceDeleteResponse,
     WorkspaceUploadAbortResponse,
     WorkspaceUploadChunkResponse,
     WorkspaceUploadFinishResponse,
@@ -727,6 +728,22 @@ export class ApiClient {
             method: 'POST',
             body: JSON.stringify({ path })
         })
+    }
+
+    /**
+     * Delete a file or directory from the working directory of the session.
+     *
+     * The path is workspace-relative. The CLI owns it and refuses anything
+     * outside of the working directory.
+     */
+    async deleteWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceDeleteResponse> {
+        return await this.request<WorkspaceDeleteResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/workspace/delete`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ path })
+            }
+        )
     }
 
     /** Open a chunked upload of a file into the session working directory. */

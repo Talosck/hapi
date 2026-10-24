@@ -29,7 +29,9 @@ import { formatFileMetadata } from '@/lib/file-metadata'
 import { useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from '@/lib/use-translation'
 import { useWorkspaceUpload } from '@/hooks/useWorkspaceUpload'
+import { useWorkspaceDelete } from '@/hooks/useWorkspaceDelete'
 import { WorkspaceUploadControls, WorkspaceUploadProgress } from '@/components/SessionFiles/WorkspaceUploadControls'
+import { WorkspaceDeleteDialog } from '@/components/SessionFiles/WorkspaceDeleteDialog'
 import * as Popover from '@radix-ui/react-popover'
 import { CheckIcon, CloseIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
@@ -360,11 +362,15 @@ export default function FilesPage() {
 
     const [activeTab, setActiveTab] = useState<FilesTab>(() => search.tab ?? readFilesTab())
     const [directorySort, setDirectorySort] = useState<DirectorySort>(readDirectorySort)
-    const [fileMenu, setFileMenu] = useState<{ path: string; point: AnchoredMenuPoint } | null>(null)
+    const [fileMenu, setFileMenu] = useState<{
+        path: string
+        point: AnchoredMenuPoint
+        kind: 'file' | 'directory'
+    } | null>(null)
     const searchQuery = search.query ?? ''
 
-    const openFileMenu = useCallback((path: string, point: AnchoredMenuPoint) => {
-        setFileMenu({ path, point })
+    const openFileMenu = useCallback((path: string, point: AnchoredMenuPoint, kind: 'file' | 'directory' = 'file') => {
+        setFileMenu({ path, point, kind })
     }, [])
 
     const closeFileMenu = useCallback(() => setFileMenu(null), [])
@@ -424,7 +430,7 @@ export default function FilesPage() {
         refetch: refetchGit
     } = useGitStatusFiles(api, sessionId)
 
-    const handleUploadFinished = useCallback(() => {
+    const handleWorkspaceChanged = useCallback(() => {
         // The tree, the search results and the git status all changed.
         void queryClient.invalidateQueries({ queryKey: ['session-directory', sessionId] })
         void queryClient.invalidateQueries({ queryKey: ['session-files', sessionId] })
@@ -434,7 +440,13 @@ export default function FilesPage() {
     const workspaceUpload = useWorkspaceUpload({
         api,
         sessionId,
-        onUploaded: handleUploadFinished
+        onUploaded: handleWorkspaceChanged
+    })
+
+    const workspaceDelete = useWorkspaceDelete({
+        api,
+        sessionId,
+        onDeleted: handleWorkspaceChanged
     })
 
     const shouldSearch = Boolean(searchQuery)
@@ -689,7 +701,11 @@ export default function FilesPage() {
                                         key={file.fullPath}
                                         file={file}
                                         onOpen={() => handleOpenFile(file.fullPath)}
-                                        onOpenMenu={(point) => openFileMenu(file.fullPath, point)}
+                                        onOpenMenu={(point) => openFileMenu(
+                                            file.fullPath,
+                                            point,
+                                            file.fileType === 'folder' ? 'directory' : 'file'
+                                        )}
                                         showDivider={index < sortedSearchResults.length - 1}
                                     />
                                 ))}
@@ -770,6 +786,18 @@ export default function FilesPage() {
                 onAddToComposer={() => {
                     if (fileMenu) handleAddFileToComposer(fileMenu.path)
                 }}
+                onDelete={workspaceDelete.canDelete && fileMenu ? () => {
+                    workspaceDelete.requestDelete(fileMenu.path, fileMenu.kind === 'directory')
+                } : undefined}
+            />
+
+            <WorkspaceDeleteDialog
+                isOpen={workspaceDelete.target !== null}
+                path={workspaceDelete.target?.path ?? ''}
+                directory={workspaceDelete.target?.directory ?? false}
+                isPending={workspaceDelete.isDeleting}
+                onCancel={workspaceDelete.cancelDelete}
+                onConfirm={workspaceDelete.confirmDelete}
             />
         </div>
     )

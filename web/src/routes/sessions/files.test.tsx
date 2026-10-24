@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, act } from '@testing-library/react'
+import { fireEvent, render, screen, act, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { I18nProvider } from '@/lib/i18n-context'
 import { ToastProvider } from '@/lib/toast-context'
@@ -40,6 +40,9 @@ const mocks = vi.hoisted(() => ({
         ),
         abortWorkspaceUpload: vi.fn<(sessionId: string, uploadId: string) => Promise<{ success: boolean; error?: string }>>(
             async () => ({ success: true })
+        ),
+        deleteWorkspaceFile: vi.fn<(sessionId: string, path: string) => Promise<{ success: boolean; path?: string; directory?: boolean; error?: string }>>(
+            async () => ({ success: true, path: 'src/感言.ts', directory: false })
         ),
     },
 }))
@@ -328,6 +331,69 @@ describe('FilesPage file context menu', () => {
         await vi.waitFor(() => {
             expect(writeText).toHaveBeenCalledWith('/workspace/project/src/感言.ts')
         })
+    })
+})
+
+describe('FilesPage workspace delete', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        mocks.sessionId = 'session-1'
+        mocks.search = { tab: 'directories', query: '感' }
+        mocks.api.deleteWorkspaceFile.mockImplementation(async () => ({
+            success: true,
+            path: 'src/感言.ts',
+            directory: false,
+        }))
+        window.localStorage.clear()
+        window.sessionStorage.clear()
+        clearDraft('session-1')
+    })
+
+    it('asks before it deletes and deletes the picked file', async () => {
+        renderFilesPage()
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /感言\.ts/ }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+
+        // The dialog names the file and waits for the confirmation.
+        const dialog = screen.getByRole('dialog')
+        expect(dialog).toBeInTheDocument()
+        expect(within(dialog).getByText(/src\/感言\.ts/)).toBeInTheDocument()
+        expect(mocks.api.deleteWorkspaceFile).not.toHaveBeenCalled()
+
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+
+        await vi.waitFor(() => {
+            expect(mocks.api.deleteWorkspaceFile).toHaveBeenCalledWith('session-1', 'src/感言.ts')
+        })
+    })
+
+    it('keeps the file when the confirmation is cancelled', () => {
+        renderFilesPage()
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /感言\.ts/ }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+        fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+
+        expect(mocks.api.deleteWorkspaceFile).not.toHaveBeenCalled()
+    })
+
+    it('keeps the dialog open and names the reason when the deletion is refused', async () => {
+        mocks.api.deleteWorkspaceFile.mockImplementation(async () => ({
+            success: false,
+            error: 'File not found',
+        }))
+
+        renderFilesPage()
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /感言\.ts/ }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+        fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }))
+
+        await vi.waitFor(() => {
+            expect(screen.getByText('File not found')).toBeInTheDocument()
+        })
+        expect(screen.getByRole('dialog')).toBeInTheDocument()
     })
 })
 

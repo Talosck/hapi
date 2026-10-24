@@ -92,6 +92,15 @@ See `src/router.tsx` for route definitions.
   - A file only appears at its final path once the last chunk landed, and a
     cancelled upload leaves nothing behind.
   - An existing file with the same name is replaced.
+- Delete a file from the right-click menu of a row
+  (`src/components/FileActionMenu.tsx`).
+  - The action asks for a confirmation that names the entry
+    (`src/components/SessionFiles/WorkspaceDeleteDialog.tsx`); a directory is
+    removed with its content.
+  - The deletion runs on the machine that owns the session
+    (`src/hooks/useWorkspaceDelete.ts`). The CLI owns the path and refuses
+    anything outside of the working directory.
+  - A refused deletion keeps the dialog open and names the reason.
 
 ### File viewer (`src/routes/sessions/file.tsx`)
 
@@ -211,6 +220,12 @@ The workspace upload has the same kind of spec
 input hands out a **live** `FileList` in a browser, while jsdom hands out a
 fresh one on every access: the upload has to snapshot the files before it
 resets the input, and only a real browser can prove that.
+
+The workspace delete spec (`e2e/workspace-delete.spec.ts`, fixture
+`web/e2e-fixtures/workspace-delete-fixture.html`) drives the right-click menu
+in a real browser: the menu opens on a native `contextmenu` event and is
+positioned against the pointer, and the deletion only happens after the
+confirmation named the file.
 
 ## Build
 

@@ -91,6 +91,23 @@ describe('FileActionMenu', () => {
         expect(onClose).toHaveBeenCalledTimes(1)
     })
 
+    it('offers the delete action only when the caller can delete', () => {
+        renderMenu()
+
+        expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+    })
+
+    it('deletes the file and closes', () => {
+        const onDelete = vi.fn()
+        const onClose = vi.fn()
+        renderMenu({ onDelete, onClose })
+
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+
+        expect(onDelete).toHaveBeenCalledTimes(1)
+        expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
     it('closes on Escape', () => {
         const onClose = vi.fn()
         renderMenu({ onClose })

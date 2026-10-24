@@ -776,6 +776,21 @@ export type WorkspaceUploadAbortResponse = {
     error?: string
 }
 
+/**
+ * Result of deleting an entry from the session working directory.
+ *
+ * The CLI owns the path: it refuses anything outside of the working
+ * directory, so a client only learns whether the entry is gone.
+ */
+export type WorkspaceDeleteResponse = {
+    success: boolean
+    /** Workspace-relative path of the deleted entry. */
+    path?: string
+    /** True when a directory was removed (with everything inside it). */
+    directory?: boolean
+    error?: string
+}
+
 export type DirectoryEntry = {
     name: string
     type: 'file' | 'directory' | 'other'

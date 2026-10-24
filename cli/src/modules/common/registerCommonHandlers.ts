@@ -20,6 +20,7 @@ import { registerRipgrepHandlers } from './handlers/ripgrep'
 import { registerSlashCommandHandlers } from './handlers/slashCommands'
 import { registerSkillsHandlers } from './handlers/skills'
 import { registerUploadHandlers } from './handlers/uploads'
+import { registerWorkspaceFileHandlers } from './handlers/workspaceFiles'
 import { registerWorkspaceUploadHandlers } from './handlers/workspaceUploads'
 
 export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, workingDirectory: string): void {
@@ -45,4 +46,5 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
     registerGitHandlers(rpcHandlerManager, workingDirectory)
     registerUploadHandlers(rpcHandlerManager)
     registerWorkspaceUploadHandlers(rpcHandlerManager, workingDirectory)
+    registerWorkspaceFileHandlers(rpcHandlerManager, workingDirectory)
 }

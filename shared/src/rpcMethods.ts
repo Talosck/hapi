@@ -31,6 +31,8 @@ export const RPC_METHODS = {
     FinishWorkspaceUpload: 'finishWorkspaceUpload',
     /** Drop an open workspace upload and its temporary file. */
     AbortWorkspaceUpload: 'abortWorkspaceUpload',
+    /** Delete a file or directory from the session working directory. */
+    DeleteWorkspaceFile: 'deleteWorkspaceFile',
     Ripgrep: 'ripgrep',
     Difftastic: 'difftastic',
     Bash: 'bash',

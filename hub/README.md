@@ -166,6 +166,13 @@ for request/response shapes and error semantics, and `src/web/routes/` for all e
   file). The chunks keep every request small enough for the socket buffer, and
   the CLI rejects any path outside of the working directory.
 
+### Workspace files (`src/web/routes/workspaceFiles.ts`)
+
+- `POST /api/sessions/:id/workspace/delete` - Delete a file or a directory
+  (with its content) from the working directory of the session. The hub relays
+  the request to the CLI, which owns the path: it rejects anything outside of
+  the working directory and never deletes the working directory itself.
+
 ### Events (`src/web/routes/events.ts`)
 
 - `GET /api/events` - SSE stream for live updates.

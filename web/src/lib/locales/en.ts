@@ -529,6 +529,15 @@ export default {
   'files.upload.error.tooLarge': 'The file is too large to upload.',
   'files.upload.cancelled.title': 'Upload cancelled',
   'files.upload.cancelled.body': 'The upload was cancelled.',
+  'files.delete.confirm.title': 'Delete this entry?',
+  'files.delete.confirm.fileBody': '{path} will be deleted from the workspace of this session. This cannot be undone.',
+  'files.delete.confirm.directoryBody': '{path} and everything inside it will be deleted from the workspace of this session. This cannot be undone.',
+  'files.delete.confirm.confirm': 'Delete',
+  'files.delete.confirm.confirming': 'Deleting…',
+  'files.delete.success.title': 'Deleted',
+  'files.delete.success.body': 'Deleted {path}.',
+  'files.delete.error.title': 'Delete failed',
+  'files.delete.error.default': 'Failed to delete the entry.',
   'files.sort.title': 'Sort files',
   'files.sort.by': 'Sort by',
   'files.sort.name': 'Name',
@@ -546,6 +555,7 @@ export default {
   'file.menu.copyPath': 'Copy path',
   'file.menu.copyAbsolutePath': 'Copy absolute path',
   'file.menu.addToComposer': 'Add to composer',
+  'file.menu.delete': 'Delete',
 
   // File page
   'file.page.fallbackName': 'File',

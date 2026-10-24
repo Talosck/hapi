@@ -529,6 +529,15 @@ export default {
   'files.upload.error.tooLarge': 'Файл слишком большой для загрузки.',
   'files.upload.cancelled.title': 'Загрузка отменена',
   'files.upload.cancelled.body': 'Загрузка была отменена.',
+  'files.delete.confirm.title': 'Удалить этот элемент?',
+  'files.delete.confirm.fileBody': '{path} будет удалён из рабочей директории этой сессии. Отменить это нельзя.',
+  'files.delete.confirm.directoryBody': '{path} и всё содержимое этой папки будут удалены из рабочей директории сессии. Отменить это нельзя.',
+  'files.delete.confirm.confirm': 'Удалить',
+  'files.delete.confirm.confirming': 'Удаление…',
+  'files.delete.success.title': 'Удалено',
+  'files.delete.success.body': 'Удалено: {path}.',
+  'files.delete.error.title': 'Не удалось удалить',
+  'files.delete.error.default': 'Не удалось удалить элемент.',
   'files.sort.title': 'Сортировка файлов',
   'files.sort.by': 'Сортировать по',
   'files.sort.name': 'Имя',
@@ -546,6 +555,7 @@ export default {
   'file.menu.copyPath': 'Копировать путь',
   'file.menu.copyAbsolutePath': 'Копировать абсолютный путь',
   'file.menu.addToComposer': 'Добавить в редактор',
+  'file.menu.delete': 'Удалить',
 
   // Страница файла
   'file.page.fallbackName': 'Файл',
