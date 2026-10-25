@@ -10,6 +10,7 @@ import type { ForkConversationRpcResult, RewindConversationRpcResult } from '@ha
 import { PI_THINKING_LEVELS } from '@hapi/protocol'
 import type { PiThinkingLevel } from './types'
 import type { PiNativeRuntimeState, PiSession } from './session'
+import { isPiRpcTimeout } from './conversationHistoryTimeout'
 
 /** Keep the complete native history transaction below the Hub's 120s ceiling. */
 export const PI_HISTORY_OPERATION_TIMEOUT_MS = 110_000
@@ -71,17 +72,6 @@ function asString(value: unknown): string | null {
 function isUnknownCommand(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error)
     return /unknown command|method not found|-32601/i.test(message)
-}
-
-/**
- * PiRpcResolver currently emits this message for elapsed requests. Keep this
- * matcher deliberately narrow so ordinary native errors still use the normal
- * source-restore path. A typed error name is supported for adapters/tests.
- */
-function isPiRpcTimeout(error: unknown): boolean {
-    if (!(error instanceof Error)) return false
-    return error.name === 'PiRpcTimeoutError'
-        || /^Pi RPC \S+ \(id=\d+\) timed out after \d+ms$/.test(error.message)
 }
 
 function wasCancelled(data: unknown): boolean {

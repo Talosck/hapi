@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { PI_HISTORY_OPERATION_TIMEOUT_MS, PiConversationHistory, PiHistoryRestoreError } from './conversationHistory'
+import { PiRpcTimeoutError } from './piRpcTimeout'
 import { PiSession } from './session'
 
 function createSession(options?: { nativeReady?: boolean }) {
@@ -675,7 +676,7 @@ describe('PiConversationHistory native transactions', () => {
         const pending = history.fork()
         await vi.waitFor(() => expect(rejectClone).toBeTypeOf('function'))
         session.runWhenHistoryIdle(() => { delivered = true }, 'queued-after-clone-timeout')
-        rejectClone(new Error(`Pi RPC clone (id=42) timed out after ${cloneTimeoutMs}ms`))
+        rejectClone(new PiRpcTimeoutError('clone', 42, cloneTimeoutMs))
 
         await expect(pending).rejects.toBeInstanceOf(PiHistoryRestoreError)
         expect(rpc.mock.calls.map(([command]) => command.type)).toEqual(['get_entries', 'get_state', 'clone'])

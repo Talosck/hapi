@@ -3,10 +3,11 @@ import { convertAgentMessage } from '@/agent/messageConverter';
 import { createNativeSessionTitleMetadataSync } from '@/agent/nativeSessionTitle';
 import { randomBytes } from 'node:crypto';
 import { PiTransport } from './piTransport';
+import { PiRpcTimeoutError } from './piRpcTimeout';
 import { convertPiEvent, convertPiTurnUsage } from './piEventConverter';
 import { PiMessageAccumulator } from './piMessageAccumulator';
 import { PiExtensionUiHandler } from './extensionUiHandler';
-import { parsePiModels, parsePiCommands, parsePiContextUsage, readPiDisposition, PiAgentEndEventSchema, PiAgentSettledEventSchema, PiBashExecutionUpdateEventSchema, PiClearQueueResultSchema, PiExtensionErrorEventSchema, PiExtensionUiRequestSchema, PiLifecycleEventSchema, PiResponseEventSchema, PiSessionInfoChangedEventSchema, PiStateDataSchema, PiSetModelDataSchema } from './schemas';
+import { parsePiModels, parsePiCommands, parsePiContextUsage, readPiDisposition, isPiLifecycleEventType, PiAgentEndEventSchema, PiAgentSettledEventSchema, PiBashExecutionUpdateEventSchema, PiClearQueueResultSchema, PiExtensionErrorEventSchema, PiExtensionUiRequestSchema, PiLifecycleEventSchema, PiResponseEventSchema, PiSessionInfoChangedEventSchema, PiStateDataSchema, PiSetModelDataSchema } from './schemas';
 import type { PiContextUsage, PiResponseEvent, PiRpcCommand, PiThinkingLevel, PiTurnEndEvent } from './types';
 import type { PiSession } from './session';
 import type { PiConversationHistory } from './conversationHistory';
@@ -25,19 +26,9 @@ const PI_BASH_CARD_NONCE = randomBytes(4).toString('hex');
 
 // --- Pending RPC resolver ---
 // Instance-scoped: created once by wireTransportEvents, stored on PiSession.
-export class PiRpcTimeoutError extends Error {
-    readonly command: string;
-    readonly requestId: number;
-    readonly timeoutMs: number;
-
-    constructor(command: string, requestId: number, timeoutMs: number) {
-        super(`Pi RPC ${command} (id=${requestId}) timed out after ${timeoutMs}ms`);
-        this.name = 'PiRpcTimeoutError';
-        this.command = command;
-        this.requestId = requestId;
-        this.timeoutMs = timeoutMs;
-    }
-}
+// The error class lives in its own module so the conversation history can
+// recognize a timeout without importing this transport loop.
+export { PiRpcTimeoutError } from './piRpcTimeout';
 
 export class PiRpcResolver {
     private idCounter = 0;
@@ -546,6 +537,9 @@ class PiLifecycleTimeline {
     private summaryRetryActive = false;
 
     emit(event: unknown, session: PiSession): void {
+        // The timeline sees every Pi event, so it skips the lifecycle union
+        // for the events that cannot be one (see isPiLifecycleEventType).
+        if (!isPiLifecycleEventType((event as { type?: unknown } | null)?.type)) return;
         const parsed = PiLifecycleEventSchema.safeParse(event);
         if (!parsed.success) return;
         const lifecycle = parsed.data;
@@ -904,9 +898,16 @@ export function wireTransportEvents(
         // lifecycle consumer so both the maintenance gate and timeline see the
         // same current event names. PiTransport performs this for subprocess
         // traffic too; retaining it here keeps direct/test transports aligned.
-        const parsedLifecycle = PiLifecycleEventSchema.safeParse(event);
-        if (parsedLifecycle.success) {
-            event = parsedLifecycle.data;
+        //
+        // The union behind PiLifecycleEventSchema is expensive to parse, and
+        // the event path sees every Pi event — a streaming turn delivers
+        // thousands of message_update deltas that are not lifecycle events.
+        // The type check keeps those out of the union entirely.
+        if (isPiLifecycleEventType(event.type)) {
+            const parsedLifecycle = PiLifecycleEventSchema.safeParse(event);
+            if (parsedLifecycle.success) {
+                event = parsedLifecycle.data;
+            }
         }
         if (event.type !== 'keep_alive') {
             logger.debug(`[pi][event] ${event.type}`);

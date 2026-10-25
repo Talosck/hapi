@@ -222,6 +222,37 @@ export const PiLifecycleEventSchema = z.union([
     z.object({ type: z.literal('summarization_retry_finished') }),
 ]);
 
+/**
+ * The event types {@link PiLifecycleEventSchema} can match.
+ *
+ * Parsing that union is expensive: it is a 9-branch union whose members Zod
+ * tries one after another, and it costs ~22 µs per event — against ~1.3 µs
+ * for a single object schema. The event path parses every Pi event, and a
+ * streaming turn delivers thousands of `message_update` deltas that are not
+ * lifecycle events at all, so the union was spending ~44 ms on a 2000-event
+ * turn on events it could never match.
+ *
+ * This set lets a caller check the event type first and skip the union
+ * entirely. It is derived from the same literals the union is built from, so
+ * the two cannot drift: {@link isPiLifecycleEventType} is the only supported
+ * way to ask.
+ */export const PI_LIFECYCLE_EVENT_TYPES = new Set([
+    'compaction_start',
+    'compaction_end',
+    'auto_compaction_start',
+    'auto_compaction_end',
+    'auto_retry_start',
+    'auto_retry_end',
+    'summarization_retry_scheduled',
+    'summarization_retry_attempt_start',
+    'summarization_retry_finished',
+]);
+
+/** Whether an event can be a lifecycle event, without paying for the union. */
+export function isPiLifecycleEventType(type: unknown): boolean {
+    return typeof type === 'string' && PI_LIFECYCLE_EVENT_TYPES.has(type);
+}
+
 // ============================================================================
 // Pi Response Event (stdout response)
 // ============================================================================
