@@ -16,7 +16,12 @@ const harness = vi.hoisted(() => ({
         model: 0,
         slashCommands: 0
     },
-    mcpBridgeOptions: null as { enableChangeTitle?: boolean; titleMode?: string } | null
+    mcpBridgeOptions: null as { enableChangeTitle?: boolean; titleMode?: string } | null,
+    /** The ids of the messages the launcher forgot. */
+    displayedMessageIds: {
+        forgotten: [] as string[],
+        shownChecks: [] as Array<{ localIds: string[]; shown: boolean }>
+    }
 }))
 
 vi.mock('@/modules/common/handlers/mcodeModels', () => ({
@@ -74,9 +79,34 @@ vi.mock('./utils/questionHandler', () => ({
 }))
 
 vi.mock('@/ui/ink/McodeDisplay', () => ({ McodeDisplay: () => null }))
+
+vi.mock('./utils/mcodeDisplayedMessageIds', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('./utils/mcodeDisplayedMessageIds')>()
+    return {
+        ...actual,
+        McodeDisplayedMessageIds: class extends actual.McodeDisplayedMessageIds {
+            public forget(localIds: string[]): void {
+                harness.displayedMessageIds.forgotten.push(...localIds)
+                super.forget(localIds)
+            }
+            public areAllShown(localIds: string[]): boolean {
+                const shown = super.areAllShown(localIds)
+                harness.displayedMessageIds.shownChecks.push({ localIds, shown })
+                return shown
+            }
+        }
+    }
+})
 vi.mock('@/ui/logger', () => ({
     logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn() }
 }))
+
+// The harness is shared by every test in this file, so what a test recorded
+// has to be cleared before the next one runs.
+afterEach(() => {
+    harness.displayedMessageIds.forgotten = []
+    harness.displayedMessageIds.shownChecks = []
+})
 
 // The transcript of the agent, which the launcher reads when it reattaches to
 // a session the agent can resume.
@@ -1980,6 +2010,60 @@ describe('mcodeRemoteLauncher refused turn', () => {
         // The raw agent error is not shown: it is not actionable on its own.
         expect(events.filter((event: { message?: string } | undefined) =>
             typeof event?.message === 'string' && event.message.includes('prompt failed'))).toHaveLength(0)
+        queue.close()
+    })
+
+    it('shows a message that was refused only once', async () => {
+        // The refused batch goes back into the queue with the same local id
+        // and the loop takes it out again. The user already read the message,
+        // so the retry must not show it a second time: the id is still
+        // remembered, because the agent never took the message.
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async () => {
+                promptCalls += 1
+                if (promptCalls === 1) throw new Error(BUSY_ERROR)
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null }, 'local-1')
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 5_000 })
+
+        // The first attempt shows the message, the retry finds it already
+        // shown.
+        expect(harness.displayedMessageIds.shownChecks).toEqual([
+            { localIds: ['local-1'], shown: false },
+            { localIds: ['local-1'], shown: true }
+        ])
+        // The agent never took the message, so nothing was forgotten.
+        expect(harness.displayedMessageIds.forgotten).toEqual([])
+        queue.close()
+    })
+
+    it('forgets a message the agent has taken', async () => {
+        // The message is the agent's from here, so it is never shown again.
+        // Its id does not have to be remembered for the rest of the session:
+        // a session that runs for hours would otherwise hold one id per
+        // message it ever sent.
+        const backend = createBackend()
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null }, 'local-1')
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalled()
+        })
+
+        // The message was handed over, so the hub marks it delivered - and
+        // the id of a message the agent has taken is forgotten.
+        await vi.waitFor(() => {
+            expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['local-1'])
+        })
+        expect(harness.displayedMessageIds.forgotten).toEqual(['local-1'])
         queue.close()
     })
 

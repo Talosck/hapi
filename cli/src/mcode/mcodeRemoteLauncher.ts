@@ -64,6 +64,7 @@ import {
     type McodeBackgroundTaskState
 } from './utils/mcodeBackgroundTaskState';
 import { renderMcodeDeliverables, splitMcodeDeliverables } from './utils/mcodeDeliverables';
+import { McodeDisplayedMessageIds } from './utils/mcodeDisplayedMessageIds';
 import { findMcodeMessagesPath } from './utils/mcodeUsage';
 import { readMcodeTranscriptToolMessages } from './utils/mcodeSessionTranscript';
 import { McodeConversationHistory } from './conversationHistory';
@@ -448,9 +449,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
      * The local ids of the messages that are already in the display buffer.
      *
      * A refused turn goes back into the queue and is delivered on the retry:
-     * without this the message would show up twice in the transcript.
+     * without this the message would show up twice in the transcript. The
+     * ids of the messages the agent has taken are dropped again, so a session
+     * that runs for hours does not hold one id per message it ever sent.
      */
-    private readonly displayedLocalIds = new Set<string>();
+    private readonly displayedMessageIds = new McodeDisplayedMessageIds();
 
     constructor(session: McodeSession, opts: McodeRemoteLauncherOptions) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -1244,13 +1247,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         const localIds = (batch.items ?? [])
             .map((item) => item.localId)
             .filter((localId): localId is string => Boolean(localId));
-        const alreadyShown = localIds.length > 0 && localIds.every((localId) => this.displayedLocalIds.has(localId));
-        if (!alreadyShown) {
+        if (!this.displayedMessageIds.areAllShown(localIds)) {
             messageBuffer.addMessage(batch.message, 'user');
         }
-        for (const localId of localIds) {
-            this.displayedLocalIds.add(localId);
-        }
+        this.displayedMessageIds.remember(localIds);
     }
 
     /**
@@ -1342,6 +1342,11 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     ): void {
         const localIds = this.batchLocalIds(batch);
         if (localIds.length === 0) return;
+        // The agent has the message now, so it is never shown again. The id
+        // does not have to be remembered for the rest of the session, and a
+        // session that runs for hours would otherwise hold one id per
+        // message it ever sent.
+        this.displayedMessageIds.forget(localIds);
         session.client.emitMessagesConsumed(localIds);
     }
 
