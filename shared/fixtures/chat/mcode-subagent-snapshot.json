@@ -1,0 +1,85 @@
+{
+    "description": "mcode flavor: a subagent-snapshot event carries the whole delegation tree, and the tree is session state and not a timeline entry - the web renders it in the session status panel, so the event leaves no block behind in the transcript.",
+    "expected": {
+        "blocks": [
+            {
+                "createdAt": 1755000000000,
+                "id": "msg-user-m11",
+                "kind": "user-text",
+                "localId": null,
+                "text": "Split the migration across both packages."
+            }
+        ],
+        "hasReadyEvent": false,
+        "latestUsage": null,
+        "visibleBlocks": [
+            {
+                "createdAt": 1755000000000,
+                "id": "msg-user-m11",
+                "kind": "user-text",
+                "localId": null,
+                "text": "Split the migration across both packages."
+            }
+        ]
+    },
+    "fixtureVersion": 1,
+    "input": {
+        "agentState": null,
+        "messages": [
+            {
+                "content": {
+                    "content": {
+                        "text": "Split the migration across both packages.",
+                        "type": "text"
+                    },
+                    "role": "user"
+                },
+                "createdAt": 1755000000000,
+                "id": "msg-user-m11",
+                "localId": null,
+                "seq": 1
+            },
+            {
+                "content": {
+                    "content": {
+                        "data": {
+                            "members": [
+                                {
+                                    "depth": 0,
+                                    "detail": null,
+                                    "endedAt": null,
+                                    "id": "sub-1",
+                                    "parentId": null,
+                                    "startedAt": 1755000002000,
+                                    "status": "running",
+                                    "title": "migrate the api package"
+                                },
+                                {
+                                    "depth": 1,
+                                    "detail": "the generated client is out of date",
+                                    "endedAt": 1755000003000,
+                                    "id": "sub-2",
+                                    "parentId": "sub-1",
+                                    "startedAt": 1755000002400,
+                                    "status": "completed",
+                                    "title": "rewrite the client of the api package"
+                                }
+                            ],
+                            "type": "subagent-snapshot"
+                        },
+                        "type": "event"
+                    },
+                    "role": "agent"
+                },
+                "createdAt": 1755000003100,
+                "id": "msg-mcode-m12",
+                "localId": null,
+                "seq": 2
+            }
+        ],
+        "options": {
+            "hasMoreMessages": false
+        }
+    },
+    "name": "mcode-subagent-snapshot"
+}

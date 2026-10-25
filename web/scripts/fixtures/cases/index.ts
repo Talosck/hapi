@@ -10,6 +10,7 @@ import { sidechainCases } from './sidechain'
 import { cliOutputCases } from './cliOutput'
 import { agyCases } from './agy'
 import { cursorCases } from './cursor'
+import { mcodeCases } from './mcode'
 
 /** Batches 1 + 2. Each case becomes shared/fixtures/chat/<name>.json. */
 export const fixtureCases: FixtureCase[] = [
@@ -23,5 +24,6 @@ export const fixtureCases: FixtureCase[] = [
     ...sidechainCases,
     ...cliOutputCases,
     ...agyCases,
-    ...cursorCases
+    ...cursorCases,
+    ...mcodeCases
 ]

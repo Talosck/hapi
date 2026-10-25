@@ -1,0 +1,147 @@
+{
+    "description": "mcode flavor: the agent's ask_user tool arrives as an ask_user_question tool-call (single-select with an optional step, the \"Other\" field is an open option), and the card stays answerable because the agent ended its turn when it raised the questionnaire.",
+    "expected": {
+        "blocks": [
+            {
+                "createdAt": 1755000000000,
+                "id": "msg-user-m01",
+                "kind": "user-text",
+                "localId": null,
+                "text": "Which site should the landing page use?"
+            },
+            {
+                "createdAt": 1755000002400,
+                "id": "call_mcode_ask_01",
+                "kind": "tool-call",
+                "localId": null,
+                "tool": {
+                    "id": "call_mcode_ask_01",
+                    "input": {
+                        "questions": [
+                            {
+                                "header": "Site",
+                                "multiSelect": false,
+                                "options": [
+                                    {
+                                        "description": "The Chinese site",
+                                        "label": "CN"
+                                    },
+                                    {
+                                        "description": "The international site",
+                                        "label": "Global"
+                                    }
+                                ],
+                                "question": "Which site should the landing page use?",
+                                "required": true
+                            }
+                        ]
+                    },
+                    "name": "ask_user_question",
+                    "state": "running"
+                }
+            }
+        ],
+        "hasReadyEvent": false,
+        "latestUsage": null,
+        "visibleBlocks": [
+            {
+                "createdAt": 1755000000000,
+                "id": "msg-user-m01",
+                "kind": "user-text",
+                "localId": null,
+                "text": "Which site should the landing page use?"
+            },
+            {
+                "createdAt": 1755000002400,
+                "id": "call_mcode_ask_01",
+                "kind": "tool-call",
+                "localId": null,
+                "tool": {
+                    "id": "call_mcode_ask_01",
+                    "input": {
+                        "questions": [
+                            {
+                                "header": "Site",
+                                "multiSelect": false,
+                                "options": [
+                                    {
+                                        "description": "The Chinese site",
+                                        "label": "CN"
+                                    },
+                                    {
+                                        "description": "The international site",
+                                        "label": "Global"
+                                    }
+                                ],
+                                "question": "Which site should the landing page use?",
+                                "required": true
+                            }
+                        ]
+                    },
+                    "name": "ask_user_question",
+                    "state": "running"
+                }
+            }
+        ]
+    },
+    "fixtureVersion": 1,
+    "input": {
+        "agentState": null,
+        "messages": [
+            {
+                "content": {
+                    "content": {
+                        "text": "Which site should the landing page use?",
+                        "type": "text"
+                    },
+                    "role": "user"
+                },
+                "createdAt": 1755000000000,
+                "id": "msg-user-m01",
+                "localId": null,
+                "seq": 1
+            },
+            {
+                "content": {
+                    "content": {
+                        "data": {
+                            "callId": "call_mcode_ask_01",
+                            "input": {
+                                "questions": [
+                                    {
+                                        "header": "Site",
+                                        "multiSelect": false,
+                                        "options": [
+                                            {
+                                                "description": "The Chinese site",
+                                                "label": "CN"
+                                            },
+                                            {
+                                                "description": "The international site",
+                                                "label": "Global"
+                                            }
+                                        ],
+                                        "question": "Which site should the landing page use?",
+                                        "required": true
+                                    }
+                                ]
+                            },
+                            "name": "ask_user_question",
+                            "type": "tool-call"
+                        },
+                        "type": "codex"
+                    },
+                    "role": "agent"
+                },
+                "createdAt": 1755000002400,
+                "id": "msg-mcode-m02",
+                "localId": null,
+                "seq": 2
+            }
+        ],
+        "options": {
+            "hasMoreMessages": false
+        }
+    },
+    "name": "mcode-ask-user-question"
+}
