@@ -447,6 +447,162 @@ describe('reduceChatBlocks', () => {
         })
     })
 
+    it('takes the window of the model the session was on when it switched models', () => {
+        // A session that switched models carries the window of both. The
+        // measurement has to be read against the window of the model it was
+        // on, not the one it left.
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'old-model-frame',
+                localId: null,
+                createdAt: 1_700_000_000_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                usage: {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    context_window: 200_000
+                }
+            },
+            {
+                id: 'new-model-frame',
+                localId: null,
+                createdAt: 1_700_000_001_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                usage: {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    context_window: 1_000_000
+                }
+            },
+            {
+                id: 'turn-summary',
+                localId: null,
+                createdAt: 1_700_000_002_000,
+                role: 'event',
+                content: {
+                    type: 'turn-summary',
+                    summary: {
+                        usage: {
+                            input_tokens: 2_023,
+                            output_tokens: 1_312,
+                            cache_read_input_tokens: 1_183_507
+                        },
+                        modelUsage: {},
+                        totalCostUsd: 13.44,
+                        numTurns: 8,
+                        durationMs: 46_731
+                    }
+                },
+                isSidechain: false
+            }
+        ] as NormalizedMessage[]
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.latestUsage?.contextWindow).toBe(1_000_000)
+    })
+
+    it('keeps the last measured usage when a turn reports no tokens', () => {
+        // A provider that answers with an all-zero usage block must not wipe
+        // the measurement a previous turn made.
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'measured-turn',
+                localId: null,
+                createdAt: 1_700_000_000_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                usage: {
+                    input_tokens: 210,
+                    output_tokens: 98,
+                    cache_read_input_tokens: 47_142,
+                    context_window: 1_000_000
+                }
+            },
+            {
+                id: 'empty-turn-summary',
+                localId: null,
+                createdAt: 1_700_000_001_000,
+                role: 'event',
+                content: {
+                    type: 'turn-summary',
+                    summary: {
+                        usage: {
+                            input_tokens: 0,
+                            output_tokens: 0
+                        },
+                        modelUsage: {}
+                    }
+                },
+                isSidechain: false
+            }
+        ] as NormalizedMessage[]
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.latestUsage).toMatchObject({
+            contextSize: 47_352,
+            source: 'frame'
+        })
+    })
+
+    it('takes the usage of a Claude turn from the round summary when the assistant frame reports none', () => {
+        // Claude's remote (SDK) path reports an all-zero usage block on every
+        // assistant frame and carries the real numbers only on the turn's
+        // result frame, which reaches the web as a turn-summary event. The
+        // status bar reads latestUsage, so the round summary has to feed it.
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'assistant-turn',
+                localId: null,
+                createdAt: 1_700_000_000_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                usage: {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    context_window: 1_000_000
+                }
+            },
+            {
+                id: 'turn-summary',
+                localId: null,
+                createdAt: 1_700_000_001_000,
+                role: 'event',
+                content: {
+                    type: 'turn-summary',
+                    summary: {
+                        usage: {
+                            input_tokens: 2_023,
+                            output_tokens: 1_312,
+                            cache_read_input_tokens: 1_183_507,
+                            cache_creation_input_tokens: 0
+                        },
+                        modelUsage: {},
+                        totalCostUsd: 13.44,
+                        numTurns: 8,
+                        durationMs: 46_731
+                    }
+                },
+                isSidechain: false
+            }
+        ] as NormalizedMessage[]
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.latestUsage).toMatchObject({
+            contextSize: 1_185_530,
+            cacheRead: 1_183_507,
+            contextWindow: 1_000_000
+        })
+    })
+
     it('does not adopt an all-zero usage sample as the latest usage', () => {
         const messages: NormalizedMessage[] = [
             {

@@ -1,0 +1,141 @@
+{
+    "description": "Claude output family: a turn whose result frame carries the usage. The assistant frame reports an all-zero usage block (the remote SDK path does that) and the turn_duration frame carries the real numbers, so latestUsage must come from the turn summary.",
+    "expected": {
+        "blocks": [
+            {
+                "createdAt": 1755000000000,
+                "id": "msg-user-051",
+                "kind": "user-text",
+                "localId": null,
+                "text": "Summarize the change."
+            },
+            {
+                "createdAt": 1755000005000,
+                "id": "msg-agent-052:0",
+                "kind": "agent-text",
+                "localId": null,
+                "text": "Here is the summary."
+            }
+        ],
+        "hasReadyEvent": false,
+        "latestUsage": {
+            "contextSize": 1185530,
+            "contextWindow": 1000000,
+            "inputTokens": 2023,
+            "outputTokens": 1312
+        },
+        "visibleBlocks": [
+            {
+                "createdAt": 1755000000000,
+                "id": "msg-user-051",
+                "kind": "user-text",
+                "localId": null,
+                "text": "Summarize the change."
+            },
+            {
+                "createdAt": 1755000005000,
+                "id": "msg-agent-052:0",
+                "kind": "agent-text",
+                "localId": null,
+                "text": "Here is the summary."
+            }
+        ]
+    },
+    "fixtureVersion": 1,
+    "input": {
+        "agentState": null,
+        "messages": [
+            {
+                "content": {
+                    "content": {
+                        "text": "Summarize the change.",
+                        "type": "text"
+                    },
+                    "role": "user"
+                },
+                "createdAt": 1755000000000,
+                "id": "msg-user-051",
+                "localId": null,
+                "seq": 1
+            },
+            {
+                "content": {
+                    "content": {
+                        "data": {
+                            "isSidechain": false,
+                            "message": {
+                                "content": [
+                                    {
+                                        "text": "Here is the summary.",
+                                        "type": "text"
+                                    }
+                                ],
+                                "id": "msg_5b8be3dc6087",
+                                "model": "minimax/MiniMax-M3.1-Flash",
+                                "role": "assistant",
+                                "usage": {
+                                    "context_window": 1000000,
+                                    "input_tokens": 0,
+                                    "output_tokens": 0
+                                }
+                            },
+                            "parentUuid": null,
+                            "timestamp": "2025-08-12T11:20:05.173Z",
+                            "type": "assistant",
+                            "uuid": "5b1c4f2a-9d3e-4a7b-8c1d-2e3f4a5b6c7d"
+                        },
+                        "type": "output"
+                    },
+                    "role": "agent"
+                },
+                "createdAt": 1755000005000,
+                "id": "msg-agent-052",
+                "localId": null,
+                "seq": 2
+            },
+            {
+                "content": {
+                    "content": {
+                        "data": {
+                            "durationMs": 46731,
+                            "messageId": "msg-agent-052",
+                            "resultSummary": {
+                                "duration_ms": 46731,
+                                "modelUsage": {
+                                    "minimax/MiniMax-M3.1-Flash[1m]": {
+                                        "cacheCreationInputTokens": 0,
+                                        "cacheReadInputTokens": 1183507,
+                                        "contextWindow": 1000000,
+                                        "inputTokens": 2023,
+                                        "outputTokens": 1312
+                                    }
+                                },
+                                "num_turns": 8,
+                                "total_cost_usd": 13.44,
+                                "usage": {
+                                    "cache_creation_input_tokens": 0,
+                                    "cache_read_input_tokens": 1183507,
+                                    "input_tokens": 2023,
+                                    "output_tokens": 1312
+                                }
+                            },
+                            "subtype": "turn_duration",
+                            "type": "system",
+                            "uuid": "f9b6d247-1a5c-4e6f-8b8d-c7e1f3a9b044"
+                        },
+                        "type": "output"
+                    },
+                    "role": "agent"
+                },
+                "createdAt": 1755000005450,
+                "id": "msg-agent-053",
+                "localId": null,
+                "seq": 3
+            }
+        ],
+        "options": {
+            "hasMoreMessages": false
+        }
+    },
+    "name": "claude-turn-duration-usage"
+}

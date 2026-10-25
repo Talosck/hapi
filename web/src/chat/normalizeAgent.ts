@@ -80,7 +80,7 @@ function normalizeResultUsage(value: unknown): UsageData | undefined {
     }
 }
 
-function normalizeRoundSummary(value: unknown): RoundSummary | undefined {
+function normalizeRoundSummary(value: unknown, provider?: RoundSummary['provider']): RoundSummary | undefined {
     if (!isObject(value)) return undefined
 
     const parsedModelUsage: Array<[string, RoundModelUsage]> = []
@@ -91,7 +91,8 @@ function normalizeRoundSummary(value: unknown): RoundSummary | undefined {
                 inputTokens: nonNegativeSafeInteger(rawUsage.inputTokens),
                 outputTokens: nonNegativeSafeInteger(rawUsage.outputTokens),
                 cacheReadInputTokens: nonNegativeSafeInteger(rawUsage.cacheReadInputTokens),
-                cacheCreationInputTokens: nonNegativeSafeInteger(rawUsage.cacheCreationInputTokens)
+                cacheCreationInputTokens: nonNegativeSafeInteger(rawUsage.cacheCreationInputTokens),
+                contextWindow: nonNegativeSafeInteger(rawUsage.contextWindow)
             }
             parsedModelUsage.push([model, usage])
         }
@@ -109,6 +110,7 @@ function normalizeRoundSummary(value: unknown): RoundSummary | undefined {
     }
 
     return {
+        provider,
         usage,
         modelUsage,
         totalCostUsd: totalCostUsd && totalCostUsd > 0 ? totalCostUsd : undefined,
@@ -801,7 +803,7 @@ export function normalizeAgentRecord(
             }
         }
         if (data.type === 'system' && data.subtype === 'turn_duration') {
-            const summary = normalizeRoundSummary(data.resultSummary)
+            const summary = normalizeRoundSummary(data.resultSummary, 'claude')
             const isSidechain = Boolean(data.isSidechain)
             const parentToolUseId = asString(data.parentToolUseId) ?? null
             if (summary) {

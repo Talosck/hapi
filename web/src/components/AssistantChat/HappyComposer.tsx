@@ -309,6 +309,8 @@ export function HappyComposer(props: {
     contextWindow?: number | null
     /** Model for the context-window heuristic; see StatusBar.contextModel. */
     contextModel?: string | null
+    /** Whether the size is a whole turn's; see StatusBar.contextSizeIsTurnTotal. */
+    contextSizeIsTurnTotal?: boolean
     /** What is left of the account's five hour window; see StatusBar.quota. */
     quota?: MinimaxQuotaWindow | null
     controlledByUser?: boolean
@@ -420,6 +422,7 @@ export function HappyComposer(props: {
         contextCacheRead,
         contextWindow,
         contextModel,
+        contextSizeIsTurnTotal,
         quota,
         controlledByUser = false,
         concurrentClients = false,
@@ -2235,6 +2238,7 @@ export function HappyComposer(props: {
                         contextCacheRead={contextCacheRead}
                         contextWindow={contextWindow}
                         contextModel={contextModel}
+                        contextSizeIsTurnTotal={contextSizeIsTurnTotal}
                         model={model}
                         modelReasoningEffort={modelReasoningEffort}
                         effort={effort}

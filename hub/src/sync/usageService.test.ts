@@ -61,6 +61,263 @@ describe('usage service', () => {
         store.close()
     })
 
+    it('does not count a turn twice when its assistant frames were scanned in an earlier batch', () => {
+        // The frames of a turn can arrive in different batches: an assistant
+        // frame indexed today is superseded by a result frame that only
+        // arrives tomorrow. The exclusion therefore cannot depend on the
+        // batch a frame was indexed in.
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'claude-incremental-turn-test',
+            { path: '/tmp', host: 'test', flavor: 'claude' },
+            null,
+            'default',
+            'test-model'
+        )
+
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: {
+                    id: 'claude-frame-1',
+                    model: 'claude-test',
+                    usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 80 }
+                }
+            }
+        })
+
+        // The first scan sees only the assistant frame.
+        const firstScan = getUsageSummary(store, 'default', 'all')
+        expect(firstScan.totals.requests).toBe(1)
+        expect(firstScan.totals.inputTokens).toBe(90)
+
+        // The result frame arrives later, in a second batch.
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'system',
+                subtype: 'turn_duration',
+                uuid: 'claude-turn-uuid',
+                resultSummary: {
+                    usage: {
+                        input_tokens: 10,
+                        output_tokens: 2,
+                        cache_read_input_tokens: 80,
+                        cache_creation_input_tokens: 0
+                    },
+                    modelUsage: {
+                        'claude-test': {
+                            inputTokens: 10,
+                            outputTokens: 2,
+                            cacheReadInputTokens: 80,
+                            cacheCreationInputTokens: 0,
+                            contextWindow: 200_000
+                        }
+                    },
+                    total_cost_usd: 0.5,
+                    num_turns: 1,
+                    duration_ms: 1_000
+                }
+            }
+        })
+
+        // The turn accounts for the turn; the frame it supersedes is not
+        // counted a second time.
+        const secondScan = getUsageSummary(store, 'default', 'all')
+        expect(secondScan.totals.requests).toBe(1)
+        expect(secondScan.totals.inputTokens).toBe(90)
+        expect(secondScan.totals.outputTokens).toBe(2)
+        expect(secondScan.totals.cacheReadTokens).toBe(80)
+        expect(secondScan.totals.totalTokens).toBe(92)
+        store.close()
+    })
+
+    it('keeps the usage of a local Claude session that reports no result frame', () => {
+        // The local (transcript) path has no result frame at all and reports
+        // the real numbers on its assistant frames. Those must keep counting.
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'claude-local-frames-test',
+            { path: '/tmp', host: 'test', flavor: 'claude' },
+            null,
+            'default',
+            'test-model'
+        )
+
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: {
+                    id: 'claude-frame-1',
+                    model: 'claude-test',
+                    usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 80 }
+                }
+            }
+        })
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: {
+                    id: 'claude-frame-2',
+                    model: 'claude-test',
+                    usage: { input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 90 }
+                }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.requests).toBe(2)
+        expect(result.totals.inputTokens).toBe(192)
+        expect(result.totals.outputTokens).toBe(5)
+        expect(result.totals.cacheReadTokens).toBe(170)
+        expect(result.totals.totalTokens).toBe(197)
+        store.close()
+    })
+
+    it('does not count a Claude turn twice when its assistant frames also report usage', () => {
+        // The remote path reports an all-zero block on the assistant frames,
+        // but the local path reports the real numbers there. If a provider
+        // ever does both, the turn's result frame already accounts for the
+        // whole turn — counting the frames as well would double every token.
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'claude-turn-double-count-test',
+            { path: '/tmp', host: 'test', flavor: 'claude' },
+            null,
+            'default',
+            'test-model'
+        )
+
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: {
+                    id: 'claude-frame-1',
+                    model: 'claude-test',
+                    usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 80 }
+                }
+            }
+        })
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: {
+                    id: 'claude-frame-2',
+                    model: 'claude-test',
+                    usage: { input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 90 }
+                }
+            }
+        })
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'system',
+                subtype: 'turn_duration',
+                uuid: 'claude-turn-uuid',
+                resultSummary: {
+                    usage: {
+                        input_tokens: 22,
+                        output_tokens: 5,
+                        cache_read_input_tokens: 170,
+                        cache_creation_input_tokens: 0
+                    },
+                    modelUsage: {
+                        'claude-test': {
+                            inputTokens: 22,
+                            outputTokens: 5,
+                            cacheReadInputTokens: 170,
+                            cacheCreationInputTokens: 0,
+                            contextWindow: 200_000
+                        }
+                    },
+                    total_cost_usd: 0.5,
+                    num_turns: 2,
+                    duration_ms: 1_000
+                }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.requests).toBe(1)
+        expect(result.totals.inputTokens).toBe(192)
+        expect(result.totals.outputTokens).toBe(5)
+        expect(result.totals.cacheReadTokens).toBe(170)
+        expect(result.totals.totalTokens).toBe(197)
+        store.close()
+    })
+
+    it('records the usage a Claude turn reports on its result frame', () => {
+        // Claude's remote (SDK) path reports an all-zero usage block on every
+        // assistant frame and carries the real numbers only on the turn's
+        // result frame, which reaches the hub as a turn_duration message.
+        // The dashboard must read that frame, otherwise the agent shows up
+        // with no tokens at all.
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'claude-turn-usage-test',
+            { path: '/tmp', host: 'test', flavor: 'claude' },
+            null,
+            'default',
+            'test-model'
+        )
+
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: {
+                    id: 'claude-zero-message',
+                    model: 'claude-test',
+                    usage: { input_tokens: 0, output_tokens: 0 }
+                }
+            }
+        })
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'system',
+                subtype: 'turn_duration',
+                uuid: 'claude-turn-uuid',
+                resultSummary: {
+                    usage: {
+                        input_tokens: 2_023,
+                        output_tokens: 1_312,
+                        cache_read_input_tokens: 1_183_507,
+                        cache_creation_input_tokens: 0
+                    },
+                    modelUsage: {
+                        'claude-test': {
+                            inputTokens: 2_023,
+                            outputTokens: 1_312,
+                            cacheReadInputTokens: 1_183_507,
+                            cacheCreationInputTokens: 0,
+                            contextWindow: 1_000_000
+                        }
+                    },
+                    total_cost_usd: 13.44,
+                    num_turns: 8,
+                    duration_ms: 46_731
+                }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.requests).toBe(1)
+        expect(result.totals.inputTokens).toBe(1_185_530)
+        expect(result.totals.outputTokens).toBe(1_312)
+        expect(result.totals.cacheReadTokens).toBe(1_183_507)
+        expect(result.totals.totalTokens).toBe(1_186_842)
+        expect(result.byAgent).toEqual([
+            expect.objectContaining({ key: 'claude', requests: 1, totalTokens: 1_186_842 })
+        ])
+        store.close()
+    })
+
     it('records a request whose provider reported an all-zero usage block', () => {
         // Some Anthropic-compatible providers answer with an all-zero usage
         // block. The request really happened, so the dashboard must still show

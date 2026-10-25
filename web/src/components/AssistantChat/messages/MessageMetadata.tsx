@@ -31,8 +31,21 @@ function formatUsd(value: number): string {
 }
 
 function getRoundUsage(summary: RoundSummary): UsageData | undefined {
+    // Claude reports the turn as a whole in `usage`, and its per-model usage
+    // is the session total. The footer describes one turn, so it reads the
+    // turn's own number. Codex has no such number and counts per model.
+    if (summary.provider === 'claude') {
+        return summary.usage
+    }
     const entries = Object.values(summary.modelUsage)
-    const hasModelToken = entries.some((usage: RoundModelUsage) => Object.values(usage).some(token => typeof token === 'number'))
+    // Only the token counters count. The window is a number too, but it is
+    // not a measurement of the turn.
+    const hasModelToken = entries.some((usage: RoundModelUsage) =>
+        usage.inputTokens !== undefined
+        || usage.outputTokens !== undefined
+        || usage.cacheReadInputTokens !== undefined
+        || usage.cacheCreationInputTokens !== undefined
+    )
     if (!hasModelToken) return summary.usage
 
     return entries.reduce<UsageData>((total, usage) => ({

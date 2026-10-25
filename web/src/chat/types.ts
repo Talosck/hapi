@@ -28,10 +28,26 @@ export type RoundModelUsage = {
     outputTokens?: number
     cacheReadInputTokens?: number
     cacheCreationInputTokens?: number
+    /**
+     * The window the model was measured against.
+     *
+     * Claude's result frame reports it per model, and it is the only
+     * authoritative value when the assistant frames carry no usage of their
+     * own (see the reducer's round-summary fallback).
+     */
+    contextWindow?: number
 }
 
 export type RoundSummary = {
-    provider?: 'codex'
+    /**
+     * Which agent reported the round.
+     *
+     * The two agents report their usage on different terms: Codex counts a
+     * cumulative stream, so its per-model usage is the total so far, while
+     * Claude reports the turn as a whole and its per-model usage is the
+     * session total. The footer reads the right one by asking.
+     */
+    provider?: 'codex' | 'claude'
     usage?: UsageData
     modelUsage: Record<string, RoundModelUsage>
     totalCostUsd?: number

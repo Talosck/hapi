@@ -1,5 +1,5 @@
 import type { AgentState } from '@/types/api'
-import type { AgentEvent, ChatBlock, NormalizedMessage, UsageData } from '@/chat/types'
+import type { AgentEvent, ChatBlock, NormalizedMessage, RoundSummary, UsageData } from '@/chat/types'
 import type { ThreadGoal } from '@/types/api'
 import { traceMessages, type TracedMessage } from '@/chat/tracer'
 import { dedupeAgentEvents, foldApiErrorEvents } from '@/chat/reducerEvents'
@@ -56,6 +56,70 @@ function isMeasuredUsage(usage: UsageData): boolean {
     return usage.input_tokens > 0 || usage.output_tokens > 0 || cacheTokens > 0
 }
 
+/**
+ * The usage a Claude turn reported on its result frame.
+ *
+ * Claude's remote (SDK) path reports an all-zero usage block on every
+ * assistant frame and carries the real numbers only on the turn's result
+ * frame, which reaches the web as a turn-summary event. The turn's own
+ * usage is the increment of that turn, so it is what the status bar shows
+ * once the turn is over.
+ *
+ * Returns null when the summary carries no measurable usage, so a summary
+ * without tokens never replaces a real measurement.
+ */
+function usageFromRoundSummary(summary: RoundSummary | undefined): UsageData | null {
+    if (!summary) return null
+    const usage = summary.usage
+    if (!usage) return null
+    if (!isMeasuredUsage(usage)) return null
+    // The window the agent was measured against. Claude reports it per model,
+    // and without it the status bar falls back to a heuristic that can be
+    // wrong by a factor of five.
+    const contextWindow = usage.context_window
+        ?? Object.values(summary.modelUsage)
+            .map((modelUsage) => modelUsage.contextWindow)
+            .find((window): window is number => typeof window === 'number' && window > 0)
+    return {
+        ...usage,
+        context_window: contextWindow
+    }
+}
+
+/**
+ * Whether a message is the summary of a finished turn.
+ */
+function isTurnSummaryMessage(msg: NormalizedMessage): boolean {
+    if (msg.role !== 'event') return false
+    const content = msg.content
+    if (!content || typeof content !== 'object' || !('type' in content)) return false
+    return (content as { type: string }).type === 'turn-summary'
+}
+
+/**
+ * The usage a message reports, if it reports one.
+ *
+ * A turn-summary carries the turn's usage in place of the assistant frame's
+ * own, so both are read from the same place.
+ */
+function messageUsage(msg: NormalizedMessage): UsageData | null {
+    if (isTurnSummaryMessage(msg)) {
+        const content = msg.content as { summary?: RoundSummary }
+        return usageFromRoundSummary(content.summary)
+    }
+    return msg.usage ?? null
+}
+
+/**
+ * Where a usage sample came from.
+ *
+ * A frame reports the context of a single request, which is what the context
+ * bar shows. A turn reports the work of a whole turn — every request of it
+ * summed — which is a different number: it grows with the number of requests
+ * and can exceed the window even when the context never came close to it.
+ */
+export type UsageSource = 'frame' | 'turn'
+
 export type LatestUsage = {
     inputTokens: number
     outputTokens: number
@@ -71,6 +135,11 @@ export type LatestUsage = {
      */
     model: string | null
     timestamp: number
+    /**
+     * Which kind of measurement this is, so the status bar can tell a
+     * context size from a turn's processing volume.
+     */
+    source: UsageSource
 }
 
 export type ReduceChatBlocksOptions = {
@@ -219,22 +288,58 @@ export function reduceChatBlocks(
     }
 
     // Calculate latest usage from messages (find the most recent message with usage data)
+    //
+    // A turn's usage can arrive in two places. Claude's local (transcript) path
+    // reports it on the assistant frame itself, while its remote (SDK) path
+    // reports an all-zero block there and carries the real numbers on the
+    // turn's result frame, which reaches the web as a turn-summary event.
+    // Both are read, newest first, so whichever carries a real measurement
+    // wins.
+    //
+    // The window the usage is measured against is looked up separately: a
+    // turn-summary does not carry one, but the assistant frames of the same
+    // turn do (the CLI stamps it), and without it the status bar falls back to
+    // a heuristic that can be off by a factor of five. Only the frames up to
+    // the measured message count — a session that switched models would
+    // otherwise be measured against the window of the model it left.
+    const contextWindows: Array<{ index: number; window: number }> = []
+    normalized.forEach((msg, index) => {
+        const window = msg.usage?.context_window
+        if (typeof window === 'number' && window > 0) contextWindows.push({ index, window })
+    })
+    // The window of the newest frame at or before the measured message. The
+    // newest one is the one the session was on: a session that switched
+    // models would otherwise be measured against the window of the model it
+    // left.
+    const windowBefore = (index: number): number | null => {
+        let newest: { index: number; window: number } | null = null
+        for (const entry of contextWindows) {
+            if (entry.index > index) break
+            if (!newest || entry.index > newest.index) newest = entry
+        }
+        return newest?.window ?? null
+    }
+
     let latestUsage: LatestUsage | null = null
     for (let i = normalized.length - 1; i >= 0; i--) {
         const msg = normalized[i]
-        if (msg.usage && isUsageVisibleInParentContext(msg) && isMeasuredUsage(msg.usage)) {
-            latestUsage = {
-                inputTokens: msg.usage.input_tokens,
-                outputTokens: msg.usage.output_tokens,
-                cacheCreation: msg.usage.cache_creation_input_tokens ?? 0,
-                cacheRead: msg.usage.cache_read_input_tokens ?? 0,
-                contextSize: calculateContextSize(msg.usage),
-                contextWindow: msg.usage.context_window ?? null,
-                model: msg.model ?? null,
-                timestamp: msg.createdAt
-            }
-            break
+        const usage = messageUsage(msg)
+        if (!usage || !isUsageVisibleInParentContext(msg) || !isMeasuredUsage(usage)) {
+            continue
         }
+        const contextWindow = usage.context_window ?? windowBefore(i)
+        latestUsage = {
+            inputTokens: usage.input_tokens,
+            outputTokens: usage.output_tokens,
+            cacheCreation: usage.cache_creation_input_tokens ?? 0,
+            cacheRead: usage.cache_read_input_tokens ?? 0,
+            contextSize: calculateContextSize(usage),
+            contextWindow,
+            model: msg.model ?? null,
+            timestamp: msg.createdAt,
+            source: isTurnSummaryMessage(msg) ? 'turn' : 'frame'
+        }
+        break
     }
 
     return {

@@ -535,5 +535,87 @@ export const claudeOutputCases: FixtureCase[] = [
                 }
             })
         ]
+    },
+    {
+        name: 'claude-turn-duration-usage',
+        description: 'Claude output family: a turn whose result frame carries the usage. The assistant frame reports an all-zero usage block (the remote SDK path does that) and the turn_duration frame carries the real numbers, so latestUsage must come from the turn summary.',
+        messages: [
+            wireMessage({
+                id: 'msg-user-051',
+                seq: 1,
+                createdAt: T0,
+                content: {
+                    role: 'user',
+                    content: { type: 'text', text: 'Summarize the change.' }
+                }
+            }),
+            wireMessage({
+                id: 'msg-agent-052',
+                seq: 2,
+                createdAt: T0 + 5_000,
+                content: {
+                    role: 'agent',
+                    content: {
+                        type: 'output',
+                        data: {
+                            type: 'assistant',
+                            uuid: '5b1c4f2a-9d3e-4a7b-8c1d-2e3f4a5b6c7d',
+                            parentUuid: null,
+                            timestamp: '2025-08-12T11:20:05.173Z',
+                            isSidechain: false,
+                            message: {
+                                id: 'msg_5b8be3dc6087',
+                                role: 'assistant',
+                                model: 'minimax/MiniMax-M3.1-Flash',
+                                content: [{ type: 'text', text: 'Here is the summary.' }],
+                                usage: {
+                                    input_tokens: 0,
+                                    output_tokens: 0,
+                                    context_window: 1_000_000
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+            wireMessage({
+                id: 'msg-agent-053',
+                seq: 3,
+                createdAt: T0 + 5_450,
+                content: {
+                    role: 'agent',
+                    content: {
+                        type: 'output',
+                        data: {
+                            type: 'system',
+                            subtype: 'turn_duration',
+                            uuid: 'f9b6d247-1a5c-4e6f-8b8d-c7e1f3a9b044',
+                            durationMs: 46_731,
+                            messageId: 'msg-agent-052',
+                            resultSummary: {
+                                usage: {
+                                    input_tokens: 2_023,
+                                    output_tokens: 1_312,
+                                    cache_read_input_tokens: 1_183_507,
+                                    cache_creation_input_tokens: 0
+                                },
+                                modelUsage: {
+                                    'minimax/MiniMax-M3.1-Flash[1m]': {
+                                        inputTokens: 2_023,
+                                        outputTokens: 1_312,
+                                        cacheReadInputTokens: 1_183_507,
+                                        cacheCreationInputTokens: 0,
+                                        contextWindow: 1_000_000
+                                    }
+                                },
+                                total_cost_usd: 13.44,
+                                num_turns: 8,
+                                duration_ms: 46_731
+                            }
+                        }
+                    }
+                }
+            })
+        ]
     }
 ]

@@ -5,6 +5,15 @@ import type { Store } from '../store'
 
 type RecordValue = Record<string, unknown>
 
+/**
+ * The source keys of the two Claude usage sources.
+ *
+ * The frames are the assistant messages; the turns are the result frames
+ * that close a turn and report its usage as a whole.
+ */
+const CLAUDE_FRAME_SOURCE_PREFIX = 'claude|'
+const CLAUDE_TURN_SOURCE_PREFIX = 'claude-turn|'
+
 function asRecord(value: unknown): RecordValue | null {
     return value !== null && typeof value === 'object' && !Array.isArray(value)
         ? value as RecordValue
@@ -55,6 +64,32 @@ function sessionModel(session: StoredSession): string | null {
     return typeof session.model === 'string' && session.model.trim() ? session.model.trim() : null
 }
 
+/**
+ * The model a Claude turn was measured on.
+ *
+ * The result frame reports its usage per model, and the key is the model the
+ * agent actually ran on — which the session's own model does not have to be
+ * (the session may have switched models mid-life). A turn can involve more
+ * than one model (the main model plus a small one for a subagent), so the
+ * one that produced the most output is the turn's own model.
+ */
+function claudeTurnModel(summary: RecordValue): string | null {
+    const modelUsage = asRecord(summary.modelUsage)
+    if (!modelUsage) return null
+    let bestModel: string | null = null
+    let bestOutput = -1
+    for (const [model, rawUsage] of Object.entries(modelUsage)) {
+        const name = model.trim()
+        if (!name) continue
+        const output = asCount(asRecord(rawUsage)?.outputTokens) ?? 0
+        if (output > bestOutput) {
+            bestOutput = output
+            bestModel = name
+        }
+    }
+    return bestModel
+}
+
 function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageEvent | null {
     const envelope = asRecord(message.content)
     if (envelope?.role !== 'agent') return null
@@ -63,6 +98,46 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
     if (!payload) return null
     const data = asRecord(payload.data)
     if (!data) return null
+
+    // Claude's result frame. It closes a turn and reports that turn's usage:
+    // the increment of every request the turn made. The remote (SDK) path
+    // reports an all-zero usage block on the assistant frames and only here
+    // the real numbers, so this is where the tokens of a remote turn come
+    // from. The local (transcript) path has no result frame at all and keeps
+    // reporting on its assistant frames.
+    if (payload.type === 'output' && data.type === 'system' && data.subtype === 'turn_duration') {
+        const summary = asRecord(data.resultSummary)
+        if (!summary) return null
+        const usage = asRecord(summary.usage)
+        if (!usage) return null
+        const inputTokens = firstCount(usage, 'input_tokens', 'inputTokens')
+        const outputTokens = firstCount(usage, 'output_tokens', 'outputTokens')
+        const cacheReadTokens = firstCount(usage, 'cache_read_input_tokens', 'cacheReadTokens', 'cachedInputTokens')
+        const cacheCreationTokens = firstCount(usage, 'cache_creation_input_tokens', 'cacheCreationTokens', 'cacheWriteInputTokens')
+        const measured = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens > 0
+        if (!measured) return null
+        const model = claudeTurnModel(summary) ?? sessionModel(session)
+        // The result frame carries a fresh uuid per turn, which keeps the
+        // upsert key stable and unique across turns.
+        const turnId = typeof data.uuid === 'string' && data.uuid ? data.uuid : message.id
+        return {
+            sessionId: session.id,
+            sourceKey: `${CLAUDE_TURN_SOURCE_PREFIX}${turnId}`,
+            sourceSeq: message.seq,
+            createdAt: message.createdAt,
+            agent: 'claude',
+            model,
+            kind: 'delta',
+            inputTokens: normalizeInputTokens(data, inputTokens, cacheReadTokens, cacheCreationTokens, 'excludes-cache'),
+            outputTokens,
+            cacheReadTokens,
+            cacheCreationTokens,
+            lastInputTokens: null,
+            lastOutputTokens: null,
+            lastCacheReadTokens: null,
+            lastCacheCreationTokens: null
+        }
+    }
 
     // Claude stream-json/SDK messages. A stream emits several updates for one
     // assistant message, so the provider's message id is the stable upsert key.
@@ -85,7 +160,7 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
         const measured = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens > 0
         return {
             sessionId: session.id,
-            sourceKey: `claude|${providerId}`,
+            sourceKey: `${CLAUDE_FRAME_SOURCE_PREFIX}${providerId}`,
             sourceSeq: message.seq,
             createdAt: message.createdAt,
             agent: 'claude',
@@ -398,7 +473,29 @@ export function getUsageSummary(
     const cumulativeFingerprints = new Set<string>()
     const dayFormatter = createDayFormatter(timeZone)
 
+    // A Claude turn's result frame reports the turn as a whole, so the
+    // assistant frames of that turn would count the same requests a second
+    // time. The exclusion happens here rather than while indexing, because
+    // the frames of a turn can arrive in different batches: an assistant
+    // frame indexed today is superseded by a result frame that only arrives
+    // tomorrow. Deciding on the whole set of events makes the outcome the
+    // same whether the events were scanned in one batch or many.
+    const turnSeqsBySession = new Map<string, number[]>()
     for (const event of events) {
+        if (!event.sourceKey.startsWith(CLAUDE_TURN_SOURCE_PREFIX)) continue
+        const seqs = turnSeqsBySession.get(event.sessionId) ?? []
+        seqs.push(event.sourceSeq)
+        turnSeqsBySession.set(event.sessionId, seqs)
+    }
+    const isSupersededByTurn = (event: UsageEvent): boolean => {
+        if (!event.sourceKey.startsWith(CLAUDE_FRAME_SOURCE_PREFIX)) return false
+        const turnSeqs = turnSeqsBySession.get(event.sessionId)
+        if (!turnSeqs) return false
+        return turnSeqs.some((seq) => seq > event.sourceSeq)
+    }
+
+    for (const event of events) {
+        if (isSupersededByTurn(event)) continue
         let inputTokens = event.inputTokens
         let outputTokens = event.outputTokens
         let cacheReadTokens = event.cacheReadTokens

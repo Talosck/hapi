@@ -306,6 +306,16 @@ export function StatusBar(props: {
     contextCacheRead?: number
     contextWindow?: number | null
     /**
+     * Whether the size was measured from a whole turn rather than from a
+     * single request.
+     *
+     * A turn's usage is the sum of every request it made, so it grows with
+     * the number of requests and can exceed the window even when the context
+     * never came close to it. It is a processing volume, not a context size,
+     * so the status bar shows the window alone for it.
+     */
+    contextSizeIsTurnTotal?: boolean
+    /**
      * Model to use for the context-window fallback heuristic when
      * contextWindow is absent. Falls back to `model`. Callers pass the
      * usage-bearing message's own model here so local Claude sessions (whose
@@ -369,28 +379,44 @@ export function StatusBar(props: {
      * next to it.
      */
     const showsWindowWithoutUsage = props.agentFlavor === 'mcode'
+    /**
+     * Whether the measured size can be shown as a context size at all.
+     *
+     * A turn's usage is the sum of every request the turn made, so putting
+     * it next to the window would report a context larger than the window
+     * for a session that is barely using it. The window alone is the honest
+     * thing to show.
+     */
+    const contextSizeIsContext = props.contextSize !== undefined && props.contextSizeIsTurnTotal !== true
     const contextWindowOnly = showsWindowWithoutUsage && props.contextSize === undefined && contextMaxSize !== null
     const contextWarning = useMemo(() => {
-        if (props.contextSize === undefined) return null
+        if (!contextSizeIsContext) return null
         if (!contextMaxSize) return null
-        return getContextWarning(props.contextSize, contextMaxSize)
-    }, [props.contextSize, contextMaxSize])
+        return getContextWarning(props.contextSize!, contextMaxSize)
+    }, [contextSizeIsContext, props.contextSize, contextMaxSize])
     const contextUsageLabel = useMemo(() => {
-        if (props.contextSize === undefined) {
-            return showsWindowWithoutUsage ? formatContextWindowLabel(contextMaxSize) : null
+        if (!contextSizeIsContext) {
+            return showsWindowWithoutUsage || props.contextSizeIsTurnTotal === true
+                ? formatContextWindowLabel(contextMaxSize)
+                : null
         }
-        return formatContextUsageLabel(props.contextSize, contextMaxSize)
-    }, [props.contextSize, contextMaxSize, showsWindowWithoutUsage])
+        return formatContextUsageLabel(props.contextSize!, contextMaxSize)
+    }, [contextSizeIsContext, props.contextSize, props.contextSizeIsTurnTotal, contextMaxSize, showsWindowWithoutUsage])
     const compactContextUsageLabel = useMemo(() => {
-        if (props.contextSize === undefined) {
-            return showsWindowWithoutUsage ? formatContextWindowLabel(contextMaxSize) : null
+        if (!contextSizeIsContext) {
+            return showsWindowWithoutUsage || props.contextSizeIsTurnTotal === true
+                ? formatContextWindowLabel(contextMaxSize)
+                : null
         }
-        return formatCompactContextUsageLabel(props.contextSize, contextMaxSize)
-    }, [props.contextSize, contextMaxSize, showsWindowWithoutUsage])
+        return formatCompactContextUsageLabel(props.contextSize!, contextMaxSize)
+    }, [contextSizeIsContext, props.contextSize, props.contextSizeIsTurnTotal, contextMaxSize, showsWindowWithoutUsage])
     const contextUsageDetails = useMemo(() => {
-        if (props.contextSize === undefined) {
-            // Nothing has been measured yet: the window is all there is to say.
-            if (!showsWindowWithoutUsage || !contextMaxSize) return null
+        if (!contextSizeIsContext) {
+            // Nothing has been measured yet, or the measurement is a turn's
+            // processing volume rather than a context size: the window is all
+            // there is to say.
+            if (!showsWindowWithoutUsage && props.contextSizeIsTurnTotal !== true) return null
+            if (!contextMaxSize) return null
             return {
                 cacheRead: null,
                 used: '0',
@@ -399,8 +425,8 @@ export function StatusBar(props: {
                 remainingPercentage: 100
             }
         }
-        return getContextUsageDetails(props.contextSize, contextMaxSize, props.contextCacheRead)
-    }, [props.contextSize, props.contextCacheRead, contextMaxSize, showsWindowWithoutUsage])
+        return getContextUsageDetails(props.contextSize!, contextMaxSize, props.contextCacheRead)
+    }, [contextSizeIsContext, props.contextSize, props.contextCacheRead, props.contextSizeIsTurnTotal, contextMaxSize, showsWindowWithoutUsage])
     const contextUsedPercentage = contextUsageDetails?.usedPercentage ?? null
 
     const permissionMode = props.permissionMode

@@ -185,6 +185,39 @@ describe('buildMessageMetadataLabels', () => {
         ])
     })
 
+    it('reports the tokens of the turn itself for a Claude round', () => {
+        // Claude's per-model usage is the session total, while its turn
+        // usage is the turn itself. The footer describes one turn, so it
+        // must not show the session's accumulated tokens.
+        expect(buildMessageMetadataLabels({
+            roundSummary: {
+                provider: 'claude',
+                usage: {
+                    input_tokens: 2_023,
+                    output_tokens: 1_312,
+                    cache_read_input_tokens: 1_183_507,
+                    cache_creation_input_tokens: 0
+                },
+                modelUsage: {
+                    'minimax/MiniMax-M3.1-Flash[1m]': {
+                        inputTokens: 170_246,
+                        outputTokens: 80_488,
+                        cacheReadInputTokens: 21_171_033,
+                        cacheCreationInputTokens: 0
+                    }
+                },
+                totalCostUsd: 13.44,
+                numTurns: 8,
+                durationMs: 46_731
+            }
+        } as any)).toEqual([
+            'Model: minimax/MiniMax-M3.1-Flash[1m]',
+            'Tokens: 1.2m (1.2m in · 1.3k out)',
+            'Cached input: 99.8% · Cost: $13.440',
+            'Round: 46.7s · 8 turns'
+        ])
+    })
+
     it('keeps the existing formatter byte-identical when no result summary is present', () => {
         expect(buildMessageMetadataLabels({
             durationMs: 1234,

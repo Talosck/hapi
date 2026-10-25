@@ -2388,6 +2388,7 @@ function SessionChatInner(props: SessionChatProps) {
                         contextCacheRead={reduced.latestUsage?.cacheRead}
                         contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}
                         contextModel={reduced.latestUsage?.model ?? props.session.model}
+                        contextSizeIsTurnTotal={reduced.latestUsage?.source === 'turn'}
                         quota={minimaxQuota.quota}
                         controlledByUser={controlledByUser}
                         onCollaborationModeChange={
