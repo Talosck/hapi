@@ -420,30 +420,29 @@ describe('mcodeRemoteLauncher config sync', () => {
         harness.mcpBridgeOptions = null
     })
 
-    it('gives the agent the title tool so a new chat is named while it works', async () => {
-        // MiniMax Code publishes its own title over ACP only after the turn it
-        // derives it from has finished, so a new chat stayed untitled until
-        // the first answer was done. The title tool lets the model name the
-        // session while it is still working on it.
+    it('does not give the agent the title tool', async () => {
+        // The session is named after the text of the user's first message, so
+        // the model has no title to write. Offering the tool would spend a
+        // model round on a name the chat already has.
         const backend = createBackend()
         const session = createSession([{ message: 'hi', mode: { permissionMode: 'default', model: null } }])
 
         await mcodeRemoteLauncher(session as never, {})
 
-        expect(harness.mcpBridgeOptions?.enableChangeTitle).toBe(true)
+        expect(harness.mcpBridgeOptions?.enableChangeTitle).toBe(false)
         expect(backend.setModel).not.toHaveBeenCalled()
     })
 
-    it('lets the title of the agent replace the one the model offers', async () => {
-        // The title the model sets is a placeholder: the agent publishes the
-        // real one at the end of the first turn, and that one has to win. A
-        // rename would take the title away from the agent that owns it.
+    it('leaves the title of the agent to the agent alone', async () => {
+        // The agent publishes its own title at the end of the first turn, and
+        // that one has to win over the name of the first message. No title
+        // mode is set: the tool that would write one is not offered at all.
         const backend = createBackend()
         const session = createSession([{ message: 'hi', mode: { permissionMode: 'default', model: null } }])
 
         await mcodeRemoteLauncher(session as never, {})
 
-        expect(harness.mcpBridgeOptions?.titleMode).toBe('placeholder')
+        expect(harness.mcpBridgeOptions?.titleMode).toBeUndefined()
         expect(backend.setModel).not.toHaveBeenCalled()
     })
 

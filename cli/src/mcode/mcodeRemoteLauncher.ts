@@ -846,15 +846,14 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
         const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
             // MiniMax Code publishes its own session title over ACP only after
             // the turn it derives it from has finished, so a new chat stayed
-            // untitled until the first answer was done. The change_title tool
-            // lets the model name the session while it is still working on it.
+            // untitled until the first answer was done.
             //
-            // It is a placeholder, not a rename: the title the agent publishes
-            // replaces it, and a session that already has a title keeps it.
-            // The model renaming the chat mid-session would otherwise take the
-            // title away from the agent that owns it.
-            enableChangeTitle: true,
-            titleMode: 'placeholder',
+            // The session is named after the text of the user's first message
+            // instead, and the agent's own title replaces it when it arrives.
+            // The title tool is not offered to the model: the user already
+            // wrote the request the title is about, so asking the model for a
+            // name spends a model round on something the chat already knows.
+            enableChangeTitle: false,
             skillLookup: { workingDirectory: session.path, flavor: 'mcode' }
         });
         this.happyServer = happyServer;

@@ -14,6 +14,7 @@ import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import { registerMcodeSessionModelHandlers } from '@/modules/common/handlers/mcodeModels';
 import { classifyMcodeConnectFailure, mcodeConnectFailureArchiveReason } from './utils/mcodeConnectFailure';
+import { createFirstMessageTitleSync } from './utils/mcodeSessionTitle';
 
 export async function runMcode(opts: {
     startedBy?: 'runner' | 'terminal';
@@ -75,6 +76,10 @@ export async function runMcode(opts: {
     let sessionModel: string | null = opts.model ?? null;
     let sessionEffort: string | null = opts.effort && opts.effort !== 'default' ? opts.effort : null;
 
+    // The session is named after the text of the user's first message, until
+    // the agent publishes a title of its own.
+    const syncFirstMessageTitle = createFirstMessageTitleSync(session);
+
     const lifecycle = createRunnerLifecycle({
         session,
         logTag: 'mcode',
@@ -128,6 +133,11 @@ export async function runMcode(opts: {
     };
 
     session.onUserMessage((message, localId) => {
+        // The first message names the session: the chat shows the text of the
+        // request instead of the name of the project folder until the agent
+        // publishes a title of its own. The raw text is used, not the
+        // formatted one - the attachment paths are not part of the request.
+        syncFirstMessageTitle(message.content.text);
         const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
         const mode: McodeMode = {
             permissionMode: currentPermissionMode,

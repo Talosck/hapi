@@ -18,15 +18,18 @@ export const INLINE_MEDIA_SHELL_FALLBACK = trimIdent(`
  *
  * The ACP agents never see the title instruction the native ones get in their
  * system prompt, so the tool description is the only instruction they get. It
- * therefore has to say *when* to call the tool: an agent like MiniMax Code
- * that is only told the tool exists decides for itself that a long task is not
- * clear yet and starts working instead - the chat then stays untitled until
- * the agent publishes a title of its own, which it does at the end of the
- * first turn.
+ * therefore has to say *when* to call the tool: an agent that is only told
+ * the tool exists decides for itself that a long task is not clear yet and
+ * starts working instead - the chat then stays untitled until the agent
+ * publishes a title of its own, which it does at the end of the first turn.
  *
  * Both MCP servers use this one text: the HTTP server (the native agents talk
  * to it directly) and the stdio bridge (every ACP agent talks to that one).
  * A description that only one of them carries reaches half the agents.
+ *
+ * MiniMax Code is not among the agents that get this tool: it publishes a
+ * title of its own, and its session is named after the first message of the
+ * user until that title arrives.
  */
 export const CHANGE_TITLE_TOOL_DESCRIPTION = 'Set the title of the current HAPI chat session. You MUST call this tool exactly once at the start of every new chat, before reading any file, before planning and before any other tool call. Do not skip it and do not postpone it until later. Pass a concise task title (under 20 characters, no quotes and no trailing punctuation). Do not call it again for routine progress, substeps, implementation details or a slightly better wording.';
 
