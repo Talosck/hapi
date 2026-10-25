@@ -37,6 +37,25 @@ function isUsageVisibleInParentContext(msg: NormalizedMessage): boolean {
     return msg.usage?.scope_role !== 'child'
 }
 
+/**
+ * Whether a usage sample actually measured anything.
+ *
+ * Some Anthropic-compatible providers answer with an all-zero usage block
+ * (input 0, output 0, no cache counts). The reducer keeps the newest usage
+ * message, so such a sample would overwrite the measured context with 0 and
+ * the status bar would report "0% · 0 / 1M" for a session that is actually
+ * half full. Ignoring it keeps the last real measurement on screen.
+ *
+ * A sample that reports a context size of its own (the post-compaction
+ * refresh carries the boundary's post-tokens in `context_tokens`) is a real
+ * measurement even though its input/output counts are zero, so it still counts.
+ */
+function isMeasuredUsage(usage: UsageData): boolean {
+    if (typeof usage.context_tokens === 'number' && usage.context_tokens > 0) return true
+    const cacheTokens = (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0)
+    return usage.input_tokens > 0 || usage.output_tokens > 0 || cacheTokens > 0
+}
+
 export type LatestUsage = {
     inputTokens: number
     outputTokens: number
@@ -203,7 +222,7 @@ export function reduceChatBlocks(
     let latestUsage: LatestUsage | null = null
     for (let i = normalized.length - 1; i >= 0; i--) {
         const msg = normalized[i]
-        if (msg.usage && isUsageVisibleInParentContext(msg)) {
+        if (msg.usage && isUsageVisibleInParentContext(msg) && isMeasuredUsage(msg.usage)) {
             latestUsage = {
                 inputTokens: msg.usage.input_tokens,
                 outputTokens: msg.usage.output_tokens,

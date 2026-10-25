@@ -19,6 +19,14 @@ private func isUsageVisibleInParentContext(_ msg: NormalizedMessage) -> Bool {
     return msg.usage?.scopeRole != "child"
 }
 
+/// Port of `isMeasuredUsage` — some Anthropic-compatible providers answer with
+/// an all-zero usage block, which must not overwrite the measured context.
+private func isMeasuredUsage(_ usage: UsageData) -> Bool {
+    if let contextTokens = usage.contextTokens, contextTokens > 0 { return true }
+    let cacheTokens = (usage.cacheCreationInputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0)
+    return usage.inputTokens > 0 || usage.outputTokens > 0 || cacheTokens > 0
+}
+
 private let goalCommandRegex = JSRegex("\\A\\s*/goal(?:\\s|\\z)", caseInsensitive: true)
 
 /// Port of `getLatestThreadGoal`. Returns the normalized goal record
@@ -148,7 +156,7 @@ public func reduceChatBlocks(
     // Latest usage: the most recent parent-context message with usage data.
     var latestUsage: LatestUsage?
     for msg in normalized.reversed() {
-        if let usage = msg.usage, isUsageVisibleInParentContext(msg) {
+        if let usage = msg.usage, isUsageVisibleInParentContext(msg), isMeasuredUsage(usage) {
             latestUsage = LatestUsage(
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,

@@ -404,6 +404,113 @@ describe('reduceChatBlocks', () => {
         })
     })
 
+    it('keeps the last measured context when a later usage sample reports no tokens', () => {
+        // Some Anthropic-compatible providers answer with an all-zero usage
+        // block. The reducer picks the newest usage message, so such a sample
+        // used to overwrite the measured context with 0 and the status bar
+        // showed "0% · 0 / 1M" for a session that was actually half full.
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'measured-turn',
+                localId: null,
+                createdAt: 1_700_000_000_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                usage: {
+                    input_tokens: 210,
+                    output_tokens: 98,
+                    cache_read_input_tokens: 47_142,
+                    context_window: 1_000_000
+                }
+            },
+            {
+                id: 'zero-turn',
+                localId: null,
+                createdAt: 1_700_000_001_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                usage: {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    context_window: 1_000_000
+                }
+            }
+        ] as NormalizedMessage[]
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.latestUsage).toMatchObject({
+            contextSize: 47_352,
+            cacheRead: 47_142
+        })
+    })
+
+    it('does not adopt an all-zero usage sample as the latest usage', () => {
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'zero-turn',
+                localId: null,
+                createdAt: 1_700_000_000_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                usage: {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    context_window: 1_000_000
+                }
+            }
+        ] as NormalizedMessage[]
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.latestUsage).toBeNull()
+    })
+
+    it('keeps a context-only usage sample that reports a real context size', () => {
+        // The post-compaction refresh carries the boundary's post-tokens in
+        // context_tokens while its own input/output counts stay zero. That is
+        // a real measurement, so it must still replace the previous one.
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'measured-turn',
+                localId: null,
+                createdAt: 1_700_000_000_000,
+                role: 'event',
+                content: { type: 'token-count', info: {} },
+                isSidechain: false,
+                usage: {
+                    input_tokens: 210,
+                    output_tokens: 98,
+                    cache_read_input_tokens: 47_142,
+                    context_window: 1_000_000
+                }
+            },
+            {
+                id: 'compact-turn',
+                localId: null,
+                createdAt: 1_700_000_001_000,
+                role: 'event',
+                content: { type: 'token-count', info: {} },
+                isSidechain: false,
+                usage: {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    context_tokens: 13_681,
+                    context_window: 1_000_000
+                }
+            }
+        ] as NormalizedMessage[]
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.latestUsage).toMatchObject({
+            contextSize: 13_681
+        })
+    })
+
     it('keeps active goals visible across later normal user messages', () => {
         const reduced = reduceChatBlocks([
             goalMessage('goal-active', 'active', 1),

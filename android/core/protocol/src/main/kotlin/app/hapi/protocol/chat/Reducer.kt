@@ -16,6 +16,20 @@ private fun isUsageVisibleInParentContext(msg: NormalizedMessage): Boolean {
     return msg.usage?.scopeRole != "child"
 }
 
+/**
+ * Whether a usage sample actually measured anything.
+ *
+ * Some Anthropic-compatible providers answer with an all-zero usage block
+ * (input 0, output 0, no cache counts). The reducer keeps the newest usage
+ * message, so such a sample would overwrite the measured context with 0.
+ */
+private fun isMeasuredUsage(usage: UsageData): Boolean {
+    val contextTokens = usage.contextTokens ?: 0.0
+    if (contextTokens > 0.0) return true
+    val cacheTokens = (usage.cacheCreationInputTokens ?: 0.0) + (usage.cacheReadInputTokens ?: 0.0)
+    return usage.inputTokens > 0.0 || usage.outputTokens > 0.0 || cacheTokens > 0.0
+}
+
 data class LatestUsage(
     val inputTokens: Double,
     val outputTokens: Double,
@@ -156,7 +170,7 @@ fun reduceChatBlocks(
     for (i in normalized.indices.reversed()) {
         val msg = normalized[i]
         val usage = msg.usage
-        if (usage != null && isUsageVisibleInParentContext(msg)) {
+        if (usage != null && isUsageVisibleInParentContext(msg) && isMeasuredUsage(usage)) {
             latestUsage = LatestUsage(
                 inputTokens = usage.inputTokens,
                 outputTokens = usage.outputTokens,
