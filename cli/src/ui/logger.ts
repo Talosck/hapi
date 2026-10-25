@@ -13,29 +13,48 @@ import { join, basename } from 'node:path'
 import { readRunnerState } from '@/persistence'
 
 /**
- * Consistent date/time formatting functions
+ * Cached `Intl.DateTimeFormat` instances.
+ *
+ * Building a formatter and resolving the system timezone is expensive
+ * (~54 µs per call), and every log line needs a timestamp. The hot paths
+ * (a Pi turn logs one line per agent event, thousands per minute) would spend
+ * more time building formatters than writing the log. The formatters are
+ * immutable, so they are built once and reused.
+ *
+ * The timezone is resolved once, alongside the formatters: a process that
+ * changed `process.env.TZ` mid-run would keep the zone it started in, which
+ * matches how the log file name was chosen at startup.
  */
-function createTimestampForFilename(date: Date = new Date()): string {
-  return date.toLocaleString('sv-SE', { 
-    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    year: 'numeric',
-    month: '2-digit', 
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).replace(/[: ]/g, '-').replace(/,/g, '') + '-pid-' + process.pid
-}
+const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 
-function createTimestampForLogEntry(date: Date = new Date()): string {
-  return date.toLocaleTimeString('en-US', { 
-    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+const logEntryFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: localTimeZone,
     hour12: false,
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
     fractionalSecondDigits: 3
-  })
+})
+
+const filenameFormatter = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: localTimeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+})
+
+/**
+ * Consistent date/time formatting functions
+ */
+export function createTimestampForFilename(date: Date = new Date()): string {
+    return filenameFormatter.format(date).replace(/[: ]/g, '-').replace(/,/g, '') + '-pid-' + process.pid
+}
+
+export function createTimestampForLogEntry(date: Date = new Date()): string {
+    return logEntryFormatter.format(date)
 }
 
 function getSessionLogPath(): string {
