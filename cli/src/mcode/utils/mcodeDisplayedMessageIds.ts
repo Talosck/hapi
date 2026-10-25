@@ -25,7 +25,12 @@ export class McodeDisplayedMessageIds {
         return localIds.every((localId) => this.shown.has(localId));
     }
 
-    /** Remembers that the ids were shown. */
+    /**
+     * Remembers that the ids were shown.
+     *
+     * The id is kept until the message is delivered, so that a message the
+     * agent refused and put back into the queue is not shown a second time.
+     */
     public remember(localIds: string[]): void {
         for (const localId of localIds) {
             this.shown.add(localId);
@@ -36,7 +41,8 @@ export class McodeDisplayedMessageIds {
      * Forgets the ids of the messages the agent has taken.
      *
      * The message is the agent's from here, so it is never shown again and
-     * the id does not have to be remembered.
+     * the id does not have to be remembered. A message that goes back into
+     * the queue is remembered again.
      */
     public forget(localIds: string[]): void {
         for (const localId of localIds) {

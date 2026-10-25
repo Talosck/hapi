@@ -42,6 +42,8 @@ describe('McodeDisplayedMessageIds', () => {
             ids.forget([localId]);
         }
         expect(ids.size).toBe(0);
+        // The behavior is the point: a delivered message is not held back.
+        expect(ids.areAllShown(['local-0'])).toBe(false);
     });
 
     it('keeps the ids of a message that is still waiting to be delivered', () => {

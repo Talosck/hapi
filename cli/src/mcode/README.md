@@ -100,7 +100,14 @@ would mean keeping the account's credential in the repository's secrets.
   therefore answerable across that boundary, and it is not a tool approval.
 - **A refused turn is not lost.** The batch goes back into the queue with its
   local id, and the hub is told, so a runner that dies before the retry hands
-  the message to the next runner.
+  the message to the next runner. The id is remembered again on that path: the
+  launcher forgets the ids of the messages the agent has taken, and a message
+  the agent refused after taking it was never delivered.
+- **A steer belongs to the turn it is steered into.** The turn runs under one
+  mode, and a message that was queued under another one is refused - the mode
+  decided what the agent was allowed to do. The mode is the one in effect, not
+  the one that was asked for: a model the agent cannot switch to or a
+  permission mode it cannot honor rolls the mode back.
 - **The agent files its credential by path.** MiniMax Code keys the stored
   credential by the path of its own directory, so a credential that was signed
   in on one machine is not found on another.
