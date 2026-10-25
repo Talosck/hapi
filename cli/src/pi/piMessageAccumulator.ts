@@ -3,10 +3,27 @@ import type { AgentMessage } from '@/agent/types';
 import { PiAssistantMessageEventSchema } from './schemas';
 import type { PiAgentEvent } from './types';
 
-const DEFAULT_SNAPSHOT_INTERVAL_MS = 250;
+const DEFAULT_SNAPSHOT_INTERVAL_MS = 1_000;
+
+/**
+ * How much text has to grow since the last snapshot before the next one goes
+ * out.
+ *
+ * Every snapshot carries the whole text of the message so far, so the number
+ * of snapshots decides the total volume: a message of n characters that is
+ * snapshotted k times sends ~n*k/2 characters. Measured against a real Pi
+ * turn, a fixed 250 ms interval pushed 47x the answer text over the wire.
+ * Pacing by growth instead of by time makes the volume scale with the answer
+ * rather than with its duration.
+ *
+ * The size matches the bash preview step (PI_BASH_PREVIEW_STEP_CHARS): below
+ * it, a snapshot cannot show enough new text to be worth the row it replaces.
+ */
+const DEFAULT_SNAPSHOT_STEP_CHARS = 4 * 1024;
 
 type PiMessageAccumulatorOptions = {
     snapshotIntervalMs?: number;
+    snapshotStepChars?: number;
     now?: () => number;
     streamNonceFactory?: () => string;
 };
@@ -49,11 +66,15 @@ export class PiMessageAccumulator {
     private readonly textSegments = new Map<number, Segment>();
     private readonly reasoningSegments = new Map<number, Segment>();
     private lastSnapshotAt: number | null = null;
+    /** The text length at the last snapshot, used to measure the growth. */
+    private lastSnapshotLength = 0;
     private readonly snapshotIntervalMs: number;
+    private readonly snapshotStepChars: number;
     private readonly now: () => number;
 
     constructor(options: PiMessageAccumulatorOptions = {}) {
         this.snapshotIntervalMs = options.snapshotIntervalMs ?? DEFAULT_SNAPSHOT_INTERVAL_MS;
+        this.snapshotStepChars = options.snapshotStepChars ?? DEFAULT_SNAPSHOT_STEP_CHARS;
         this.now = options.now ?? Date.now;
         this.streamNonce = options.streamNonceFactory?.() ?? randomUUID();
     }
@@ -125,6 +146,7 @@ export class PiMessageAccumulator {
         this.textSegments.clear();
         this.reasoningSegments.clear();
         this.lastSnapshotAt = null;
+        this.lastSnapshotLength = 0;
     }
 
     private append(segments: Map<number, Segment>, index: number, delta: string): void {
@@ -133,19 +155,45 @@ export class PiMessageAccumulator {
         segments.set(index, segment);
     }
 
+    /**
+     * Decides whether the grown text is worth a snapshot yet.
+     *
+     * A snapshot goes out when the text grew by `snapshotStepChars` since the
+     * last one, or when `snapshotIntervalMs` elapsed since the last one —
+     * whichever comes first. The growth is what paces the traffic; the
+     * elapsed time only keeps a slow stream from looking frozen.
+     *
+     * The very first snapshot of a message always goes out: there is nothing
+     * to compare against, and a short answer must not stay invisible until
+     * its boundary.
+     */
     private snapshotIfDue(): AgentMessage[] {
         const now = this.now();
-        if (this.lastSnapshotAt !== null && now - this.lastSnapshotAt < this.snapshotIntervalMs) {
+        const grown = this.currentLength() - this.lastSnapshotLength;
+        const elapsed = this.lastSnapshotAt === null
+            ? Number.POSITIVE_INFINITY
+            : now - this.lastSnapshotAt;
+        if (grown < this.snapshotStepChars && elapsed < this.snapshotIntervalMs) {
             return [];
         }
         this.lastSnapshotAt = now;
         return this.createSnapshots(true);
     }
 
+    /** The combined length of the text and reasoning segments. */
+    private currentLength(): number {
+        let total = 0;
+        for (const segment of this.textSegments.values()) total += segment.text.length;
+        for (const segment of this.reasoningSegments.values()) total += segment.text.length;
+        return total;
+    }
+
     private createSnapshots(live: boolean): AgentMessage[] {
         const messages: AgentMessage[] = [];
         this.addSnapshots(messages, 'reasoning', this.reasoningSegments, live);
         this.addSnapshots(messages, 'text', this.textSegments, live);
+        // The next snapshot is paced against what has been sent so far.
+        this.lastSnapshotLength = this.currentLength();
         return messages;
     }
 
@@ -174,5 +222,6 @@ export class PiMessageAccumulator {
         this.textSegments.clear();
         this.reasoningSegments.clear();
         this.lastSnapshotAt = null;
+        this.lastSnapshotLength = 0;
     }
 }

@@ -6,7 +6,14 @@ const event = (type: string, extra: Record<string, unknown> = {}) => ({ type, ..
 describe('PiMessageAccumulator', () => {
     it('streams throttled cumulative text and reasoning snapshots with separate stable ids', () => {
         let now = 0;
-        const accumulator = new PiMessageAccumulator({ now: () => now, streamNonceFactory: () => 'nonce' });
+        // The step paces the traffic and the interval is the safety net; both
+        // are set so the test drives the snapshot deliberately.
+        const accumulator = new PiMessageAccumulator({
+            now: () => now,
+            streamNonceFactory: () => 'nonce',
+            snapshotStepChars: 1000,
+            snapshotIntervalMs: 250,
+        });
         accumulator.handleEvent(event('turn_start'));
         accumulator.handleEvent(event('message_start'));
 
@@ -62,7 +69,12 @@ describe('PiMessageAccumulator', () => {
 
     it('keeps multiple content indexes separate instead of concatenating blocks', () => {
         let now = 0;
-        const accumulator = new PiMessageAccumulator({ now: () => now, streamNonceFactory: () => 'nonce' });
+        const accumulator = new PiMessageAccumulator({
+            now: () => now,
+            streamNonceFactory: () => 'nonce',
+            snapshotStepChars: 1000,
+            snapshotIntervalMs: 250,
+        });
         accumulator.handleEvent(event('message_start'));
         const first = accumulator.handleEvent(event('message_update', {
             assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'alpha' },
