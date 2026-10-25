@@ -9,9 +9,15 @@
  * agent's own session directory on disk.
  *
  * It needs the MiniMax Code CLI on PATH, a working login and makes real
- * model calls, so it is opt-in:
+ * model calls, so it is opt-in. Run it from the `cli` package, which is
+ * where the suite lives:
  *
- *   HAPI_RUN_MCODE_E2E=1 bun run test:cli -- --run src/mcode/mcodeAgent.e2e.test.ts
+ *   cd cli && HAPI_RUN_MCODE_E2E=1 bunx vitest run src/mcode/mcodeAgent.e2e.test.ts
+ *
+ * The run takes a couple of minutes and costs real model calls. It is not
+ * part of `bun run test` and does not run in CI: the agent account it needs
+ * is a personal one, and its credential would have to be kept in the
+ * repository's secrets to run there.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
@@ -227,15 +233,23 @@ import { acpModelIdToCliModelId } from './utils/modelId';
  * promise lands in the handler again, and the worker never finishes the run.
  * The runner must not end the worker here - Vitest ends the run itself.
  *
- * The override has to be in place before the runner is called, but a skipped
- * suite never runs its hooks — so it is undone right away in that case.
- * Otherwise the override would stay in the worker for the next test file
- * that picks it up, and every path that relies on the process exiting would
- * turn into an endless loop.
+ * The override is installed in the suite's `beforeAll` and taken back in its
+ * `afterAll`, so it only ever exists while this suite runs. A skipped suite
+ * runs neither hook, so it never installs the override at all - which is what
+ * keeps a file that does not run from handing a process that cannot exit to
+ * whatever the worker serves next.
  */
 const originalProcessExit = process.exit;
-process.exit = (() => undefined) as unknown as typeof process.exit;
-if (process.env.HAPI_RUN_MCODE_E2E !== '1') {
+
+/**
+ * Installs the exit that does not end the worker, and gives back the one
+ * Vitest put there.
+ */
+function takeOverProcessExit(): void {
+    process.exit = (() => undefined) as unknown as typeof process.exit;
+}
+
+function giveBackProcessExit(): void {
     process.exit = originalProcessExit;
 }
 
@@ -348,6 +362,8 @@ describe.skipIf(process.env.HAPI_RUN_MCODE_E2E !== '1')('MiniMax Code end to end
     let home: string;
 
     beforeAll(async () => {
+        // The runner must not end the worker: Vitest ends the run itself.
+        takeOverProcessExit();
         await rm(LOG_PATH, { force: true });
         writeLog('info', ['=== e2e run start ===']);
         home = await mkdtemp(join(tmpdir(), 'hapi-mcode-e2e-home-'));
@@ -375,7 +391,9 @@ describe.skipIf(process.env.HAPI_RUN_MCODE_E2E !== '1')('MiniMax Code end to end
                 try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
             }
         } finally {
-            if (originalProcessExit) process.exit = originalProcessExit;
+            // The worker keeps whatever the runner left behind, so the exit
+            // Vitest put there is given back before the file is done.
+            giveBackProcessExit();
         }
         await rm(home, { recursive: true, force: true });
         await rm(workingDirectory, { recursive: true, force: true });
