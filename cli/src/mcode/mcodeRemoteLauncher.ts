@@ -384,6 +384,16 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
     private lastGoalLifecycleSignature: string | null = null;
     /** ACP session mode last reported by the agent (`default` / `plan`). */
     private currentSessionMode: string | null = null;
+    /**
+     * The mode hash of the turn the agent is running right now.
+     *
+     * A message that was queued under a different mode cannot be injected
+     * into this turn: the mode decided what the agent was allowed to do, and
+     * the message would be answered under rules the user did not pick. The
+     * hash is the one the queue computed when the message was queued, so the
+     * two are compared by identity of the mode rather than by its spelling.
+     */
+    private activePromptModeHash: string | null = null;
     /** The permission mode the hub currently shows for this session. */
     private hubPermissionMode: PermissionMode | null = null;
     /**
@@ -905,6 +915,10 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 }
                 break;
             }
+
+            // The turn that starts now owns the session: a message that was
+            // queued under another mode cannot be steered into it.
+            this.activePromptModeHash = batch.hash;
 
             // A new user message supersedes any questionnaire still waiting from
             // the previous turn: mcode dismisses the pending questionnaire in
@@ -1869,6 +1883,15 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 if (!taken) {
                     return { steered: false, error: 'Message is not queued' };
                 }
+                // The turn that is running now decided what the agent was
+                // allowed to do. A message that was queued under another mode
+                // belongs to another turn, and injecting it here would answer
+                // it under rules the user did not pick.
+                if (this.activePromptModeHash !== null
+                    && this.activePromptModeHash !== taken.item.modeHash) {
+                    this.session.queue.restoreReservation(taken);
+                    return { steered: false, error: 'Queued message mode differs from the active turn' };
+                }
                 if (!this.session.queue.beginReservationDispatch(taken)) {
                     this.session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Steer was cancelled' };
@@ -1885,7 +1908,7 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
 
                 try {
                     const response = await backend.sendExtensionRequest<Record<string, unknown>>(
-                        'mcode/session/steer',
+                        MCODE_METHOD_STEER,
                         // The client request id is the agent's idempotency key: a
                         // retried steer must not inject the message twice.
                         { sessionId, text: taken.item.message, clientRequestId: localId }

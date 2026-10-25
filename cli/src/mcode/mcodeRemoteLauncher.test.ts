@@ -1354,6 +1354,60 @@ describe('mcodeRemoteLauncher extension capabilities', () => {
         queue.close();
     });
 
+    it('steers an isolated message, because an isolated message is a question answer', async () => {
+        // MiniMax Code asks its questions by ending the turn, so the answer
+        // the user types is queued in isolation: it has to be the only
+        // message of its turn. That is not a control command - it is an
+        // ordinary user message that happens to run alone - so it can be
+        // steered like any other message.
+        const backend = createBackend({ prompt: vi.fn(() => new Promise(() => {})) });
+        const { session, queue } = createSteerSession();
+        queue.push('first', { permissionMode: 'default', model: null });
+
+        void mcodeRemoteLauncher(session as never, {});
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalled();
+        });
+        queue.pushIsolated('the answer', { permissionMode: 'default', model: null }, 'local-1');
+
+        const handler = findRpcHandler(session, RPC_METHODS.SteerQueuedMessage);
+        await expect(handler({ localId: 'local-1' })).resolves.toEqual({ steered: true });
+        expect(backend.sendExtensionRequest).toHaveBeenCalledWith('mcode/session/steer', {
+            sessionId: 'mcode-session-1',
+            text: 'the answer',
+            clientRequestId: 'local-1'
+        });
+        queue.close();
+    });
+
+    it('refuses to steer a message whose mode differs from the running turn', async () => {
+        // A message that was queued under one permission mode cannot be
+        // injected into a turn that runs under another: the turn's mode
+        // decided what the agent is allowed to do, and a message written for
+        // a different mode would be answered under the wrong rules.
+        const backend = createBackend({ prompt: vi.fn(() => new Promise(() => {})) });
+        const { session, queue } = createSteerSession();
+        queue.push('first', { permissionMode: 'default', model: null });
+
+        void mcodeRemoteLauncher(session as never, {});
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalled();
+        });
+        // The running turn runs in the default mode; the queued message was
+        // written for the plan mode.
+        queue.push('steer me', { permissionMode: 'plan', model: null }, 'local-1');
+
+        const handler = findRpcHandler(session, RPC_METHODS.SteerQueuedMessage);
+        const result = await handler({ localId: 'local-1' });
+        expect(result).toEqual({
+            steered: false,
+            error: 'Queued message mode differs from the active turn'
+        });
+        expect(backend.sendExtensionRequest).not.toHaveBeenCalledWith('mcode/session/steer', expect.anything());
+        expect(queue.peekByLocalId('local-1')?.message).toBe('steer me');
+        queue.close();
+    });
+
     it('puts the message back when the agent rejects the steer', async () => {
         const backend = createBackend({
             prompt: vi.fn(() => new Promise(() => {})),
