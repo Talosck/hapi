@@ -74,11 +74,15 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
         const outputTokens = firstCount(usage, 'output_tokens', 'outputTokens')
         const cacheReadTokens = firstCount(usage, 'cache_read_input_tokens', 'cacheReadTokens', 'cachedInputTokens')
         const cacheCreationTokens = firstCount(usage, 'cache_creation_input_tokens', 'cacheCreationTokens', 'cacheWriteInputTokens')
-        if (inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) return null
         const providerId = typeof assistant?.id === 'string' ? assistant.id : message.id
         const model = typeof assistant?.model === 'string' && assistant.model.trim()
             ? assistant.model.trim()
             : null
+        // A provider that answers with an all-zero usage block still made a
+        // request. Dropping the sample made the agent vanish from the
+        // dashboard entirely; keeping it records the request and credits no
+        // tokens, which is what the zero usage actually says.
+        const measured = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens > 0
         return {
             sessionId: session.id,
             sourceKey: `claude|${providerId}`,
@@ -87,10 +91,12 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
             agent: 'claude',
             model,
             kind: 'delta',
-            inputTokens: normalizeInputTokens(data, inputTokens, cacheReadTokens, cacheCreationTokens, 'excludes-cache'),
-            outputTokens,
-            cacheReadTokens,
-            cacheCreationTokens,
+            inputTokens: measured
+                ? normalizeInputTokens(data, inputTokens, cacheReadTokens, cacheCreationTokens, 'excludes-cache')
+                : 0,
+            outputTokens: measured ? outputTokens : 0,
+            cacheReadTokens: measured ? cacheReadTokens : 0,
+            cacheCreationTokens: measured ? cacheCreationTokens : 0,
             lastInputTokens: null,
             lastOutputTokens: null,
             lastCacheReadTokens: null,
@@ -290,6 +296,41 @@ function addTotals(target: Totals, inputTokens: number, outputTokens: number, ca
     target.requests += 1
 }
 
+/**
+ * Credit one usage event into every dashboard bucket it belongs to.
+ *
+ * The token arguments may all be zero: a provider that reports an all-zero
+ * usage block still made a request, so the request is counted and the agent
+ * stays visible even though no tokens are credited.
+ */
+function creditUsage(
+    totals: Totals,
+    daily: Map<string, Totals>,
+    byAgent: Map<string, Totals>,
+    byModel: Map<string, Totals>,
+    event: UsageEvent,
+    dayFormatter: Intl.DateTimeFormat,
+    sessionsWithUsage: Set<string>,
+    inputTokens: number,
+    outputTokens: number,
+    cacheReadTokens: number,
+    cacheCreationTokens: number
+): void {
+    addTotals(totals, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)
+    const eventDayKey = dayKey(event.createdAt, dayFormatter)
+    const dailyTotals = daily.get(eventDayKey) ?? emptyTotals()
+    addTotals(dailyTotals, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)
+    daily.set(eventDayKey, dailyTotals)
+    const agentTotals = byAgent.get(event.agent) ?? emptyTotals()
+    addTotals(agentTotals, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)
+    byAgent.set(event.agent, agentTotals)
+    const modelKey = event.model ?? 'unknown'
+    const modelTotals = byModel.get(modelKey) ?? emptyTotals()
+    addTotals(modelTotals, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)
+    byModel.set(modelKey, modelTotals)
+    sessionsWithUsage.add(event.sessionId)
+}
+
 type UsageSnapshot = [number, number, number, number]
 
 function cumulativeSnapshotDelta(
@@ -408,7 +449,16 @@ export function getUsageSummary(
                 cumulativeFingerprints.add(fingerprint)
             }
         }
-        if (duplicateCumulativeEvent || !isInRange(event) || inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) continue
+        if (duplicateCumulativeEvent || !isInRange(event)) continue
+        // A provider that reports an all-zero usage block still made a
+        // request. The sample is kept so the agent shows up in the dashboard
+        // and the request is counted, but no tokens are credited — none were
+        // reported. The token totals stay at zero for it.
+        const measuredTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
+        if (measuredTokens <= 0) {
+            creditUsage(totals, daily, byAgent, byModel, event, dayFormatter, sessionsWithUsage, 0, 0, 0, 0)
+            continue
+        }
         // Cache reads and writes partition processed input. Preserve the
         // request and its primary token counts when a provider emits an
         // impossible partition, but conservatively decline to credit either
@@ -417,19 +467,10 @@ export function getUsageSummary(
             cacheReadTokens = 0
             cacheCreationTokens = 0
         }
-        addTotals(totals, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)
-        const eventDayKey = dayKey(event.createdAt, dayFormatter)
-        const dailyTotals = daily.get(eventDayKey) ?? emptyTotals()
-        addTotals(dailyTotals, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)
-        daily.set(eventDayKey, dailyTotals)
-        const agentTotals = byAgent.get(event.agent) ?? emptyTotals()
-        addTotals(agentTotals, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)
-        byAgent.set(event.agent, agentTotals)
-        const modelKey = event.model ?? 'unknown'
-        const modelTotals = byModel.get(modelKey) ?? emptyTotals()
-        addTotals(modelTotals, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)
-        byModel.set(modelKey, modelTotals)
-        sessionsWithUsage.add(event.sessionId)
+        creditUsage(
+            totals, daily, byAgent, byModel, event, dayFormatter, sessionsWithUsage,
+            inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens
+        )
     }
 
     const sortBuckets = (values: Map<string, Totals>): UsageSummaryBucket[] => Array.from(values.entries())

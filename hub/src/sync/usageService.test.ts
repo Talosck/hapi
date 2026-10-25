@@ -61,6 +61,83 @@ describe('usage service', () => {
         store.close()
     })
 
+    it('records a request whose provider reported an all-zero usage block', () => {
+        // Some Anthropic-compatible providers answer with an all-zero usage
+        // block. The request really happened, so the dashboard must still show
+        // the agent — but with no tokens credited, because none were reported.
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'claude-zero-usage-test',
+            { path: '/tmp', host: 'test', flavor: 'claude' },
+            null,
+            'default',
+            'test-model'
+        )
+
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: {
+                    id: 'claude-zero-message',
+                    model: 'claude-test',
+                    usage: { input_tokens: 0, output_tokens: 0, service_tier: 'standard' }
+                }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.requests).toBe(1)
+        expect(result.totals.totalTokens).toBe(0)
+        expect(result.byAgent).toEqual([
+            expect.objectContaining({ key: 'claude', requests: 1, totalTokens: 0 })
+        ])
+        store.close()
+    })
+
+    it('keeps a measured Claude request counted when a later sample reports no tokens', () => {
+        // The zero-usage sample must not erase the tokens of an earlier
+        // measured request from the same session.
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'claude-mixed-usage-test',
+            { path: '/tmp', host: 'test', flavor: 'claude' },
+            null,
+            'default',
+            'test-model'
+        )
+
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: {
+                    id: 'claude-measured-message',
+                    model: 'claude-test',
+                    usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 80 }
+                }
+            }
+        })
+        addAgentMessage(store, session.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: {
+                    id: 'claude-zero-message',
+                    model: 'claude-test',
+                    usage: { input_tokens: 0, output_tokens: 0, service_tier: 'standard' }
+                }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.requests).toBe(2)
+        expect(result.totals.inputTokens).toBe(90)
+        expect(result.totals.cacheReadTokens).toBe(80)
+        expect(result.totals.totalTokens).toBe(92)
+        store.close()
+    })
+
     it('normalizes historical Codex cumulative usage with inclusive input', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession(
