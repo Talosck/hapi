@@ -873,7 +873,7 @@ export async function runPi(opts: {
                             piSession,
                             transport,
                             levelBefore,
-                            (level) => `MiniMax Code picked the thinking effort "${level}" for the new model.`,
+                            (level) => `Pi picked the thinking effort "${level}" for the new model.`,
                         );
                     } else if (requestedModel.modelId && !requestedModel.provider) {
                         // Provider is unknown until get_state/get_available_models resolve.
@@ -902,7 +902,7 @@ export async function runPi(opts: {
                             piSession,
                             transport,
                             requestedThinkingLevel,
-                            (actual) => `MiniMax Code cannot run the thinking effort "${requestedThinkingLevel}" on this model, so it runs with "${actual}".`,
+                            (actual) => `Pi cannot run the thinking effort "${requestedThinkingLevel}" on this model, so it runs with "${actual}".`,
                         );
                     }
                 }
@@ -1076,7 +1076,7 @@ export async function runPi(opts: {
                             piSession,
                             transport,
                             levelBefore,
-                            (level) => `MiniMax Code picked the thinking effort "${level}" for the new model.`,
+                            (level) => `Pi picked the thinking effort "${level}" for the new model.`,
                         );
                         // The web picker prefers piSelectedModel metadata for
                         // selection, context-window resolution, and effort
@@ -1812,7 +1812,7 @@ export async function runPi(opts: {
                             piSession,
                             transport,
                             startupThinkingLevel,
-                            (actual) => `MiniMax Code cannot run the thinking effort "${startupThinkingLevel}" on this model, so it runs with "${actual}".`,
+                            (actual) => `Pi cannot run the thinking effort "${startupThinkingLevel}" on this model, so it runs with "${actual}".`,
                         );
                         piSession.pushKeepAlive();
                     }, { poisonOnError: (error) => error instanceof PiRpcTimeoutError });

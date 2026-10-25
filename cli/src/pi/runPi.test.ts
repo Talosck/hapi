@@ -2325,7 +2325,7 @@ describe('Pi built-in slash commands', () => {
             applied: { model: { provider: 'openai', modelId: 'gpt-5.2' }, effort: 'medium' },
         });
         expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
-            message: 'MiniMax Code picked the thinking effort "medium" for the new model.',
+            message: 'Pi picked the thinking effort "medium" for the new model.',
         }));
 
         harness.onError?.(new Error('finish test'));
@@ -2368,7 +2368,7 @@ describe('Pi built-in slash commands', () => {
             applied: { model: { provider: 'openai', modelId: 'gpt-5.2' }, effort: 'medium' },
         });
         expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
-            message: 'MiniMax Code picked the thinking effort "medium" for the new model.',
+            message: 'Pi picked the thinking effort "medium" for the new model.',
         }));
 
         harness.onError?.(new Error('finish test'));
@@ -2397,7 +2397,7 @@ describe('Pi built-in slash commands', () => {
 
         await expect(configPromise).resolves.toMatchObject({ applied: { effort: 'high' } });
         expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
-            message: 'MiniMax Code cannot run the thinking effort "max" on this model, so it runs with "high".',
+            message: 'Pi cannot run the thinking effort "max" on this model, so it runs with "high".',
         }));
 
         harness.onError?.(new Error('finish test'));
