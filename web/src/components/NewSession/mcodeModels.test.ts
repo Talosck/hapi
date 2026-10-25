@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
     buildMcodeModelOptions,
+    buildMcodeSessionModelOptions,
     shouldEnableMcodeModelDiscovery,
     shouldResetMcodeModel
 } from './mcodeModels'
@@ -72,5 +73,25 @@ describe('MiniMax Code Create-session options', () => {
             { value: 'm:minimax:MiniMax-M3:v:', label: 'MiniMax-M3' },
             { value: 'm:minimax:MiniMax-M3:v:thinking', label: 'M3 · thinking' }
         ])
+    })
+})
+
+describe('MiniMax Code session options', () => {
+    it('offers the agent default as null', () => {
+        // The picker of a running session sends the value it holds, and the
+        // hub records `null` for a session that runs on the agent's default
+        // model. The form's 'auto' is a name the agent cannot resolve.
+        expect(buildMcodeSessionModelOptions([
+            { modelId: 'm:minimax:MiniMax-M3:v:' }
+        ])).toEqual([
+            { value: null, label: 'Default' },
+            { value: 'm:minimax:MiniMax-M3:v:', label: 'MiniMax-M3' }
+        ])
+    })
+
+    it('shows the same models as the create-session form', () => {
+        const models = [{ modelId: 'm:minimax:MiniMax-M3:v:' }]
+        expect(buildMcodeSessionModelOptions(models).slice(1))
+            .toEqual(buildMcodeModelOptions(models).slice(1))
     })
 })

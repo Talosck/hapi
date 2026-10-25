@@ -63,6 +63,28 @@ describe('getMcodeModelsRefetchInterval', () => {
         }, 0, 1_000, 'm:new')).toBe(false)
     })
 
+    it('keeps asking for a switch on a session that has been open for a while', () => {
+        // The discovery budget is spent long before on a session that has
+        // been open for an hour, and a switch on such a session still has to
+        // be waited for. The switch is measured from the moment the model
+        // changed, not from the moment the session became eligible.
+        expect(getMcodeModelsRefetchInterval(true, {
+            success: true,
+            availableModels: [{ modelId: 'm:old' }],
+            currentModelId: 'm:old'
+        }, 0, 3_600_000, 'm:new', 3_600_000)).toBe(1000)
+    })
+
+    it('gives up on a switch that never reaches the catalog', () => {
+        // The wait for a switch is bounded too: an agent that never applies
+        // the switch would keep the picker asking for ever.
+        expect(getMcodeModelsRefetchInterval(true, {
+            success: true,
+            availableModels: [{ modelId: 'm:old' }],
+            currentModelId: 'm:old'
+        }, 0, 3_600_000, 'm:new', 3_600_000 - 61_000)).toBe(false)
+    })
+
     it('does not keep asking for a catalog that names no current model', () => {
         // An agent that has not reported the model it runs answers with
         // nothing. That is not a model switch, and treating it as one would

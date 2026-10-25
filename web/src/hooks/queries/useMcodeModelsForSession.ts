@@ -46,13 +46,20 @@ export function shouldRetryMcodeModelsQuery(failureCount: number): boolean {
  * switch, which is before the agent has applied it, so the answer that
  * arrives first still names the old model - and the picker would offer the
  * effort levels of a model the session is not running.
+ *
+ * The two waits have their own budgets. The discovery is measured from the
+ * moment the session became eligible, and the switch from the moment the
+ * model changed: a session that has been open for an hour has spent its
+ * discovery budget long ago, and a switch on such a session still has to be
+ * waited for.
  */
 export function getMcodeModelsRefetchInterval(
     enabled: boolean,
     data: McodeModelsResponse | undefined,
     discoveryStartedAt: number,
     now: number,
-    sessionModel?: string | null
+    sessionModel?: string | null,
+    switchStartedAt?: number
 ): 1000 | false {
     if (!enabled) {
         return false
@@ -78,7 +85,10 @@ export function getMcodeModelsRefetchInterval(
     if (hasModels && !catalogIsStale) {
         return false
     }
-    if (now - discoveryStartedAt >= MCODE_MODEL_DISCOVERY_BUDGET_MS) {
+    // The budget of the wait that is running: the discovery while the
+    // catalog is empty, the switch while it names another model.
+    const startedAt = catalogIsStale ? switchStartedAt : discoveryStartedAt
+    if (startedAt !== undefined && now - startedAt >= MCODE_MODEL_DISCOVERY_BUDGET_MS) {
         return false
     }
     return MCODE_MODEL_DISCOVERY_POLL_MS
@@ -109,6 +119,11 @@ export function useMcodeModelsForSession(args: {
     // When the discovery started, per session. The span of time is what the
     // budget is measured against, so it must not be a number of polls.
     const discovery = useRef<{ key: string; startedAt: number } | null>(null)
+    // The model the session was seen running last. A change of it is a model
+    // switch, and the wait for the switch to reach the catalog is measured
+    // from that change: the budget of the discovery is spent long before on a
+    // session that has been open for a while.
+    const seenModel = useRef<{ key: string; model: string | null; startedAt: number } | null>(null)
     const sessionKey = args.sessionId ?? ''
 
     const query = useQuery({
@@ -135,17 +150,30 @@ export function useMcodeModelsForSession(args: {
                 // had its look yet. The stamp is cleared so that enabling
                 // starts a fresh budget.
                 discovery.current = null
+                seenModel.current = null
                 return false
             }
             if (discovery.current?.key !== sessionKey) {
                 discovery.current = { key: sessionKey, startedAt: now }
+                seenModel.current = null
             }
+            // The model the session runs changed: a switch is in flight, and
+            // the wait for it is measured from the change. The discovery
+            // budget of a session that has been open for a while is long
+            // spent, and the switch would never be waited for.
+            if (seenModel.current?.key !== sessionKey || seenModel.current.model !== (args.sessionModel ?? null)) {
+                seenModel.current = { key: sessionKey, model: args.sessionModel ?? null, startedAt: now }
+            }
+            const switchStartedAt = seenModel.current.key === sessionKey
+                ? seenModel.current.startedAt
+                : undefined
             return getMcodeModelsRefetchInterval(
                 enabled,
                 query.state.data as McodeModelsResponse | undefined,
                 discovery.current.startedAt,
                 now,
-                args.sessionModel
+                args.sessionModel,
+                switchStartedAt
             )
         },
     })
