@@ -39,11 +39,55 @@ describe('getMcodeModelsRefetchInterval', () => {
             success: true,
             availableModels: [{ modelId: 'm:good' }],
             currentModelId: 'm:good'
-        }, 0, 1_000)).toBe(false)
+        }, 0, 1_000, 'm:good')).toBe(false)
+    })
+
+    it('keeps asking while the catalog does not hold the model the session runs', () => {
+        // The hub records the model as soon as the client asks for the
+        // switch, which is before the agent has applied it. The catalog that
+        // answers before the switch is applied still names the old model, so
+        // the picker would offer the effort levels of a model the session is
+        // not running. Asking again is what makes the picker catch up.
+        expect(getMcodeModelsRefetchInterval(true, {
+            success: true,
+            availableModels: [{ modelId: 'm:old' }],
+            currentModelId: 'm:old'
+        }, 0, 1_000, 'm:new')).toBe(1000)
+    })
+
+    it('stops asking once the catalog holds the model the session runs', () => {
+        expect(getMcodeModelsRefetchInterval(true, {
+            success: true,
+            availableModels: [{ modelId: 'm:new' }],
+            currentModelId: 'm:new'
+        }, 0, 1_000, 'm:new')).toBe(false)
+    })
+
+    it('does not keep asking for a catalog that names no current model', () => {
+        // An agent that has not reported the model it runs answers with
+        // nothing. That is not a model switch, and treating it as one would
+        // keep the picker asking for the rest of the budget.
+        expect(getMcodeModelsRefetchInterval(true, {
+            success: true,
+            availableModels: [{ modelId: 'm:old' }],
+            currentModelId: null
+        }, 0, 1_000, 'm:new')).toBe(false)
+    })
+
+    it('does not keep asking when the agent runs a model the catalog does not publish', () => {
+        // The agent can move to a model on its own - the local TUI switches
+        // it, or a session that shares the process does - and then the hub
+        // keeps naming the old model. No switch is in flight, so waiting for
+        // the two to agree would ask for the rest of the budget for nothing.
+        expect(getMcodeModelsRefetchInterval(true, {
+            success: true,
+            availableModels: [{ modelId: 'm:published' }],
+            currentModelId: 'm:unpublished'
+        }, 0, 1_000, 'm:new')).toBe(false)
     })
 
     it('does not ask for a session that is not there', () => {
-        expect(getMcodeModelsRefetchInterval(false, undefined, 0, 1_000)).toBe(false)
+        expect(getMcodeModelsRefetchInterval(false, undefined, 0, 1_000, null)).toBe(false)
     })
 })
 

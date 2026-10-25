@@ -10,6 +10,8 @@ import {
     isPermissionModeAllowedForFlavor,
     isSteeringSupportedForFlavor,
     isSteeringSupportedForSession,
+    PERMISSION_MODE_FLAVOR_LABEL_KEYS,
+    PERMISSION_MODE_FLAVOR_LABELS,
     STEERING_SUPPORTED_FLAVORS,
 } from './modes'
 
@@ -136,6 +138,27 @@ describe('getPermissionModeLabel', () => {
         expect(getPermissionModeLabel('bypassPermissions', 'codex')).toBe('Yolo')
         expect(getPermissionModeLabel('bypassPermissions', 'claude')).toBe('Yolo')
         expect(getPermissionModeLabel('default', undefined)).toBe('Default')
+    })
+})
+
+describe('the wording of an agent that names its modes', () => {
+    test('names the same modes in the english text and in the localization key', () => {
+        // The english text is what the native clients print, the key is what
+        // the web translates. A mode that is in one and not in the other
+        // would leave a client without a wording for it, so the two catalogs
+        // have to hold the same modes.
+        for (const flavor of Object.keys(PERMISSION_MODE_FLAVOR_LABELS)) {
+            expect(Object.keys(PERMISSION_MODE_FLAVOR_LABEL_KEYS[flavor] ?? {}).sort())
+                .toEqual(Object.keys(PERMISSION_MODE_FLAVOR_LABELS[flavor] ?? {}).sort())
+        }
+    })
+
+    test('gives every mode of the flavor a key the web can translate', () => {
+        const keys = PERMISSION_MODE_FLAVOR_LABEL_KEYS.mcode ?? {}
+        for (const [mode, key] of Object.entries(keys)) {
+            expect(key).toStartWith('permissionMode.')
+            expect(mode).toBeTruthy()
+        }
     })
 })
 

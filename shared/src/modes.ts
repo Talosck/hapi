@@ -114,6 +114,27 @@ export const PERMISSION_MODE_FLAVOR_LABELS: Record<string, Partial<Record<Permis
     }
 }
 
+/**
+ * The localization key of a mode's wording, for the flavors that name their
+ * modes themselves.
+ *
+ * The catalog above holds the english text, which the native clients render
+ * as it is. The web shows the wording in the reader's own language, so it
+ * needs a key to translate rather than a text to print.
+ *
+ * The two catalogs answer the same question in two media, so they are keyed
+ * the same way and hold the same modes: a mode that appears in one and not in
+ * the other would leave a client without a wording for it.
+ */
+export const PERMISSION_MODE_FLAVOR_LABEL_KEYS: Record<string, Partial<Record<PermissionMode, string>>> = {
+    mcode: {
+        default: 'permissionMode.ask',
+        auto: 'permissionMode.auto',
+        bypassPermissions: 'permissionMode.fullAccess',
+        plan: 'permissionMode.plan'
+    }
+}
+
 export const PERMISSION_MODE_TONES: Record<PermissionMode, PermissionModeTone> = {
     default: 'neutral',
     acceptEdits: 'warning',

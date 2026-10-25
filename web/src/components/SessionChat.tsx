@@ -121,6 +121,7 @@ import { useMcodeModelsForSession } from '@/hooks/queries/useMcodeModelsForSessi
 import { useMcodeApps } from '@/hooks/queries/useMcodeApps'
 import { useMinimaxQuota } from '@/hooks/queries/useMinimaxQuota'
 import { buildKimiSessionModelOptions } from '@/components/NewSession/grokModels'
+import { buildMcodeModelOptions } from '@/components/NewSession/mcodeModels'
 import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
 import { usePiModels } from '@/hooks/queries/usePiModels'
 import { useOpencodeReasoningEffortOptions } from '@/hooks/queries/useOpencodeReasoningEffortOptions'
@@ -1190,17 +1191,15 @@ function SessionChatInner(props: SessionChatProps) {
     const mcodeModelsState = useMcodeModelsForSession({
         api: props.api,
         sessionId: props.session.id,
-        enabled: agentFlavor === 'mcode' && props.session.active
+        enabled: agentFlavor === 'mcode' && props.session.active,
+        sessionModel: props.session.model
     })
     const mcodeModelOptions = useMemo(() => (
         agentFlavor === 'mcode' && mcodeModelsState.availableModels.length > 0
-            ? [
-                { value: null, label: t('newSession.model.default') },
-                ...mcodeModelsState.availableModels.map((model) => ({
-                    value: model.modelId,
-                    label: model.name ?? model.modelId
-                }))
-            ]
+            // The create-session form builds the same list, so a model reads
+            // the same in both places - a model the agent published without a
+            // name still gets a readable label instead of its wire id.
+            ? buildMcodeModelOptions(mcodeModelsState.availableModels, t('newSession.model.default'))
             : undefined
     ), [agentFlavor, mcodeModelsState.availableModels, t])
     const mcodeEffortOptions = useMemo(() => (

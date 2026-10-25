@@ -37,17 +37,45 @@ export function shouldRetryMcodeModelsQuery(failureCount: number): boolean {
     return failureCount < 3
 }
 
+/**
+ * Whether the catalog is still being asked for.
+ *
+ * The catalog is asked for while it is empty, and again while it does not
+ * name the model the session runs. The second case is a model switch in
+ * flight: the hub records the new model as soon as the client asks for the
+ * switch, which is before the agent has applied it, so the answer that
+ * arrives first still names the old model - and the picker would offer the
+ * effort levels of a model the session is not running.
+ */
 export function getMcodeModelsRefetchInterval(
     enabled: boolean,
     data: McodeModelsResponse | undefined,
     discoveryStartedAt: number,
-    now: number
+    now: number,
+    sessionModel?: string | null
 ): 1000 | false {
     if (!enabled) {
         return false
     }
     const hasModels = data?.success !== false && (data?.availableModels?.length ?? 0) > 0
-    if (hasModels) {
+    // A catalog that does not name the model the session runs is stale, but
+    // only when both sides name one: an agent that has not reported its
+    // current model yet answers with nothing, and that is not a model
+    // switch - it would keep the picker asking for the rest of the budget.
+    //
+    // The model the agent runs also has to be one the catalog publishes. The
+    // agent can move to a model on its own - the local TUI switches it, or a
+    // session that shares the process does - and then the hub keeps naming
+    // the old model. That is not a switch in flight either, and waiting for
+    // the two to agree would ask for the rest of the budget for nothing.
+    const currentModelIsPublished = (data?.availableModels ?? [])
+        .some((model) => model.modelId === data?.currentModelId)
+    const catalogIsStale = hasModels
+        && !!sessionModel
+        && !!data?.currentModelId
+        && currentModelIsPublished
+        && data.currentModelId !== sessionModel
+    if (hasModels && !catalogIsStale) {
         return false
     }
     if (now - discoveryStartedAt >= MCODE_MODEL_DISCOVERY_BUDGET_MS) {
@@ -60,6 +88,15 @@ export function useMcodeModelsForSession(args: {
     api: ApiClient | null
     sessionId?: string | null
     enabled?: boolean
+    /**
+     * The model the session runs, as the hub knows it.
+     *
+     * The hub records the model as soon as the client asks for a switch, so
+     * this can name a model the agent has not applied yet. The catalog is
+     * asked for again while the two disagree, which is what makes the picker
+     * catch up with a switch that is still in flight.
+     */
+    sessionModel?: string | null
 }): {
     availableModels: McodeModelSummary[]
     currentModelId: string | null
@@ -107,7 +144,8 @@ export function useMcodeModelsForSession(args: {
                 enabled,
                 query.state.data as McodeModelsResponse | undefined,
                 discovery.current.startedAt,
-                now
+                now,
+                args.sessionModel
             )
         },
     })
