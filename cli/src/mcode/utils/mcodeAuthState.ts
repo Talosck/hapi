@@ -84,12 +84,16 @@ function findAuthStateFiles(home: string): { region: string | null; path: string
 /**
  * Whether the account of the agent can be used.
  *
- * A state that cannot be read is not a signed-out account: the agent may keep
- * the account somewhere else (a keychain, a different store), and reporting
- * "not signed in" for that would keep a working agent out of reach.
+ * An account whose access token ran out is still an account: the agent holds
+ * a refresh token and renews the access token when it starts, so an expired
+ * token is not a signed-out account.
+ *
+ * A state that cannot be read is not a signed-out account either: the agent
+ * may keep the account somewhere else (a keychain, a different store), and
+ * reporting "not signed in" for that would keep a working agent out of reach.
  */
 export function isMcodeSignedIn(state: McodeAuthState): boolean {
-    return state.status === 'authenticated'
+    return state.status === 'authenticated' || state.status === 'expired'
 }
 
 /**
@@ -104,12 +108,9 @@ export function readMcodeAuthState(options?: {
     home?: string | null
     /** The regions to look at. Exposed for tests. */
     regions?: readonly string[]
-    /** The point in time the expiry is judged against. Exposed for tests. */
-    now?: number
 }): McodeAuthState {
     const home = options?.home ?? process.env.HOME ?? process.env.USERPROFILE ?? null
     if (!home) return UNKNOWN_STATE
-    const now = options?.now ?? Date.now()
 
     const files = options?.regions
         ? options.regions.map((region) => ({
@@ -136,12 +137,6 @@ export function readMcodeAuthState(options?: {
         if (rawStatus === 'authenticated') status = 'authenticated'
         else if (rawStatus === 'expired') status = 'expired'
         else if (SIGNED_OUT_STATUSES.has(rawStatus)) status = 'unauthenticated'
-
-        // The agent can leave the status alone while the session it describes
-        // has run out - the expiry is the truth then.
-        if (status === 'authenticated' && expiresAtMs !== null && expiresAtMs <= now) {
-            status = 'expired'
-        }
 
         const state: McodeAuthState = { status, region, expiresAtMs }
         // The account of the agent wins over the accounts of other clients: a

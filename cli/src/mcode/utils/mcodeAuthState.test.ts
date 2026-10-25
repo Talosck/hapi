@@ -31,7 +31,7 @@ describe('readMcodeAuthState', () => {
             { region: 'cn', state: { status: 'authenticated', region: 'cn', expiresAtMs: 4102444800000 } },
         ])
 
-        const state = readMcodeAuthState({ home, now: 1_700_000_000_000 })
+        const state = readMcodeAuthState({ home })
 
         expect(state.status).toBe('authenticated')
         expect(state.region).toBe('cn')
@@ -50,15 +50,19 @@ describe('readMcodeAuthState', () => {
         expect(isMcodeSignedIn(state)).toBe(false)
     })
 
-    it('reports an expired account the agent still calls authenticated', () => {
+    it('keeps an account with an expired access token signed in', () => {
+        // The expiry describes the access token, not the account: the account
+        // still holds a refresh token and the agent renews the access token
+        // when it starts. Reporting a signed-out account here would send the
+        // user to `mcode login` for an account that is still there.
         const home = makeHome([
             { region: 'cn', state: { status: 'authenticated', region: 'cn', expiresAtMs: 1_600_000_000_000 } },
         ])
 
-        const state = readMcodeAuthState({ home, now: 1_700_000_000_000 })
+        const state = readMcodeAuthState({ home })
 
-        expect(state.status).toBe('expired')
-        expect(isMcodeSignedIn(state)).toBe(false)
+        expect(state.status).toBe('authenticated')
+        expect(isMcodeSignedIn(state)).toBe(true)
     })
 
     it('keeps the state unknown when there is no account on the machine', () => {

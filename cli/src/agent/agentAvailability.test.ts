@@ -164,6 +164,26 @@ describe('agent executable resolution', () => {
         })).toEqual({ agent: 'mcode', available: true })
     })
 
+    it('keeps a signed-in MiniMax Code install available when its access token expired', async () => {
+        // The access token running out is not a signed-out account: the agent
+        // renews it when it starts, so the install stays usable.
+        const directory = await mkdtemp(join(tmpdir(), 'hapi-agent-path-'))
+        const home = await mkdtemp(join(tmpdir(), 'hapi-agent-home-'))
+        await makeExecutable(directory, 'mcode')
+        const accountDir = join(home, '.minimax', 'auth', 'prod', 'cn', 'mcode-public')
+        await mkdir(accountDir, { recursive: true })
+        await writeFile(join(accountDir, 'auth-state.json'), JSON.stringify({
+            status: 'authenticated',
+            region: 'cn',
+            expiresAtMs: Date.now() - 3_600_000,
+        }))
+
+        expect(getAgentAvailability('mcode', {
+            PATH: directory,
+            HOME: home,
+        })).toEqual({ agent: 'mcode', available: true })
+    })
+
     it('keeps a MiniMax Code install without a readable account available', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'hapi-agent-path-'))
         const home = await mkdtemp(join(tmpdir(), 'hapi-agent-home-'))

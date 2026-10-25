@@ -100,7 +100,10 @@ export function getAgentAvailability(
         // installed" would send them looking for the wrong thing.
         if (agent === 'mcode') {
             const auth = readMcodeAuthState({ home: env.HOME ?? env.USERPROFILE })
-            if (auth.status === 'unauthenticated' || auth.status === 'expired') {
+            // An expired access token is not a signed-out account: the agent
+            // renews it when it starts, so only an account that is really
+            // gone keeps the agent out of reach.
+            if (auth.status === 'unauthenticated') {
                 return { agent, available: false, reason: 'not_signed_in' }
             }
         }
