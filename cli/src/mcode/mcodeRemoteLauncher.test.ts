@@ -3,6 +3,7 @@ import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { AcpSessionModeUnsupportedError } from '@/agent/backends/acp'
 import { ACP_INDETERMINATE_SYMBOL } from '@/agent/backends/acp/AcpStdioTransport'
 import { MessageQueue2 } from '@/utils/MessageQueue2'
+import { hashObject } from '@/utils/deterministicJson'
 import type { McodeMode } from './types'
 import { knownMcodeAgentHostPids } from './utils/mcodeConnectorTools'
 
@@ -264,6 +265,11 @@ function failureMessages(session: { sendSessionEvent: ReturnType<typeof vi.fn> }
 
 function createScriptedSession() {
     const queue = {
+        modeHasher: (mode: McodeMode) => hashObject({
+            permissionMode: mode.permissionMode,
+            model: mode.model,
+            effort: mode.effort
+        }),
         waitForMessagesAndGetAsString: vi.fn()
             .mockResolvedValueOnce({ message: 'hi', mode: { permissionMode: 'default', model: null } })
             .mockResolvedValue(null),
@@ -312,6 +318,11 @@ function createScriptedSession() {
 function createBlockingSession() {
     let release: (value: null) => void = () => {}
     const queue = {
+        modeHasher: (mode: McodeMode) => hashObject({
+            permissionMode: mode.permissionMode,
+            model: mode.model,
+            effort: mode.effort
+        }),
         waitForMessagesAndGetAsString: vi.fn(() => new Promise<null>((resolve) => {
             release = resolve
         })),
@@ -1820,6 +1831,11 @@ describe('mcodeRemoteLauncher abort handling', () => {
         const abortHandlers: Array<() => Promise<void>> = []
         const waits: number[] = []
         const queue = {
+        modeHasher: (mode: McodeMode) => hashObject({
+            permissionMode: mode.permissionMode,
+            model: mode.model,
+            effort: mode.effort
+        }),
             waitForMessagesAndGetAsString: vi.fn((signal?: AbortSignal) => {
                 waits.push(waits.length)
                 if (waits.length === 1) {
@@ -1916,6 +1932,11 @@ describe('mcodeRemoteLauncher abort handling', () => {
         })
 
         const queue = {
+        modeHasher: (mode: McodeMode) => hashObject({
+            permissionMode: mode.permissionMode,
+            model: mode.model,
+            effort: mode.effort
+        }),
             waitForMessagesAndGetAsString: vi.fn()
                 .mockResolvedValueOnce({
                     message: 'hi',
@@ -2041,6 +2062,44 @@ describe('mcodeRemoteLauncher refused turn', () => {
         ])
         // The agent never took the message, so nothing was forgotten.
         expect(harness.displayedMessageIds.forgotten).toEqual([])
+        queue.close()
+    })
+
+    it('shows a message that the agent took and then refused only once', async () => {
+        // The real backend reports the request as sent the moment it is on
+        // the wire, before the agent has answered. The agent may then refuse
+        // the turn - it is busy, it is compacting - and the message goes back
+        // into the queue with the same local id. The user already read it,
+        // so the retry must not show it a second time.
+        let promptCalls = 0
+        const backend = createBackend({
+            prompt: vi.fn(async (
+                _sessionId: string,
+                _content: unknown,
+                _onUpdate: unknown,
+                options?: { onPromptSent?: () => void }
+            ) => {
+                promptCalls += 1
+                // The request is on the wire now, and only then the agent
+                // refuses it.
+                options?.onPromptSent?.()
+                if (promptCalls === 1) throw new Error(BUSY_ERROR)
+            })
+        })
+        const { session, queue } = createSteerSession()
+        queue.push('first', { permissionMode: 'default', model: null }, 'local-1')
+
+        void mcodeRemoteLauncher(session as never, {})
+        await vi.waitFor(() => {
+            expect(backend.prompt).toHaveBeenCalledTimes(2)
+        }, { timeout: 5_000 })
+
+        // The retry finds the message already shown, even though the agent
+        // had already taken the first attempt.
+        expect(harness.displayedMessageIds.shownChecks).toEqual([
+            { localIds: ['local-1'], shown: false },
+            { localIds: ['local-1'], shown: true }
+        ])
         queue.close()
     })
 

@@ -919,10 +919,6 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 break;
             }
 
-            // The turn that starts now owns the session: a message that was
-            // queued under another mode cannot be steered into it.
-            this.activePromptModeHash = batch.hash;
-
             // A new user message supersedes any questionnaire still waiting from
             // the previous turn: mcode dismisses the pending questionnaire in
             // that case, so drop the card instead of leaving a dead request.
@@ -1014,6 +1010,14 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
             // switch session modes both end up on a different mode than the
             // one that was asked for.
             batch.mode.permissionMode = this.appliedPermissionMode ?? 'default';
+
+            // The turn that starts now owns the session: a message that was
+            // queued under another mode cannot be steered into it. The mode is
+            // the one the turn runs under, which is not always the one the
+            // message was queued with: a model the agent cannot switch to or a
+            // permission mode it cannot honor rolls the mode back, and the
+            // turn then runs under the mode that is in effect.
+            this.activePromptModeHash = this.session.queue.modeHasher(batch.mode);
 
             this.applyDisplayMode(batch.mode.permissionMode, this.currentBackendModel ?? undefined);
             this.showUserMessage(messageBuffer, batch);
@@ -1170,6 +1174,9 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 session.onThinkingChange(false);
                 this.conversationHistory?.setBusy(false);
                 this.setSteeringActive(false);
+                // The turn is over, so there is no mode a message could be
+                // steered into any more.
+                this.activePromptModeHash = null;
                 this.pendingAskUserCall = null;
                 // Questions outlive the turn: mcode's ask_user tool ends the
                 // turn as soon as the questionnaire is raised, and the answer
@@ -1368,6 +1375,12 @@ class McodeRemoteLauncher extends RemoteLauncherBase {
                 logger.warn('[mcode-remote] Failed to re-queue a refused message', error);
             }
         }
+        // The message goes back into the queue, so it is shown again when the
+        // loop takes it out. The user already read it, so the id has to be
+        // remembered again: the launcher forgets the ids of the messages the
+        // agent has taken, and a message the agent refused after taking it
+        // was never delivered.
+        this.displayedMessageIds.remember(this.batchLocalIds(batch));
     }
 
     /**
