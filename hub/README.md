@@ -116,6 +116,13 @@ for request/response shapes and error semantics, and `src/web/routes/` for all e
 - `POST /api/sessions/:id/model` - Set model preference.
 - `POST /api/sessions/:id/effort` - Set effort for Claude, Grok, or Pi; other config controls are flavor/capability-gated (see the client contract).
 - `GET/POST /api/sessions/:id/scratchlist` - Read/create Hub-persisted scratchlist entries; update/delete and attachment routes share this prefix.
+- `GET /api/sessions/:id/mcode-models` - Model catalog of a running MiniMax Code session.
+- `GET /api/sessions/:id/mcode-apps` - Apps the MiniMax Code agent of the session has connected.
+- `GET /api/sessions/:id/minimax-quota` - Usage window of the MiniMax account the session spends; the account is inferred from the session's flavor.
+- `POST /api/sessions/:id/mcode/goal` - Create the goal of a MiniMax Code session.
+- `PATCH /api/sessions/:id/mcode/goal` - Update the goal of a MiniMax Code session.
+- `DELETE /api/sessions/:id/mcode/goal` - Clear the goal of a MiniMax Code session.
+- `POST /api/sessions/:id/mcode/delegation/stop` - Stop a delegated subagent of a MiniMax Code session.
 
 ### Messages (`src/web/routes/messages.ts`)
 
@@ -140,6 +147,9 @@ for request/response shapes and error semantics, and `src/web/routes/` for all e
 - `POST /api/machines/:id/list-directory` - Browse runner-scoped directories.
 - `POST /api/machines/:id/paths/exists` - Check if path exists.
 - `POST /api/machines/:id/restart-runner` - Request runner restart (requires an available restart path).
+- `GET /api/machines/:id/mcode-models` - Model catalog of the MiniMax Code install on the machine.
+- `GET /api/machines/:id/mcode-apps` - Apps the MiniMax Code install on the machine has connected.
+- `GET /api/machines/:id/minimax-quota` - Usage window of the MiniMax account; the account is chosen by the `source` query (`mcode` or `pi`).
 
 ### Usage (`src/web/routes/usage.ts`)
 

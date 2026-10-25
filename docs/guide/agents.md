@@ -353,11 +353,11 @@ supersedes an unanswered card.
 
 ### Model selection
 
-MiniMax Code identifies a model with the ACP wire id: `m:<provider>:<model>:u`
-for a model without a variant, or `m:<provider>:<model>:v:<variant>` for a
-variant model (e.g. `m:minimax:MiniMax-M3:u` and
-`m:minimax:MiniMax-M3:v:thinking`). Provider, model, and variant are
-URI-encoded by the agent; an empty variant (`...:v:`) is valid.
+MiniMax Code identifies a model with the ACP wire id:
+`m:<provider>:<model>:v:<variant>`, where an empty variant (`m:minimax:MiniMax-M3:v:`)
+is how the agent publishes a model that has none. The `u` form
+(`m:<provider>:<model>:u`) is accepted by the agent's decoder but never
+published by it. Provider, model, and variant are URI-encoded by the agent.
 
 HAPI discovers the catalog for the selected directory and offers it in the
 web create-session form and in the web session model picker. The MiniMax Code
@@ -393,6 +393,62 @@ MiniMax Code publishes two ACP extensions that HAPI consumes:
 Both notifications are gated on a client capability, so HAPI advertises
 `clientCapabilities._meta["minimax-code/extensions"]` when it initializes the
 mcode backend.
+
+### Apps and connectors
+
+MiniMax Code connects to other applications through a broker that the install
+runs. HAPI asks the agent for the apps it has connected and shows them in the
+session status panel, so a session that uses an app says which one.
+
+The scope depends on where the session runs. A session whose agent is alive is
+asked for the apps of that agent, because the agent knows the broker it
+launched and the broker is named after the agent's own process. A session
+whose agent is gone has no scope of its own, so the machine answers instead:
+the apps belong to the installation, not to the session.
+
+The catalogue is read through the install's `mcode-tools` command, so it is
+the agent that decides which apps exist - HAPI does not keep a list of its
+own.
+
+### Background tasks
+
+MiniMax Code runs work in the background, and the session status panel shows
+how many of those are running. The count comes from the agent's own record of
+its background work.
+
+The agent reports a finished background task into the session that owns it,
+with a turn of the agent's own, and that turn is not streamed to the client. A
+client that only watched the tool stream would therefore keep showing a task
+that had ended as one that still runs. The agent's record settles it.
+
+### Usage and quota
+
+The status bar shows the usage of the MiniMax account the session spends. The
+window belongs to the account of the installation, not to a session, so it is
+the same for every session that runs on that account. The account is read
+through the install's own credential, so HAPI never stores one.
+
+The reading is separate from the session: a session that is not running still
+knows what the account has left.
+
+### Delivered files
+
+When the agent hands over a file, it names it in a `<deliver-assets>` block in
+its answer. HAPI turns that block into a file citation in the chat, so the
+file is a link into the workspace instead of a path the reader has to copy.
+The path is checked against the workspace before it is rendered.
+
+### Steering
+
+A message that is queued while the agent is working can be sent into the
+running turn instead of waiting for it to end. HAPI offers the action only
+when the agent advertises the steer extension, so a build without it shows no
+button rather than a dead one.
+
+The message has to belong to the turn it is steered into: a message that was
+queued under a different permission mode is refused, because the mode
+decided what the agent was allowed to do and the message would be answered
+under rules that were not picked.
 
 ### Mode and config options
 
