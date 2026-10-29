@@ -62,6 +62,9 @@ function getAgentConfigDir(flavor?: string): string {
             // with the rest of the mcode paths, so the skills and the runtime
             // read the same directory.
             return getMcodeDataDir();
+        case 'dsh':
+            // DSH resolves its harness home from $DSH_HOME, then ~/.dsh.
+            return process.env.DSH_HOME || join(getHomeDirectory(), '.dsh');
         default:
             return join(getHomeDirectory(), `.${normalizedFlavor}`);
     }
@@ -84,6 +87,8 @@ function getUserSkillsRoots(flavor?: string): string[] {
             roots.push(join(getAgentConfigDir(flavor), 'skills'));
             break;
         case 'mcode':
+        case 'dsh':
+            // Mirrors DSH's own skill-filesystem provider: $DSH_HOME/skills.
             roots.push(join(getAgentConfigDir(flavor), 'skills'));
             break;
     }
@@ -115,6 +120,10 @@ function getProjectSkillsRoots(directory: string, flavor?: string): string[] {
             // root its runtime also reads.
             roots.push(join(directory, '.minimax', 'skills'));
             roots.push(join(directory, '.claude', 'skills'));
+            break;
+        case 'dsh':
+            // Mirrors DSH's own skill-filesystem provider: <project>/.dsh/skills.
+            roots.push(join(directory, '.dsh', 'skills'));
             break;
     }
     return roots;

@@ -23,12 +23,14 @@ import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createStorageRoutes } from './routes/storage'
 import { createUsageRoutes } from './routes/usage'
+import { createActivityRoutes } from './routes/activity'
 import { createGitRoutes } from './routes/git'
 import { createWorkspaceUploadRoutes } from './routes/workspaceUploads'
 import { createWorkspaceFileRoutes } from './routes/workspaceFiles'
 import { createCliRoutes } from './routes/cli'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
 import { createPiSessionRoutes } from './routes/piSessions'
+import { createOpencodeSessionRoutes } from './routes/opencodeSessions'
 import { createPushRoutes } from './routes/push'
 import { createDevicesRoutes } from './routes/devices'
 import { createVoiceRoutes } from './routes/voice'
@@ -295,6 +297,7 @@ function createWebApp(options: {
     app.route('/api', createStorageRoutes(configuration.dbPath))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
     app.route('/api', createUsageRoutes(options.store))
+    app.route('/api', createActivityRoutes(options.store))
     app.route('/api', createGitRoutes(options.getSyncEngine))
     app.route('/api', createWorkspaceUploadRoutes(options.getSyncEngine))
     app.route('/api', createWorkspaceFileRoutes(options.getSyncEngine))
@@ -304,6 +307,10 @@ function createWebApp(options: {
         getSyncEngine: options.getSyncEngine
     }))
     app.route('/api', createPiSessionRoutes({
+        store: options.store,
+        getSyncEngine: options.getSyncEngine
+    }))
+    app.route('/api', createOpencodeSessionRoutes({
         store: options.store,
         getSyncEngine: options.getSyncEngine
     }))

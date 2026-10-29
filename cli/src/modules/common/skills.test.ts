@@ -22,6 +22,7 @@ describe('listSkills', () => {
     const originalCodexHome = process.env.CODEX_HOME
     const originalMinimaxDataDir = process.env.MINIMAX_DATA_DIR
     const originalMavisDataDir = process.env.MAVIS_DATA_DIR
+    const originalDshHome = process.env.DSH_HOME
     let sandboxDir: string
     let homeDir: string
 
@@ -33,6 +34,7 @@ describe('listSkills', () => {
         delete process.env.CODEX_HOME
         delete process.env.MINIMAX_DATA_DIR
         delete process.env.MAVIS_DATA_DIR
+        delete process.env.DSH_HOME
         await mkdir(homeDir, { recursive: true })
     })
 
@@ -65,6 +67,12 @@ describe('listSkills', () => {
             delete process.env.MAVIS_DATA_DIR
         } else {
             process.env.MAVIS_DATA_DIR = originalMavisDataDir
+        }
+
+        if (originalDshHome === undefined) {
+            delete process.env.DSH_HOME
+        } else {
+            process.env.DSH_HOME = originalDshHome
         }
 
         await rm(sandboxDir, { recursive: true, force: true })
@@ -166,6 +174,31 @@ describe('listSkills', () => {
             'mcode-user',
             'shared'
         ])
+    })
+
+    it('lists DSH user and project skills alongside shared .agents skills', async () => {
+        const repoRoot = join(sandboxDir, 'dsh-repo')
+        await mkdir(join(repoRoot, '.git'), { recursive: true })
+        await writeSkill(join(homeDir, '.dsh', 'skills', 'dsh-user'), 'dsh-user', 'DSH user skill')
+        await writeSkill(join(homeDir, '.agents', 'skills', 'shared'), 'shared', 'Shared skill')
+        await writeSkill(join(repoRoot, '.dsh', 'skills', 'dsh-project'), 'dsh-project', 'DSH project skill')
+
+        const skills = await listSkills(repoRoot, { flavor: 'dsh' })
+
+        expect(skills.map((skill) => skill.name)).toEqual(['dsh-project', 'dsh-user', 'shared'])
+    })
+
+    it('uses a configured DSH_HOME for DSH user skills', async () => {
+        const dshHome = join(sandboxDir, 'custom-dsh')
+        process.env.DSH_HOME = dshHome
+
+        await writeSkill(join(homeDir, '.agents', 'skills', 'shared'), 'shared', 'Shared skill')
+        await writeSkill(join(homeDir, '.dsh', 'skills', 'default-dsh'), 'default-dsh', 'Default DSH skill')
+        await writeSkill(join(dshHome, 'skills', 'custom-dsh'), 'custom-dsh', 'Custom DSH skill')
+
+        const skills = await listSkills(undefined, { flavor: 'dsh' })
+
+        expect(skills.map((skill) => skill.name)).toEqual(['custom-dsh', 'shared'])
     })
 
     it('scopes user skills to the requested flavor', async () => {
@@ -412,6 +445,16 @@ describe('listSkills', () => {
             name: 'user-only',
             description: 'User skill',
             body: '# user-only'
+        })
+    })
+
+    it('resolves a DSH user skill from the DSH harness home', async () => {
+        await writeSkill(join(homeDir, '.dsh', 'skills', 'dsh-user'), 'dsh-user', 'DSH user skill')
+
+        await expect(resolveSkill('dsh-user', undefined, { flavor: 'dsh' })).resolves.toEqual({
+            name: 'dsh-user',
+            description: 'DSH user skill',
+            body: '# dsh-user'
         })
     })
 

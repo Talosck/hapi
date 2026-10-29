@@ -33,6 +33,13 @@ export const RPC_METHODS = {
     AbortWorkspaceUpload: 'abortWorkspaceUpload',
     /** Delete a file or directory from the session working directory. */
     DeleteWorkspaceFile: 'deleteWorkspaceFile',
+    WorkspaceReadFile: 'workspace-read-file',
+    WorkspaceListDirectory: 'workspace-list-directory',
+    WorkspaceStatFiles: 'workspace-stat-files',
+    WorkspaceGitStatus: 'workspace-git-status',
+    WorkspaceGitDiffNumstat: 'workspace-git-diff-numstat',
+    WorkspaceGitDiffFile: 'workspace-git-diff-file',
+    WorkspaceRipgrep: 'workspace-ripgrep',
     Ripgrep: 'ripgrep',
     Difftastic: 'difftastic',
     Bash: 'bash',
@@ -47,6 +54,7 @@ export const RPC_METHODS = {
     ListPiSessions: 'listPiSessions',
     ListOpencodeModels: 'listOpencodeModels',
     ListOpencodeModelVariants: 'listOpencodeModelVariants',
+    ListOpencodeSessions: 'listOpencodeSessions',
     ListOpencodeModelsForCwd: 'listOpencodeModelsForCwd',
     ListGrokModelsForCwd: 'listGrokModelsForCwd',
     ListGrokModels: 'listGrokModels',
@@ -80,8 +88,11 @@ export const RPC_METHODS = {
     McodeClearGoal: 'mcode-clear-goal',
     /** Stop MiniMax Code's delegated sessions (subagents). */
     McodeStopDelegation: 'mcode-stop-delegation',
+    ListDshModels: 'listDshModels',
+    ListDshModelsForMachine: 'listDshModelsForMachine',
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
     ListAgyModels: 'listAgyModels',
+    ListClaudeModels: 'listClaudeModels',
     /** Deliver one queued message into the active Pi turn (native steer). */
     SteerQueuedMessage: 'steer-queued-message',
     ForkConversation: 'fork-conversation',

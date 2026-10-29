@@ -11,6 +11,8 @@
  * environment and fails with `window is not defined`, which says what to do.
  */
 export const DOM_TEST_FILES = [
+    'src/api/authProxy.test.ts',
+    'src/api/client.test.ts',
     'src/components/AssistantChat/RichComposerInput.segments.test.ts',
     'src/components/AssistantChat/ShareTurnDialog.test.ts',
     'src/components/NewSession/newSessionFormDraft.test.ts',
@@ -49,13 +51,14 @@ export const DOM_TEST_FILES = [
     'src/hooks/useSessionListStatusMode.test.ts',
     'src/hooks/useSessionPreviewLimit.test.ts',
     'src/hooks/useTerminalFontSize.test.ts',
-    'src/hooks/useTerminalToolDisplayMode.test.ts',
+    'src/hooks/useToolCardDisplayMode.test.ts',
     'src/hooks/useTheme.test.ts',
     'src/hooks/useThemeColors.test.ts',
     'src/hooks/useUnseenBlockCount.test.ts',
     'src/hooks/useViewportHeight.test.ts',
     'src/hooks/useVisibilityReporter.test.ts',
     'src/lib/ask-user-question-drafts.test.ts',
+    'src/lib/attachmentRemoval.test.ts',
     'src/lib/attachmentAdapter.test.ts',
     'src/lib/clipboard.test.ts',
     'src/lib/composer-drafts.test.ts',
@@ -75,6 +78,7 @@ export const DOM_TEST_FILES = [
     'src/lib/sessionLastSeen.test.ts',
     'src/lib/sharePendingState.test.ts',
     'src/lib/spaRedirect.test.ts',
+    'src/lib/terminal-composer.test.ts',
     'src/lib/use-fue.test.ts',
     'src/lib/use-scratchlist.test.ts',
     'src/routes/sessions/followSupersedingSession.test.ts',

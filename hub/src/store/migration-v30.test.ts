@@ -13,9 +13,9 @@ afterEach(() => {
     }
 })
 
-describe('schema migration v26 to v27', () => {
+describe('schema migration v29 to v30', () => {
     it('adds the stream key column and its index', () => {
-        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v26-'))
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v29-'))
         tempDirs.push(dir)
         const dbPath = join(dir, 'hapi.db')
 
@@ -23,7 +23,7 @@ describe('schema migration v26 to v27', () => {
         const legacy = new Database(dbPath)
         legacy.exec(`
             DROP INDEX idx_messages_stream_key;
-            PRAGMA user_version = 26;
+            PRAGMA user_version = 29;
         `)
         legacy.close()
 
@@ -39,14 +39,14 @@ describe('schema migration v26 to v27', () => {
               AND stream_key = ?
         `).all('session-id', 'reasoning:stream-1') as Array<{ detail: string }>
 
-        expect(version.user_version).toBe(27)
+        expect(version.user_version).toBe(30)
         expect(columns).toContain('stream_key')
         expect(plan.some((row) => row.detail.includes('idx_messages_stream_key'))).toBe(true)
         migrated.close()
     })
 
     it('keeps existing messages when it runs', () => {
-        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v26-messages-'))
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v29-messages-'))
         tempDirs.push(dir)
         const dbPath = join(dir, 'hapi.db')
 
@@ -54,7 +54,7 @@ describe('schema migration v26 to v27', () => {
         const legacy = new Database(dbPath)
         legacy.exec(`
             DROP INDEX idx_messages_stream_key;
-            PRAGMA user_version = 26;
+            PRAGMA user_version = 29;
         `)
         legacy.close()
 
@@ -72,18 +72,18 @@ describe('schema migration v26 to v27', () => {
         const rows = internalDb.prepare('SELECT id, stream_key FROM messages').all() as Array<{ id: string; stream_key: string | null }>
         migrated.close()
 
-        expect(migratedVersion.user_version).toBe(27)
+        expect(migratedVersion.user_version).toBe(30)
         expect(rows).toEqual([{ id: 'message-1', stream_key: null }])
     })
 
     it('leaves the database integrity intact', () => {
-        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v26-integrity-'))
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v29-integrity-'))
         tempDirs.push(dir)
         const dbPath = join(dir, 'hapi.db')
 
         new Store(dbPath).close()
         const legacy = new Database(dbPath)
-        legacy.exec('PRAGMA user_version = 26')
+        legacy.exec('PRAGMA user_version = 29')
         legacy.close()
 
         const migrated = new Store(dbPath)

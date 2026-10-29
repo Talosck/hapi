@@ -277,6 +277,8 @@ export class ApiSessionClient extends EventEmitter {
     private backfillInFlight: Promise<void> | null = null
     private needsBackfill = false
     private hasConnectedOnce = false
+    // Replayed on (re)connect: a volatile heartbeat sent while disconnected is dropped (#2053).
+    private latestKeepAlive: Omit<Parameters<ClientToServerEvents['session-alive']>[0], 'sid' | 'time'> | null = null
     readonly rpcHandlerManager: RpcHandlerManager
     private readonly terminalManager: TerminalManager
     private agentTerminalResize: ((cols: number, rows: number) => void) | null = null
@@ -367,7 +369,7 @@ export class ApiSessionClient extends EventEmitter {
             // no live update-session). On reconnect, reconcile metadata before
             // message backfill so hub-archived can stop reconnect immortality (#1910).
             const afterMeta = isReconnect
-                ? this.reconcileSessionMetadata()
+                ? this.refreshMetadata()
                 : Promise.resolve()
             void afterMeta.finally(() => {
                 void this.backfillIfNeeded()
@@ -377,7 +379,8 @@ export class ApiSessionClient extends EventEmitter {
             this.socket.emit('session-alive', {
                 sid: this.sessionId,
                 time: Date.now(),
-                thinking: false
+                thinking: false,
+                ...this.latestKeepAlive
             })
         })
 
@@ -892,8 +895,8 @@ export class ApiSessionClient extends EventEmitter {
         this.emit('hub-archived')
     }
 
-    /** Fetch current hub metadata after reconnect; apply hub-archived if set. */
-    private async reconcileSessionMetadata(): Promise<void> {
+    /** Refresh Hub-owned metadata before an explicit tool action or after reconnect. */
+    async refreshMetadata(): Promise<boolean> {
         try {
             const response = await axios.get(
                 `${configuration.apiUrl}/cli/sessions/${encodeURIComponent(this.sessionId)}`,
@@ -906,10 +909,15 @@ export class ApiSessionClient extends EventEmitter {
                 }
             )
             const session = response.data?.session
-            if (!session || typeof session.metadataVersion !== 'number') return
-            this.applyRemoteMetadata(session.metadataVersion, session.metadata)
+            if (!session || typeof session.metadataVersion !== 'number') return false
+            if (session.metadata !== null && !MetadataSchema.safeParse(session.metadata).success) return false
+            if (session.metadataVersion >= this.metadataVersion) {
+                this.applyRemoteMetadata(session.metadataVersion, session.metadata)
+            }
+            return true
         } catch (error) {
             logger.debug('[API] Session metadata reconcile failed', error)
+            return false
         }
     }
 
@@ -988,18 +996,18 @@ export class ApiSessionClient extends EventEmitter {
 
     sendClaudeSessionMessage(body: RawJSONLines): void {
         let content: MessageContent
-        // Origin timestamp (epoch ms) from the transcript entry's own `timestamp`,
-        // forwarded only for agent messages so the hub can stamp created_at/invoked_at
-        // with the jsonl entry's own time instead of hub-receive time (fixes chat
-        // order drifting from the PTY transcript during bursts/resume — see
-        // transcript ordering contract). The external-user-echo path is left
-        // unchanged: it has no localId either, but its existing arrival-time
-        // stamping already reflects when it was actually forwarded/consumed.
+        // Preserve transcript time for agent output and genuine local input.
+        // Replaying a historical user row must not promote the session as if
+        // the user just sent a new prompt. Hub prompt echoes are not input.
         let createdAt: number | undefined
 
         if (isExternalUserMessage(body)) {
             const text = extractRawUserTextContent(body.message.content) ?? ''
             const isTranscriptEcho = this.consumePendingHubPromptEcho(text)
+            if (!isTranscriptEcho && body.timestamp) {
+                const parsed = Date.parse(body.timestamp)
+                if (Number.isFinite(parsed)) createdAt = parsed
+            }
             content = {
                 role: 'user',
                 content: {
@@ -1362,15 +1370,14 @@ export class ApiSessionClient extends EventEmitter {
             copilotAgentMode?: import('@hapi/protocol').CopilotAgentMode
         }
     ): void {
-        if (this.state !== 'active') {
+        this.latestKeepAlive = { thinking, mode, ...(runtime ?? {}) }
+        if (this.state !== 'active' || !this.socket.connected) {
             return
         }
         this.socket.volatile.emit('session-alive', {
             sid: this.sessionId,
             time: Date.now(),
-            thinking,
-            mode,
-            ...(runtime ?? {})
+            ...this.latestKeepAlive
         })
     }
 

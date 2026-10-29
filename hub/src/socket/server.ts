@@ -10,6 +10,7 @@ import { registerCliHandlers } from './handlers/cli'
 import { registerTerminalHandlers } from './handlers/terminal'
 import { RpcRegistry } from './rpcRegistry'
 import { SOCKET_MAX_HTTP_BUFFER_SIZE } from './socketLimits'
+import type { BackgroundTask } from '@hapi/protocol/types'
 import type { SyncEvent } from '../sync/syncEngine'
 import { TerminalRegistry } from './terminalRegistry'
 import { clearUserTerminalBuffer } from './userTerminalBuffer'
@@ -44,6 +45,7 @@ export type SocketServerDeps = {
     onMachineAlive?: (payload: { machineId: string; time: number; health?: unknown }) => void
     /** Sets the absolute number of background tasks the session has going. */
     onBackgroundTaskCount?: (sessionId: string, running: number) => void
+    onBackgroundTasks?: (sessionId: string, tasks: BackgroundTask[]) => void
     onSessionActivity?: (sessionId: string, updatedAt: number) => void
     onAgentProgress?: (sessionId: string, at: number) => void
     onSweepImmediateQueued?: (sessionId: string, now: number) => void
@@ -133,6 +135,7 @@ export function createSocketServer(deps: SocketServerDeps): {
         onMachineAlive: deps.onMachineAlive,
         onWebappEvent: deps.onWebappEvent,
         onBackgroundTaskCount: deps.onBackgroundTaskCount,
+        onBackgroundTasks: deps.onBackgroundTasks,
         onSessionActivity: deps.onSessionActivity,
         onAgentProgress: deps.onAgentProgress,
         onSweepImmediateQueued: deps.onSweepImmediateQueued,

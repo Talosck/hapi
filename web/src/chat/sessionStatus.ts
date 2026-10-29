@@ -1,6 +1,6 @@
 import { isObject } from '@hapi/protocol'
 import { BackgroundTaskRecordSchema, SubagentSnapshotMemberSchema } from '@hapi/protocol/schemas'
-import type { SubagentSnapshotMember, ThreadGoal, TodoItem } from '@/types/api'
+import type { BackgroundTask, SubagentSnapshotMember, ThreadGoal, TodoItem } from '@/types/api'
 import type { ChatBlock, NormalizedMessage, ToolCallBlock } from '@/chat/types'
 import { isSubagentToolName } from '@/chat/subagentTool'
 import { getCodexAgentActivity, getCodexAgentSummary } from '@/components/ToolCard/codexAgents'
@@ -21,7 +21,7 @@ export type SessionStatusTerminal = {
     id: string
     command: string
     cwd: string | null
-    startedAt: number
+    startedAt: number | null
 }
 
 export type SessionStatusData = {
@@ -29,8 +29,63 @@ export type SessionStatusData = {
     tasks: TodoItem[]
     subagents: SessionStatusSubagent[]
     terminals: SessionStatusTerminal[]
+    /**
+     * Running background tasks the session reported but whose command the
+     * panel cannot name, because the transcript window no longer holds the
+     * tool call that started them.
+     */
     undiscoveredTerminalCount: number
+    /** Commands that may or may not still be running, oldest first. */
     possibleTerminalCommands: string[]
+}
+
+function matchesText(value: unknown, pattern: RegExp): boolean {
+    if (typeof value === 'string') return pattern.test(value)
+    const values = Array.isArray(value) ? value : isObject(value) ? Object.values(value) : []
+    return values.some((item) => matchesText(item, pattern))
+}
+
+// Matches "running in background with ID: <id>" and "moved to the background (ID: <id>)".
+function backgroundLaunchPattern(taskId: string): RegExp {
+    const id = taskId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`background[^\\n]*\\bID: ${id}(?![\\w-])`)
+}
+
+function commandFromInput(input: unknown): string | null {
+    const command = getInputStringAny(input, ['command', 'cmd'])
+    if (command) return command
+    if (!isObject(input) || !Array.isArray(input.command)) return null
+    const parts = input.command.filter((part): part is string => typeof part === 'string')
+    return parts.length > 0 ? parts.join(' ') : null
+}
+
+function collectToolBlocks(blocks: readonly ChatBlock[]): ToolCallBlock[] {
+    const tools: ToolCallBlock[] = []
+    for (const block of blocks) {
+        if (block.kind !== 'tool-call') continue
+        tools.push(block, ...collectToolBlocks(block.children))
+    }
+    return tools
+}
+
+function buildBackgroundTerminals(
+    tools: readonly ToolCallBlock[],
+    tasks: readonly BackgroundTask[]
+): SessionStatusTerminal[] {
+    return tasks.map((task) => {
+        // Claude's snapshot carries the Bash description, not the command;
+        // the tool result that started the task names its exact ID.
+        const launch = task.type === 'local_bash' && task.id ? backgroundLaunchPattern(task.id) : null
+        const block = launch
+            ? tools.find((tool) => tool.tool.name === 'Bash' && matchesText(tool.tool.result, launch))
+            : undefined
+        return {
+            id: task.id,
+            command: (block && commandFromInput(block.tool.input)) || task.description || task.type,
+            cwd: block ? getInputStringAny(block.tool.input, ['cwd', 'workdir', 'path']) : null,
+            startedAt: block ? block.tool.startedAt ?? block.createdAt : null
+        }
+    })
 }
 
 const BACKGROUND_START_RE = /Command running in background with ID:\s*([^\s<]+)/
@@ -46,14 +101,6 @@ function findBackgroundTaskId(value: unknown): string | null {
     return null
 }
 
-function commandFromInput(input: unknown): string | null {
-    const command = getInputStringAny(input, ['command', 'cmd'])
-    if (command) return command
-    if (!isObject(input) || !Array.isArray(input.command)) return null
-    const parts = input.command.filter((part): part is string => typeof part === 'string')
-    return parts.length > 0 ? parts.join(' ') : null
-}
-
 function terminalFromBlock(block: ToolCallBlock): SessionStatusTerminal | null {
     if (block.tool.name !== 'Bash') return null
     const taskId = findBackgroundTaskId(block.tool.result)
@@ -65,15 +112,6 @@ function terminalFromBlock(block: ToolCallBlock): SessionStatusTerminal | null {
         cwd: getInputStringAny(block.tool.input, ['cwd', 'workdir', 'path']),
         startedAt: block.tool.startedAt ?? block.createdAt
     }
-}
-
-function collectToolBlocks(blocks: readonly ChatBlock[]): ToolCallBlock[] {
-    const tools: ToolCallBlock[] = []
-    for (const block of blocks) {
-        if (block.kind !== 'tool-call') continue
-        tools.push(block, ...collectToolBlocks(block.children))
-    }
-    return tools
 }
 
 function backgroundTaskCompletions(messages: readonly NormalizedMessage[]): {
@@ -98,7 +136,15 @@ function backgroundTaskCompletions(messages: readonly NormalizedMessage[]): {
     return { ids, latestUnknownAt }
 }
 
-function buildBackgroundTerminals(
+/**
+ * Reads the background work out of the transcript.
+ *
+ * This is the fallback for a session that reports how many tasks it runs but
+ * not which ones: the tool calls that started them name the command, and the
+ * completion notices say which have ended. A completion whose id the window no
+ * longer holds leaves the older tasks uncertain rather than finished.
+ */
+function detectBackgroundTerminals(
     tools: readonly ToolCallBlock[],
     messages: readonly NormalizedMessage[]
 ): { confirmed: SessionStatusTerminal[]; uncertain: SessionStatusTerminal[] } {
@@ -110,8 +156,8 @@ function buildBackgroundTerminals(
     const latestUnknownAt = completions.latestUnknownAt
     if (latestUnknownAt === null) return { confirmed: remaining, uncertain: [] }
     return {
-        confirmed: remaining.filter((terminal) => terminal.startedAt > latestUnknownAt),
-        uncertain: remaining.filter((terminal) => terminal.startedAt <= latestUnknownAt)
+        confirmed: remaining.filter((terminal) => (terminal.startedAt ?? 0) > latestUnknownAt),
+        uncertain: remaining.filter((terminal) => (terminal.startedAt ?? 0) <= latestUnknownAt)
     }
 }
 
@@ -336,7 +382,7 @@ export function buildSessionStatusData(args: {
     goal: ThreadGoal | null | undefined
     tasks: readonly TodoItem[] | null | undefined
     blocks: readonly ChatBlock[]
-    messages: readonly NormalizedMessage[]
+    messages?: readonly NormalizedMessage[]
     /**
      * The messages the delegation snapshot is read from.
      *
@@ -344,6 +390,13 @@ export function buildSessionStatusData(args: {
      * visible window loses it as soon as the user pages into the history.
      */
     snapshotMessages?: readonly NormalizedMessage[]
+    /**
+     * The background work the session reported, as its own task list.
+     *
+     * A session that reports the list knows which tasks run and which command
+     * runs them, so the panel shows that instead of guessing.
+     */
+    backgroundTasks?: readonly BackgroundTask[]
     backgroundTaskCount?: number
     /**
      * Keep the panel rendered even when the session has no status to show.
@@ -355,18 +408,25 @@ export function buildSessionStatusData(args: {
     alwaysVisible?: boolean
 }): SessionStatusData | null {
     const tools = collectToolBlocks(args.blocks)
-    const detectedTerminals = buildBackgroundTerminals(tools, args.messages)
-    // A session that publishes its background work knows what it is running
-    // and which command runs it, so the panel shows that instead of guessing
-    // out of the transcript.
-    const reportedBackgroundTasks = latestBackgroundTaskSnapshot(args.snapshotMessages ?? args.messages)
-    const terminals = reportedBackgroundTasks
+    const messages = args.messages ?? []
+    const detectedTerminals = detectBackgroundTerminals(tools, messages)
+    // The reported task list is the truth: it names the command and its cwd.
+    // An empty list is a report too — the session says nothing is running.
+    const reportedTerminals = args.backgroundTasks
+        ? buildBackgroundTerminals(tools, args.backgroundTasks)
+        : null
+    // MiniMax Code publishes the whole list of the background work the session
+    // has going whenever it changes, so the panel never has to guess a command
+    // out of the transcript or count on a counter that can drift.
+    const snapshotTerminals = latestBackgroundTaskSnapshot(args.snapshotMessages ?? messages)
+    const publishedTerminals = reportedTerminals ?? snapshotTerminals
+    const terminals = publishedTerminals
         ?? (args.backgroundTaskCount === undefined
             ? [...detectedTerminals.confirmed, ...detectedTerminals.uncertain]
             : args.backgroundTaskCount > 0
                 ? detectedTerminals.confirmed.slice(-args.backgroundTaskCount)
                 : [])
-    const undiscoveredTerminalCount = reportedBackgroundTasks
+    const undiscoveredTerminalCount = publishedTerminals !== null
         ? 0
         : args.backgroundTaskCount === undefined
             ? 0
@@ -374,7 +434,7 @@ export function buildSessionStatusData(args: {
     const possibleTerminalCommands = undiscoveredTerminalCount > 0
         ? detectedTerminals.uncertain.map((terminal) => terminal.command)
         : []
-    const snapshot = latestSubagentSnapshot(args.snapshotMessages ?? args.messages)
+    const snapshot = latestSubagentSnapshot(args.snapshotMessages ?? messages)
     const toolSubagents = tools
         .map(subagentFromBlock)
         .filter((subagent): subagent is SessionStatusSubagent => subagent !== null)

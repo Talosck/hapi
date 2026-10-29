@@ -29,5 +29,5 @@ export function permissionModeLabelForAgent(args: {
     // but it holds the english text - the native clients print that, and the
     // web translates it. An agent that names its modes therefore goes through
     // the key above, and the rest keep the shared wording as it is.
-    return getPermissionModeLabel(args.mode)
+    return getPermissionModeLabel(args.mode, args.agent)
 }
